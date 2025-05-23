@@ -85,3 +85,43 @@ Why do we override equals() and hashCode() ?
 It's a **thread-safe variant** of `ArrayList`. On every write (add, remove), it creates a **new copy** of the underlying array.  
 
 Ideal for **read-heavy** scenarios like caching.
+
+Multimap ?
+Is a data structure that maps keys to multiple values. Unlike a standard Map<K,V> where each key maps to a single value, a Multimap<K,V> can assossiate a key with collection of values.
+
+With a **Multimap**, both `"apple"` and `"banana"` can be stored for the same key:
+
+It is from the google gauva..
+
+java
+
+
+```
+Multimap<String, String> multimap = ArrayListMultimap.create();
+multimap.put("fruit", "apple");
+multimap.put("fruit", "banana");
+System.out.println(multimap.get("fruit")); // [apple, banana]
+
+```
+Interview Ques
+
+How can we implement two interface in the class having the default method?
+
+In Java, **a class can implement multiple interfaces**, even if **both interfaces have `default` methods**—but **you must resolve any conflict** if the same method signature exists in more than one interface
+
+--> You have to resolve the conflicting method which to implement or else you will get the comilation error..
+
+--> To prevent it we must override the method like 
+
+![[Pasted image 20250523100008.png]]
+
+### 🔎 Key Rules
+
+1. If **only one interface** has the `default` method → no conflict.
+    
+2. If **two interfaces** have the same `default` method → **you must override** it.(or comilatiion error)
+    
+3. You can use `InterfaceName.super.method()` to call the desired default version.
+   
+   
+   It is kind of diamond problem too...

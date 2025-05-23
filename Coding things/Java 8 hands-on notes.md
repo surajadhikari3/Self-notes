@@ -81,7 +81,13 @@ String result = names.stream()
 
 System.out.println(result); // [Alice, Bob, Charlie]  
   
-  
+For sorting the map(Specially in the reverse order) there is two approach 
+
+.sorted(Map.Entry.<Integer, Long>comparingByValue().reversed())
+
+   .sorted(Comparator.comparing((Map.Entry<Integer, Long> x) -> x.getValue()).reversed())  
+
+
 Concepts ….  
 
 Stream once consumed can not be reused so we use the supplier which is the factory to create the Stream  
@@ -104,3 +110,4 @@ Also need to know the basic about regex..
   
 Look this video for the common use case  
 [https://www.youtube.com/watch?v=jky2GNyODFs&list=PL63BDXJjNfTElajNCfg_2u_pbe1Xi7uTy&index=48&ab_channel=code_period](https://www.youtube.com/watch?v=jky2GNyODFs&list=PL63BDXJjNfTElajNCfg_2u_pbe1Xi7uTy&index=48&ab_channel=code_period)
+

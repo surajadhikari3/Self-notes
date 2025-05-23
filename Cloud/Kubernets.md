@@ -234,3 +234,39 @@ Manage **Pods** and ensure the desired number of replicas are running.
 Best practises:
 
 It is recommended to run the one container per pods. If you have dependency or have some other cross cutting concerns like logging then you can run the multiple containers per pods which is the sideCar... 
+
+
+Sir notes 
+
+namespace is like folder --> Kubernetes
+
+similar is --> Openshift (oc is the cmd line of openshift like kubectl)
+
+
+check the 
+
+nc cmd too --> nc -zv localhost 8080
+
+ 
+ kubectl describe pod <pod-name> --> it show the conatiner details 
+ 
+ 🌐 What is a `NodePort` in Kubernetes?
+ 
+ Nodeport is a type of service that exposes our application outside the cluster by opening a specific port on every node in k8s clusters.
+
+🧱 How `NodePort` Works
+
+[Postman or Browser] → http://<NodeIP>:<NodePort> → Node → Kubernetes Service → Pod
+
+ 
+ Kubernetes:
+
+- Opens a port (e.g., `30080`) on all nodes.
+    
+- Maps it to your app’s internal `port` (e.g., `8080`).
+    
+- Forwards traffic to the Pod behind the service.
+  
+ 🚫 NodePort vs ClusterIP vs LoadBalancer
+
+  

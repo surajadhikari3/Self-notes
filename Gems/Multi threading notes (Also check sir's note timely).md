@@ -29,6 +29,7 @@ Both wait() and join() are used in Java for thread synchronization, but they ser
 **3. Lock Handling**
 
 - **wait()** must be called inside a synchronized block or method, as it requires the owning object's monitor lock.
+  
 - **join()** does not require a synchronized block since it simply waits for another thread to die.
 
 **4. How They Work**
@@ -45,15 +46,15 @@ Both wait() and join() are used in Java for thread synchronization, but they ser
   
 Key Takeaways**
 
-|                        |                               |                                           |
-| ---------------------- | ----------------------------- | ----------------------------------------- |
-| **Feature**            | **wait()**                    | **join()**                                |
-| Purpose                | Thread waits for notification | Thread waits for another thread to finish |
-| Belongs To             | Object class                  | Thread class                              |
-| Requires synchronized? | Yes                           | No                                        |
-| Releases Lock?         | Yes                           | No                                        |
-| Wakes Up By            | notify() / notifyAll()        | When the thread finishes execution        |
-|                        |                               |                                           |
+|                        |                                                       |                                           |
+| ---------------------- | ----------------------------------------------------- | ----------------------------------------- |
+| **Feature**            | **wait()**                                            | **join()**                                |
+| Purpose                | Releases the lock and waits for notify or notifyAll() | Thread waits for another thread to finish |
+| Belongs To             | Object class                                          | Thread class                              |
+| Requires synchronized? | Yes                                                   | No                                        |
+| Releases Lock?         | Yes                                                   | No                                        |
+| Wakes Up By            | notify() / notifyAll()                                | When the thread finishes execution        |
+|                        |                                                       |                                           |
 
 
 ---
@@ -397,7 +398,7 @@ Mutex (Mutual Exclusion), Semaphore, Cyclic barrier, lock, latch
 
 Lock ReentrantLock
   fairness --> Enable by passing true in the constructor
-  new ReentrantLock(true); It executes the thread priority in the FIFO 
+  new ReentrantLock(true); It executes the thread priority in the FIFO (Compare and swap)
   lock.lock()
   lock.unlock()
   lock.trylock() --> return false if it is locked. It is non blocking allows to check whether the resource is being locked by other thread.

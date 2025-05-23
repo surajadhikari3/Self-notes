@@ -1,4 +1,6 @@
 
+Array Rotation Concepts
+
 While rotating --> Most of the time the array is rotated to the right by k times..
 
 While rotating think it is like clock after certain rotation it started to repeat like 12 hrs.
@@ -41,3 +43,8 @@ public void rightShift(int[] nums, int start, int end){
 }
 ```
 
+Product of array except itself 
+
+![[Pasted image 20250523110006.png]]
+
+Here since we cannot do the division so we calculate the prefix multiplication and postfix multiplication --> Rember there is pattern called prefix sum similar manner then we multiply prefix and sufix value for getting the multiplication...........
