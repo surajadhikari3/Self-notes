@@ -436,5 +436,47 @@ public class NotificationService {
 ```
 Use this when you need full control, like changing access logs, connectors, or enabling compression.
 
+```
 
-		
+
+How to do the validation in the spring boot applications?
+
+Using @Valid and @Validated annotations
+
+@Valid --> Is simple and allows the nested validations
+
+@Validated -> is the spring validation allows the group wise and method level validations.
+
+Valid Vs Validated..
+
+| Feature                  | `@Valid`(javax)       | `@Validated` (Spring)               |
+| ------------------------ | --------------------- | ----------------------------------- |
+| Standard Java validation | ✅                     | ✅                                   |
+| Nested object validation | ✅ (`@Valid` on field) | ✅                                   |
+| Validation groups        | ❌                     | ✅ (`@Validated(Group.class)`)       |
+| Method-level validation  | ❌                     | ✅ (used with `@Validated` on class) |
+| Config properties        | ❌                     | ✅                                   |
+Example
+
+public class UserDTO {
+
+    @NotBlank(message = "Username is required", groups = Create.class)
+    private String username;
+
+    @Email(message = "Email must be valid")
+    private String email;
+
+    @Min(value = 18, message = "Must be 18 or older", groups =     Create.class)
+    private int age;
+
+    @Valid // triggers validation on nested AddressDTO
+    private AddressDTO address;
+
+    public interface Create {}  // Validation group
+
+    // Getters and setters
+}
+
+![[Pasted image 20250525171357.png]]
+
+![[Pasted image 20250525171457.png]]
