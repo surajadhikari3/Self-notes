@@ -84,3 +84,74 @@ Depending on the problem, the stack stores either:
 | Largest Rectangle in Histogram | Monotonic Increasing  | Heights |
 | Trapping Rain Water            | Two-pointers or Stack | Heights |
 | Stock Span                     | Monotonic Decreasing  | Prices  |
+
+Car Fleet problems..
+
+Concept is that we calculate the time and if the time is same or the behind car time is same it will meet the front car and form the same fleet.
+
+So we sort the position in descending order.Since the position is attached with the speed the speed also has to be sorted preserving the order with the position so we use 2d array.
+
+`int[][] cars = new int[position.length][2];`  
+  
+```
+Stack<Double> stack = new Stack<>();  
+for (int i = 0; i < position.length; i++) {  
+    cars[i][0] = position[i];  
+    cars[i][1] = speed[i];  
+}
+```
+
+
+Now we sort the 2d array in descending order
+
+Arrays.sort(cars, (a, b) -> b[0] - a[0]);
+
+Use the stack to push the value which is greater only that means it will form the fleet and cannot meet and form the same fleet.
+
+Last we check the size of the stack.....
+
+
+Sorting the Array:
+
+We can sort the primitive array with the Arrays.sort()
+
+But for sorting in the reverse order we have to convert the primitive type to its wrapper class and pass the comparator in the Arrays.sort()
+
+Arrays.sort(arr, (a, b) -> b-a); --> This only works with the Wrapper class 
+
+or Equivalent 
+
+Arrays.sort(car, Collections.reverseOrder());
+
+But for the 2D array we can sort directly from primitive type. This is handy while mainitaing the position on sorting like #Car-Flee-problem in the leetcode
+
+For 2D array sorting...
+
+`Arrays.sort(cars, (a, b) -> b[0] - a[0]);`
+
+
+# Linked List
+
+Linear data structure which have nodes (data and pointer that pointes to the next element)
+
+linked list can be used as stack, queue and deque operation.
+
+We use the linkedList when for frequent insertion/Deletion at any positon as th insertion/Deletion in arraylist other than the lastIndex needs the rotation of the array in the right side.
+
+
+## 🧠 When to Use `LinkedList` (And Why?)
+
+|Use Case|Reason|
+|---|---|
+|✅ Frequent insertions/deletions at the **beginning or middle**|`O(1)` insertion/deletion (if you have a reference)|
+|✅ You don’t need random access (no frequent get(i))|`get(i)` is **O(n)**|
+|❌ Avoid when frequent random access is needed|Because unlike ArrayList, it has no indexing|
+|✅ Ideal for **queue**, **stack**, **deque** operations|Doubly linked nature allows fast insert/delete on both ends|
+
+Usage ?
+
+- Music Playlist --> For pointing to the next music (as pointer can point to next music and can be changed with O(1))
+
+- GPS navigation
+
+- Implement the Stack/Queue..

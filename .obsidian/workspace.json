@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Gems/Multi threading notes (Also check sir's note timely).md",
+                "file": "Coding things/Coding concepts...md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Multi threading notes (Also check sir's note timely)"
+              "title": "Coding concepts.."
             }
           },
           {
@@ -27,16 +27,15 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Coding things/Coding concepts...md",
+                "file": "Key points/Java versioning.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Coding concepts.."
+              "title": "Java versioning"
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "vertical"
@@ -183,13 +182,23 @@
       "command-palette:Open command palette": false
     }
   },
-  "active": "051c08001e97fcab",
+  "active": "3e648f7681d1ea8f",
   "lastOpenFiles": [
+    "Coding things/Java 8 hands-on notes.md",
+    "Coding things/Coding concepts...md",
+    "Gems/Multi threading notes (Also check sir's note timely).md",
+    "Key points/Java versioning.md",
+    "Key points/SQL Commands.md",
+    "Key points/Exception handling...md",
+    "javascript/JavaScript top Questions.md",
+    "Gems/Microservice Architecture and Concepts.md",
+    "Gems/Kafka.md",
+    "Gems/Java basics.md",
+    "Gems/Collections.md",
     "Coding things/linux_command_cheatsheet.pdf",
     "Coding things/Cmds.md",
     "Pasted image 20250526100353.png",
     "LeetCode/Patterns.md",
-    "javascript/JavaScript top Questions.md",
     "PR-docs/Sec- Paragon.md",
     "Pasted image 20250525220743.png",
     "Spring/Spring Boot...md",
@@ -197,23 +206,15 @@
     "Pasted image 20250525171457.png",
     "Pasted image 20250525171357.png",
     "Pasted image 20250524204550.png",
-    "Key points/Java versioning.md",
     "Cloud/Kubernets.md",
-    "Coding things/Coding concepts...md",
     "Pasted image 20250524191545.png",
     "Pasted image 20250523110006.png",
-    "Gems/Collections.md",
     "Pasted image 20250523100008.png",
-    "Coding things/Java 8 hands-on notes.md",
     "Pasted image 20250522165438.png",
     "Pasted image 20250522165432.png",
-    "Gems/Multi threading notes (Also check sir's note timely).md",
-    "Gems/Kafka.md",
     "hjhj.md",
     "Interviews/Mohan.md",
     "Spring/Spring AOP( After this read sir notes too once).md",
-    "Gems/Microservice Architecture and Concepts.md",
-    "Gems/Java basics.md",
     "Gems/Design pattern(Bassed on gangs of 4).....md",
     "Cloud/AWS.md",
     "Gems/To Dos.md",
@@ -221,7 +222,6 @@
     "Gems/OAuth.md",
     "Gems/Garbage collection.md",
     "Coding things/Threading problems.md",
-    "Angular/Angular nuts and bolts.md",
     "Angular",
     "Interviews",
     "LeetCode",
@@ -232,7 +232,6 @@
     "Spring",
     "Untitled 2.canvas",
     "Multithreading",
-    "Key points",
     "Untitled 1.canvas"
   ]
 }
