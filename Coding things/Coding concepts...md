@@ -155,3 +155,98 @@ Usage ?
 - GPS navigation
 
 - Implement the Stack/Queue..
+  
+  
+  Reverse Linked List
+  
+  
+  ![[Pasted image 20250527112921.png]]
+  
+  `
+`Code Snippets for the linkedList reversal......
+
+ListNode current = head;  
+ListNode previous = null;  
+while (current != null) {  
+    ListNode tmp = current.next;  
+    current.next = previous;  
+    previous = current;  
+    current = tmp;  
+}  
+return previous; // the last node is the previous so we return it  
+`
+  
+  
+### Mini Analogy
+
+Think of it like walking a hallway and turning around (changing the next to the previous) — the last door you walked through (before turning around) is now the **first door** when you reverse direction. That's why we return `previous` — it's the last node you processed, but the **first in the new direction**.
+
+![[Pasted image 20250528100840.png]]
+
+Basic Traversal of the linked list 
+
+we point the current node to the next that how we move to next...
+
+
+![[Pasted image 20250528105329.png]]
+
+
+# Fast and slow pointer..
+
+Use to find the linked list is cyclic or not.
+
+we initialize the slow pointer and jump one step and the fast pointer is jumping the two step.
+
+If the fast pointer is able to meet the slow pointer then it means it is cyclic...
+
+
+# kth largest element
+
+We can use the Min Heap which is the priority queue in the java;
+
+Concept --> Priority queue remove the smallest element first no matter of the order // while doing poll(), take()..
+
+Stack
+Trees
+LinkedList
+Heap..
+
+
+
+Java’s `PriorityQueue` is **by default a Min Heap**, but you can make a Max Heap by providing a comparator like below...
+
+![[Pasted image 20250530111843.png]]
+
+# BackTracking (Complex have to figure out..)
+
+
+Finding the subset using the backtracking
+
+![[Pasted image 20250530100051.png]]
+
+1 D programming
+
+Use the top down approach as it reaches the base condition and return the value to the method 
+
+Use the memo--( can use map) to store the already call data preventing the deep recursion 
+
+Another approach is to use the bottom up approach without using the memomization....
+
+
+House Robber 
+
+We have to skip the adjacent house so we have to find the max form the loot until the n-2 + current[n] and  loot untll the n-1....
+
+We have to think the loot as a sub problem which is the concept of the dp....
+
+
+ ![[Pasted image 20250602141404.png]]
+ 
+ Now we are filling it but we have the 2 base condition and continue to fill it up...........
+ 
+ which is 
+ 
+ dp[0] = nums[0];
+ dp[1] = Math.max(nums[0], nums[1]);
+ 
+ ![[Pasted image 20250602141922.png]]

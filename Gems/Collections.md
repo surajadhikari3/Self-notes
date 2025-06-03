@@ -125,3 +125,10 @@ In Java, **a class can implement multiple interfaces**, even if **both interface
    
    
    It is kind of diamond problem too...
+   
+   
+   
+#   Remeber LinkedList implements Queue no the List interface
+
+
+![[Pasted image 20250529153726.png]]

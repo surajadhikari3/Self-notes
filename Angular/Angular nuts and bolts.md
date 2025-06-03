@@ -56,3 +56,7 @@ AG grid
 | Export to CSV                 | ✅                  | ✅                    |
 | Export to Excel               | ❌                  | 💼                   |
 | Charting, Clipboard Range     | ❌                  | 💼                   |
+
+https://chatgpt.com/g/g-p-6810e0b86290819181d84fc8f0e86c94-miscellenous/project
+
+Read about infinite scrolling and virtual scrolling.....

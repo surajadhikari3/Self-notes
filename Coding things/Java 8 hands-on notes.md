@@ -87,6 +87,8 @@ System.out.println(result); // [Alice, Bob, Charlie]
 
    .sorted(Comparator.comparing((Map.Entry<Integer, Long> x) -> x.getValue()).reversed())  
 
+.sorted(comparingByValue(Comparator.reverseOrder()));
+
 
 Concepts ….  
 

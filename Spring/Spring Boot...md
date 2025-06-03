@@ -480,3 +480,31 @@ public class UserDTO {
 ![[Pasted image 20250525171357.png]]
 
 ![[Pasted image 20250525171457.png]]
+
+For logging, Monitoring ...
+
+## ✅ Summary Table
+
+|Tool/Library|Category|Purpose|
+|---|---|---|
+|**Sleuth**|Logging + Tracing|Adds trace IDs for distributed tracing|
+|**Prometheus**|Monitoring (metrics)|Collects metrics from apps|
+|**Zipkin / Jaeger**|Distributed Tracing|Visualizes request paths|
+|**Micrometer**|Metrics abstraction|Bridges app metrics to Prometheus/etc|
+|**Logback/SLF4J**|Logging|Writes app logs|
+|**ELK / Loki / Graylog**|Log Aggregation|Centralized log collection + query|
+|**Dynatrace / Digma**|Observability (full stack)|Auto-trace, auto-metrics, commercial|
+|**Grafana**|Visualization|Dashboards for logs/metrics|
+
+---
+
+## 🧠 Easy Way to Remember
+
+|Problem|Tool You Need|
+|---|---|
+|App logs with trace ID|**Sleuth + Logback**|
+|Track HTTP latency, memory usage|**Prometheus + Micrometer**|
+|Visualize metrics|**Grafana**|
+|Centralized searchable logs|**ELK / Loki**|
+|Trace request path across services|**Sleuth + Zipkin**|
+|Enterprise full observability|**Dynatrace / Datadog**|
