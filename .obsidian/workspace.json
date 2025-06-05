@@ -20,16 +20,6 @@
               "icon": "lucide-file",
               "title": "Spring Webflux Module"
             }
-          },
-          {
-            "id": "bda380921c1e70f6",
-            "type": "leaf",
-            "state": {
-              "type": "empty",
-              "state": {},
-              "icon": "lucide-file",
-              "title": "New tab"
-            }
           }
         ]
       }
@@ -88,8 +78,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 255.50296020507812,
-    "collapsed": true
+    "width": 255.50296020507812
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -177,7 +166,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 300,
+    "collapsed": true
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -190,8 +180,9 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "21a7aecd5be464f6",
+  "active": "c72f0e3a17baba36",
   "lastOpenFiles": [
+    "Sql Functions Guide.pdf",
     "Spring/Spring Webflux Module.md",
     "Project prep/Websocket.md",
     "Project prep/MongoDB.md",
@@ -230,7 +221,6 @@
     "Pasted image 20250602141404.png",
     "Pasted image 20250530111843.png",
     "Pasted image 20250530100051.png",
-    "Spring/Spring Boot...md",
     "Coding things/linux_command_cheatsheet.pdf",
     "PR-docs",
     "Project prep/Angular",
