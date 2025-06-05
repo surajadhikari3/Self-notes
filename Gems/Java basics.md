@@ -61,7 +61,7 @@ Closeable vs auto closable....
 | **Can be used for**              | File operations, network streams                      | Anything that needs cleanup (e.g., custom classes, DB) |
 | **Example Classes**              | `FileReader`, `BufferedWriter`, `InputStream`         | `Connection`, `Statement`, `ReentrantLock` (custom)    |
 
-
+Closeable interface extends AutoCloasable interface so all. the Closeable supports the AutoCloaseable
 
 Marker interface 
 
@@ -146,4 +146,30 @@ Flow usal  --> /Library/Java/JavaVirtualMachines/jdk-17.0.1/Contents/Home it can
 
 
 Can we instantiate the interface --> No
+
 In Java, **you cannot instantiate an interface directly** because an interface is an abstract type that defines a contract but provides no implementation (unless using default or static methods, which still don't make the interface instantiable on its own).
+
+
+Important questions.............
+### **Can You Use `finally` with `try-with-resources`?**
+
+**Yes**, but it's rarely needed.
+
+**Example:**
+
+```
+try (MyResource r = new MyResource()) {
+    r.use();
+} catch (Exception e) {
+    e.printStackTrace();
+} finally {
+    System.out.println("Finally block executed.");
+}
+```
+
+🧠 **Best Practice:** Use `finally` only for **non-resource cleanup** — like logging, counter reset, UI update, etc.  
+➡️ Resources are already closed **before** `finally` runs.
+
+For using in the try-with-resource it has to be auto-closeable
+note All closeable is auto-cloaseable  as Cloaseable extends AutoCloseable
+
