@@ -4,21 +4,31 @@
     "type": "split",
     "children": [
       {
-        "id": "5857f18232636462",
+        "id": "d09e21453b42a758",
         "type": "tabs",
         "children": [
           {
-            "id": "07b8d027fd773d89",
+            "id": "c72f0e3a17baba36",
             "type": "leaf",
             "state": {
-              "type": "split-diff-view",
+              "type": "markdown",
               "state": {
-                "aFile": "Project prep/Angular/Angular nuts and bolts.md",
-                "bFile": "Project prep/Angular/Angular nuts and bolts.md",
-                "aRef": ""
+                "file": "Spring/Spring Webflux Module.md",
+                "mode": "source",
+                "source": false
               },
-              "icon": "diff",
-              "title": "Diff: Angular nuts and bolts"
+              "icon": "lucide-file",
+              "title": "Spring Webflux Module"
+            }
+          },
+          {
+            "id": "bda380921c1e70f6",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
             }
           }
         ]
@@ -95,6 +105,7 @@
             "state": {
               "type": "backlink",
               "state": {
+                "file": "Spring/Spring Webflux Module.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +115,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks"
+              "title": "Backlinks for Spring Webflux Module"
             }
           },
           {
@@ -113,11 +124,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
+                "file": "Spring/Spring Webflux Module.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links"
+              "title": "Outgoing links from Spring Webflux Module"
             }
           },
           {
@@ -141,12 +153,13 @@
             "state": {
               "type": "outline",
               "state": {
+                "file": "Spring/Spring Webflux Module.md",
                 "followCursor": true,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline"
+              "title": "Outline of Spring Webflux Module"
             }
           },
           {
@@ -177,14 +190,17 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "07b8d027fd773d89",
+  "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
+    "Spring/Spring Webflux Module.md",
+    "Project prep/Websocket.md",
+    "Project prep/MongoDB.md",
+    "Project prep/Angular/Angular nuts and bolts.md",
+    "Project prep/Angular/RXJS (Reactive extension for js).md",
+    "Project prep/Angular/Testing.md",
     "Untitled 1.canvas",
     "git push.md",
     "Untitled 1.md",
-    "Project prep/Angular/RXJS (Reactive extension for js).md",
-    "Project prep/Angular/Angular nuts and bolts.md",
-    "Project prep/Angular/Testing.md",
     "Project prep",
     "2025-06-05.md",
     "Key points/Exception handling...md",
@@ -215,8 +231,6 @@
     "Pasted image 20250530111843.png",
     "Pasted image 20250530100051.png",
     "Spring/Spring Boot...md",
-    "Gems/Multi threading notes (Also check sir's note timely).md",
-    "Key points/SQL Commands.md",
     "Coding things/linux_command_cheatsheet.pdf",
     "PR-docs",
     "Project prep/Angular",

@@ -1,5 +1,4 @@
 
-
 ## ✅ 1. **What is Karma?**
 
 ### 🔹 Karma is a **test runner**, not a testing framework.

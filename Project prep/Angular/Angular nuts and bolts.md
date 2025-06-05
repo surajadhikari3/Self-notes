@@ -1,6 +1,4 @@
 
-
-
  Use of websockets for analytics dashboard with spring boot backend and mongo dB backend
  Get really good with angular - all stuff Including writing tests
  Bidirectional streaming of updates
@@ -211,12 +209,4 @@ src/
 │   └── e2e/                 # Cypress or Playwright tests
 ├── main.ts
 └── index.html
-```
-
----
-
-
----
-
----
 
