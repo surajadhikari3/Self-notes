@@ -4,35 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "555fb9a8c4e2a3e7",
+        "id": "5857f18232636462",
         "type": "tabs",
         "children": [
           {
-            "id": "051c08001e97fcab",
+            "id": "07b8d027fd773d89",
             "type": "leaf",
             "state": {
-              "type": "markdown",
+              "type": "split-diff-view",
               "state": {
-                "file": "Project prep/Angular/Angular nuts and bolts.md",
-                "mode": "source",
-                "source": false
+                "aFile": "Project prep/Angular/Angular nuts and bolts.md",
+                "bFile": "Project prep/Angular/Angular nuts and bolts.md",
+                "aRef": ""
               },
-              "icon": "lucide-file",
-              "title": "Angular nuts and bolts"
-            }
-          },
-          {
-            "id": "cc3c9462145f8dc9",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "Untitled 1.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "Untitled 1"
+              "icon": "diff",
+              "title": "Diff: Angular nuts and bolts"
             }
           }
         ]
@@ -109,7 +95,6 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Project prep/Angular/Angular nuts and bolts.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -119,7 +104,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for Angular nuts and bolts"
+              "title": "Backlinks"
             }
           },
           {
@@ -128,12 +113,11 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Project prep/Angular/Angular nuts and bolts.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from Angular nuts and bolts"
+              "title": "Outgoing links"
             }
           },
           {
@@ -157,22 +141,30 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Project prep/Angular/Angular nuts and bolts.md",
                 "followCursor": true,
-                "showSearch": true,
+                "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of Angular nuts and bolts"
+              "title": "Outline"
+            }
+          },
+          {
+            "id": "21a7aecd5be464f6",
+            "type": "leaf",
+            "state": {
+              "type": "git-view",
+              "state": {},
+              "icon": "git-pull-request",
+              "title": "Source Control"
             }
           }
         ],
-        "currentTab": 3
+        "currentTab": 4
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -185,12 +177,15 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "051c08001e97fcab",
+  "active": "07b8d027fd773d89",
   "lastOpenFiles": [
-    "Project prep/Angular/Testing.md",
-    "Project prep/Angular/Angular nuts and bolts.md",
-    "Project prep",
+    "Untitled 1.canvas",
+    "git push.md",
     "Untitled 1.md",
+    "Project prep/Angular/RXJS (Reactive extension for js).md",
+    "Project prep/Angular/Angular nuts and bolts.md",
+    "Project prep/Angular/Testing.md",
+    "Project prep",
     "2025-06-05.md",
     "Key points/Exception handling...md",
     "Key points/Java versioning.md",
@@ -222,10 +217,7 @@
     "Spring/Spring Boot...md",
     "Gems/Multi threading notes (Also check sir's note timely).md",
     "Key points/SQL Commands.md",
-    "javascript/JavaScript top Questions.md",
     "Coding things/linux_command_cheatsheet.pdf",
-    "LeetCode/Patterns.md",
-    "PR-docs/Sec- Paragon.md",
     "PR-docs",
     "Project prep/Angular",
     "Interviews",
@@ -234,7 +226,6 @@
     "Coding things",
     "javascript",
     "Spring",
-    "Untitled 2.canvas",
-    "Untitled 1.canvas"
+    "Untitled 2.canvas"
   ]
 }
