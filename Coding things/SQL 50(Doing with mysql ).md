@@ -1,3 +1,4 @@
+https://www.sql-practice.com/learn/function/window_function_basics/ --> Read the window function from here too..
 
 charlength() --> Function to count the length of the varchar in mysql
 
@@ -141,25 +142,25 @@ Note sum takes the boolean but the count does not if you want to count on condit
 
 ## ✅ SQL Aggregate Functions: Can You Use Boolean/Conditional Inside?
 
-|Function|Accepts Boolean/Condition?|Behavior / Notes|Example|Result Explanation|
-|---|---|---|---|---|
-|**`SUM()`**|✅ Yes|Adds up `1` for true, `0` for false; can simulate count|`SUM(rating < 3)`|Adds 1 for each row where rating < 3|
-|**`COUNT(*)`**|❌ No (counts all rows)|Counts all rows, including NULLs|`COUNT(*)`|Total row count|
-|**`COUNT(expr)`**|⚠️ _Only counts non-NULL_|`COUNT(condition)` counts all rows unless condition is NULL|`COUNT(rating < 3)` → counts all non-NULL rows|**Not recommended** for booleans|
-|**`COUNT(CASE WHEN ...)`**|✅ Yes|Safest way to count rows matching a condition|`COUNT(CASE WHEN rating < 3 THEN 1 END)`|Counts only rows where condition is true|
-|**`AVG()`**|✅ Yes|Averages boolean values (1 for true, 0 for false)|`AVG(rating < 3)`|Gives proportion as a decimal (e.g., 0.25 → 25%)|
-|**`MIN()` / `MAX()`**|✅ (sort of)|Compares boolean or conditional results|`MAX(rating < 3)`|Returns 1 if any row matches condition|
+| Function                   | Accepts Boolean/Condition? | Behavior / Notes                                            | Example                                        | Result Explanation                               |
+| -------------------------- | -------------------------- | ----------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------ |
+| **`SUM()`**                | ✅ Yes                      | Adds up `1` for true, `0` for false; can simulate count     | `SUM(rating < 3)`                              | Adds 1 for each row where rating < 3             |
+| **`COUNT(*)`**             | ❌ No (counts all rows)     | Counts all rows, including NULLs                            | `COUNT(*)`                                     | Total row count                                  |
+| **`COUNT(expr)`**          | ⚠️ _Only counts non-NULL_  | `COUNT(condition)` counts all rows unless condition is NULL | `COUNT(rating < 3)` → counts all non-NULL rows | **Not recommended** for booleans                 |
+| **`COUNT(CASE WHEN ...)`** | ✅ Yes                      | Safest way to count rows matching a condition               | `COUNT(CASE WHEN rating < 3 THEN 1 END)`       | Counts only rows where condition is true         |
+| **`AVG()`**                | ✅ Yes                      | Averages boolean values (1 for true, 0 for false)           | `AVG(rating < 3)`                              | Gives proportion as a decimal (e.g., 0.25 → 25%) |
+| **`MIN()` / `MAX()`**      | ✅ (sort of)                | Compares boolean or conditional results                     | `MAX(rating < 3)`                              | Returns 1 if any row matches condition           |
 
 ---
 
 ## ✅ Recommended Use Summary
 
-|Use Case|Preferred Expression|
-|---|---|
-|Count where condition is true|`COUNT(CASE WHEN condition THEN 1 END)`|
-|Sum of condition matched rows|`SUM(condition)`|
-|Percentage of rows matching condition|`SUM(condition) / COUNT(*) * 100` or `AVG(condition) * 100`|
-|Avoid ambiguous `COUNT(condition)`|✅ Use `CASE WHEN` for clarity|
+| Use Case                              | Preferred Expression                                        |
+| ------------------------------------- | ----------------------------------------------------------- |
+| Count where condition is true         | `COUNT(CASE WHEN condition THEN 1 END)`                     |
+| Sum of condition matched rows         | `SUM(condition)`                                            |
+| Percentage of rows matching condition | `SUM(condition) / COUNT(*) * 100` or `AVG(condition) * 100` |
+| Avoid ambiguous `COUNT(condition)`    | ✅ Use `CASE WHEN` for clarity                               |
 
 ---
 
@@ -243,11 +244,169 @@ order by() --> based on it sorting is performed.............
 
 ![[Pasted image 20250604170502.png]]
 
-| Window Function  | Purpose                                                                                                                             |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `ROW_NUMBER()`   | Row num                                                                                                                             |
-| `RANK()`  Ranking with gaps --> if there is two same position lets say 6, 6 then next will be 8 not 7 which is overcome by the dense_rank   6  66  66  |
-| `DENSE_RANK()`   | Ranking                                                                                                                             |
-| `LAG()`/`LEAD()` | Previous/                                                                                                                           |
-| `SUM()`/`AVG()`  | Runni                                                                                                                               |
-| `NTILE(n)`       |                                                                                                                                     |
+| Window Function                                                                                                                                   | Purpose   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `ROW_NUMBER()`                                                                                                                                    | Row num   |
+| `RANK()`  Ranking with gaps --> if there is two same position lets say 6, 6 then next will be 8 not 7 which is overcome by the dense_rank   6 , 6 |           |
+| `DENSE_RANK()`                                                                                                                                    | Ranking   |
+| `LAG()`/`LEAD()`                                                                                                                                  | Previous/ |
+| `SUM()`/`AVG()`                                                                                                                                   | Runni     |
+| `NTILE(n)`                                                                                                                                        |           |
+we can write the conditional clause with the case like below:
+
+
+![[Pasted image 20250607181156.png]]
+
+Note: Self observation..
+
+while using the window function like sum() we give the over()
+
+the order by tells the summing is done on the basis of that field in order.......
+
+
+## ✅ Syntax: `CASE` Expression (like if / else if / else)
+
+```sql
+CASE
+  WHEN condition1 THEN result1      -- if
+  WHEN condition2 THEN result2      -- else if
+  WHEN condition3 THEN result3      -- else if
+  ...
+  ELSE default_result               -- else
+END
+```
+
+### 🔸 SQL:
+
+```sql
+SELECT 
+  amount,
+  CASE 
+    WHEN amount < 100 THEN 'Low'
+    WHEN amount BETWEEN 100 AND 300 THEN 'Medium'
+    ELSE 'High'
+  END AS category
+FROM Sales;
+```
+
+
+Great question!
+
+---
+
+## ✅ What is a CTE?
+
+**CTE** stands for **Common Table Expression**.  
+It’s a **temporary result set** that you define at the beginning of a SQL query and use just like a normal table in the main query.
+
+You write it using the `WITH` clause.
+
+---
+
+### 🧠 Think of it as:
+
+> A temporary named result that helps you break a complex query into logical steps — like creating a sub-table that you can reuse once.
+
+---
+
+## 🔹 Syntax
+
+```sql
+WITH cte_name AS (
+  SELECT ... FROM ...
+)
+SELECT * FROM cte_name;
+```
+
+You can even chain multiple CTEs:
+
+```sql
+WITH cte1 AS (...),
+     cte2 AS (...)
+SELECT ...
+FROM cte2
+JOIN cte1 ON ...
+```
+
+---
+
+## 🎯 Example
+
+### 👇 Let's say we have a `Sales` table:
+
+|id|amount|region|
+|---|---|---|
+|1|100|East|
+|2|200|West|
+|3|150|East|
+
+### ✅ Problem:
+
+Find average sales per region, and show only regions above 120 average.
+
+---
+
+### 🧾 With CTE:
+
+```sql
+WITH avg_sales AS (
+  SELECT region, AVG(amount) AS avg_amt
+  FROM Sales
+  GROUP BY region
+)
+SELECT * 
+FROM avg_sales
+WHERE avg_amt > 120;
+```
+
+### 🔍 Result:
+
+|region|avg_amt|
+|---|---|
+|West|200|
+|East|125|
+
+---
+
+## ✅ Why Use CTEs?
+
+|Feature|Benefit|
+|---|---|
+|Readability|Breaks down complex queries|
+|Reusability|Use the same logic multiple times|
+|Maintainability|Easier to debug and edit|
+|Recursion|Can be used for hierarchical data|
+
+---
+
+Note: we can use the sum (with boolean condition) --> it will give the counter value.....
+
+We use it for finding the salary categories 
+
+```sql
+# Write your MySQL query statement below 
+SELECT 'Low Salary' AS category, 
+SUM(income < 20000) AS accounts_count 
+FROM Accounts 
+
+UNION 
+
+SELECT 'Average Salary' AS category, 
+SUM(income BETWEEN 20000 AND 50000 ) AS accounts_count 
+FROM Accounts 
+
+UNION 
+
+SELECT 'High Salary' AS category, 
+SUM(income > 50000) AS accounts_count FROM Accounts;
+```
+
+
+
+We can also use the condition with the if clause even in order by like below 
+
+```sql
+select row_number() over() id, student
+from seat
+order by if(mod(id,2) = 0, id-1, id+1);
+```

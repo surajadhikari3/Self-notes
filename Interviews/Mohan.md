@@ -11,7 +11,7 @@ Difference between kafka vs rabbitmq vs activemq
 
 
 Kafka --> High throughput low latency, fault tolerance , streaming data, analytics 
-RabbitMq --> Task queues, retry logic, real time apps.
+RabbitMq --> Task queues, retry logic, DLQ(by default),  real time apps.
 ActiveMq --> Legacy systems using JMS or spring JMS integration..
 
 

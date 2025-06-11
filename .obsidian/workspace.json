@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Spring/Spring Webflux Module.md",
+                "file": "Coding things/Java 8 hands-on notes.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Spring Webflux Module"
+              "title": "Java 8 hands-on notes"
             }
           }
         ]
@@ -78,7 +78,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 255.50296020507812
+    "width": 255.50296020507812,
+    "collapsed": true
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -94,7 +95,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Spring/Spring Webflux Module.md",
+                "file": "Coding things/SQL 50(Doing with mysql ).md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -104,7 +105,7 @@
                 "unlinkedCollapsed": true
               },
               "icon": "links-coming-in",
-              "title": "Backlinks for Spring Webflux Module"
+              "title": "Backlinks for SQL 50(Doing with mysql )"
             }
           },
           {
@@ -113,12 +114,12 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Spring/Spring Webflux Module.md",
+                "file": "Coding things/SQL 50(Doing with mysql ).md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
               "icon": "links-going-out",
-              "title": "Outgoing links from Spring Webflux Module"
+              "title": "Outgoing links from SQL 50(Doing with mysql )"
             }
           },
           {
@@ -142,13 +143,13 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Spring/Spring Webflux Module.md",
+                "file": "Coding things/SQL 50(Doing with mysql ).md",
                 "followCursor": true,
                 "showSearch": false,
                 "searchQuery": ""
               },
               "icon": "lucide-list",
-              "title": "Outline of Spring Webflux Module"
+              "title": "Outline of SQL 50(Doing with mysql )"
             }
           },
           {
@@ -166,8 +167,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "left-ribbon": {
     "hiddenItems": {
@@ -182,6 +182,12 @@
   },
   "active": "c72f0e3a17baba36",
   "lastOpenFiles": [
+    "Coding things/SQL 50(Doing with mysql ).md",
+    "Interviews/Mohan TD interview.md",
+    "Interviews/Mohan.md",
+    "Interviews/Gurpreet.md",
+    "Pasted image 20250607181156.png",
+    "Coding things/Java 8 hands-on notes.md",
     "Sql Functions Guide.pdf",
     "Spring/Spring Webflux Module.md",
     "Project prep/Websocket.md",
@@ -204,15 +210,11 @@
     "Gems/Kafka.md",
     "Gems/Java basics.md",
     "Cloud/AWS.md",
-    "Coding things/SQL 50(Doing with mysql ).md",
     "Coding things/Threading problems.md",
     "Gems/Java 8.md",
-    "Coding things/Java 8 hands-on notes.md",
     "Pasted image 20250604170502.png",
-    "Interviews/Gurpreet.md",
     "Interviews/An - Int.md",
     "Pasted image 20250604104455.png",
-    "Interviews/Parth interview.md",
     "Pasted image 20250603142838.png",
     "Pasted image 20250603120435.png",
     "Pasted image 20250603110614.png",
@@ -220,7 +222,6 @@
     "Pasted image 20250602141922.png",
     "Pasted image 20250602141404.png",
     "Pasted image 20250530111843.png",
-    "Pasted image 20250530100051.png",
     "Coding things/linux_command_cheatsheet.pdf",
     "PR-docs",
     "Project prep/Angular",
@@ -229,7 +230,6 @@
     "Cloud",
     "Coding things",
     "javascript",
-    "Spring",
     "Untitled 2.canvas"
   ]
 }
