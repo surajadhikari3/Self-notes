@@ -410,3 +410,73 @@ select row_number() over() id, student
 from seat
 order by if(mod(id,2) = 0, id-1, id+1);
 ```
+
+For doing the movie rating consider this solution too
+
+
+```sql
+# Write your MySQL query statement below 
+(SELECT name AS results
+FROM MovieRating JOIN Users USING(user_id)
+GROUP BY name 
+ORDER BY COUNT(*) DESC,name 
+LIMIT 1) 
+
+UNION ALL 
+
+(SELECT title AS results 
+FROM MovieRating JOIN Movies USING(movie_id) 
+WHERE EXTRACT(YEAR_MONTH FROM created_at) = 202002 
+GROUP BY title 
+ORDER BY AVG(rating) DESC, title 
+LIMIT 1);
+```
+
+Note: 
+	While using the frame clause in the window function use the range between instead of the row between for the date based cases:
+	
+```sql
+SUM(amount) OVER (
+  ORDER BY visited_on 
+  RANGE BETWEEN INTERVAL 6 DAY PRECEDING AND CURRENT ROW
+)
+
+```
+
+instead of using the below :
+
+```sql
+SUM(amount) OVER (
+  ORDER BY visited_on 
+  ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+)
+
+```
+
+Note: 
+If you want to find the unique element group by that field and check the having count(*) =1;
+or
+if u want to find the duplicate element group by which ever field u want and do having count(*) > 1;
+
+It is used in one of the sql 50 problem --> Investment in 2016...
+
+```sql
+```sql
+SELECT ROUND(SUM(tiv_2016), 2) AS tiv_2016
+FROM Insurance
+WHERE tiv_2015 IN (
+    SELECT tiv_2015
+    FROM Insurance
+    GROUP BY tiv_2015
+    HAVING COUNT(*) > 1
+)
+AND (lat, lon) IN (
+    SELECT lat, lon
+    FROM Insurance
+    GROUP BY lat, lon
+    HAVING COUNT(*) = 1
+)
+```
+
+
+

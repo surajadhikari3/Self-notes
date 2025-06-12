@@ -401,7 +401,7 @@ String[] words = cleaned.split("\\s+");
 If you still want to split first, then sanitize each word:
 
 ```java
-String[] words = paragraph.split("\\s+");
+String[] words = paragraph.split("\\s+"); //splitting on the basis of whitespace
 List<String> cleanWords = Arrays.stream(words)
     .map(word -> word.replaceAll("[^a-zA-Z0-9]", "")) // remove punctuation per word
     .filter(word -> !word.isEmpty()) // skip empty strings
@@ -437,3 +437,23 @@ Think of punctuation as "noise" between words. `split("\\s+")` only removes **ga
 ---
 
 Let me know if you want to preserve things like apostrophes (`don't`, `it's`) or handle multilingual content — we can fine-tune the regex!
+
+
+Note:
+
+While doing the flatMap it moves and loses the content if we want the context then we have to stay 
+within the scope with the bracket like below  and can use the `AbstractMap.SimpleEntry<>(key, value)` to store the info in key value pair... :
+
+```java
+ departments.stream()  
+        .flatMap(department -> department.getEmployees().stream())  
+	        .flatMap(employee -> employee.getProjects().stream()  //Note --> To get the details within the flatmap we                                                                     should be within the flatmap scope and map and                                                                        collect to the abstractMap .map(Project::getName) 
+                .distinct()  
+                .map(projectName -> new AbstractMap.SimpleEntry<>(projectName, employee.getId())))  
+        .distinct()  
+        .collect(Collectors.groupingBy(  
+                Map.Entry::getKey,  
+                Collectors.counting()  
+        ));**
+```
+
