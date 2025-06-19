@@ -116,15 +116,15 @@ Testing...
 
 ## 🛠 Tooling Stack
 
-|Purpose|Tool|
-|---|---|
-|Unit Testing|Jest or Jasmine + Karma|
-|E2E Testing|Cypress or Playwright|
-|HTTP Mocking|HttpClientTestingModule|
-|Code Coverage|`ng test --code-coverage`|
-|Linting|ESLint|
-|Formatter|Prettier|
-|Type Checking|TypeScript (strict mode recommended)|
+| Purpose       | Tool                                 |
+| ------------- | ------------------------------------ |
+| Unit Testing  | Jest or Jasmine + Karma              |
+| E2E Testing   | Cypress or Playwright                |
+| HTTP Mocking  | HttpClientTestingModule              |
+| Code Coverage | `ng test --code-coverage`            |
+| Linting       | ESLint                               |
+| Formatter     | Prettier                             |
+| Type Checking | TypeScript (strict mode recommended) |
 
 ---
 

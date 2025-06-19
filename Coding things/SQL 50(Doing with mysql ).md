@@ -346,7 +346,7 @@ Find average sales per region, and show only regions above 120 average.
 
 ---
 
-### 🧾 With CTE:
+### 🧾 With CTE:(Common Table expression )
 
 ```sql
 WITH avg_sales AS (
@@ -479,4 +479,167 @@ AND (lat, lon) IN (
 ```
 
 
+Substring in the sql 
+
+`SUBSTRING(string, start, length)`
+
+here we give the string the start position and how many character we want and it starts from 1 not zero..
+
+
+Regexp 
+
+if there is . -> that means there will be zero or more occurence of the token before it 
+
+eg -> ab*c --> means that b will occur 0 or any time (eg.. ac, abc, abbc)
+
+if there is + means there is one or more occurence of it
+
+.* --> mean it is wildcard any number of element can occur between
+
+for case- sensetive regexp check 
+
+```sql
+SELECT *
+
+FROM users
+
+WHERE REGEXP_LIKE(mail, '^[a-zA-Z][a-zA-Z0-9_.-]*@leetcode\\.com$', 'c');
+```
+
+
+---
+
+## ✅ 1. `.` → **Dot = any single character**
+
+- Matches **exactly one character** (letter, digit, symbol, etc.)
+    
+- Does **not** match newline (`\n`) in MySQL by default
+    
+
+### 🔸 Example:
+
+```sql
+email REGEXP '^a.b@gmail\\.com$'
+```
+
+✅ Matches: `a1b@gmail.com`, `axb@gmail.com`  
+❌ Doesn't match: `ab@gmail.com` (missing one char in the middle)
+
+---
+
+## ✅ 2. `*` → **Zero or more** of the **preceding token**
+
+- The `*` repeats the character or group **before it**
+    
+
+### 🔸 Example:
+
+```sql
+email REGEXP 'ab*c'
+```
+
+✅ Matches:
+
+- `ac` (`b` occurs 0 times)
+    
+- `abc`, `abbc`, `abbbc` (1 or more `b`s)
+    
+
+---
+
+## ✅ 3. `+` → **One or more** of the **preceding token**
+
+- Like `*`, but requires **at least 1 occurrence**
+    
+
+### 🔸 Example:
+
+```sql
+email REGEXP 'ab+c'
+```
+
+✅ Matches:
+
+- `abc`, `abbc`, `abbbc`
+    
+
+❌ Doesn’t match:
+
+- `ac` (because there's no `b` at all)
+    
+
+---
+
+## ✅ 4. `.*` → **Zero or more of any character**
+
+- Most common for **wildcard-like matching**
+    
+
+### 🔸 Example:
+
+```sql
+email REGEXP '^admin.*@gmail\\.com$'
+```
+
+✅ Matches:
+
+- `admin@gmail.com`
+    
+- `administrator@gmail.com`
+    
+- `admin12345@gmail.com`
+    
+
+🔍 Equivalent to saying:  
+"Starts with `admin`, followed by anything (including nothing), and ends with `@gmail.com`"
+
+---
+
+## ✅ 5. `\\` → **Escape special characters** in MySQL strings
+
+- MySQL strings treat `\` as an escape character
+    
+- So you **must double it** to get a literal `\` into the regex
+    
+
+### 🔸 Example:
+
+```sql
+email REGEXP '\\.'  → matches a literal `.`
+```
+
+✅ In MySQL, to match `@gmail.com` you must write:
+
+```sql
+'@gmail\\.com$'
+```
+
+Why?
+
+- `.` by default means “any character”
+    
+- So to match a **literal dot**, you need `\\.`
+    
+
+---
+
+## 🔍 Summary Table
+
+| Symbol | Meaning                                 | Example             | Matches                      |
+| ------ | --------------------------------------- | ------------------- | ---------------------------- |
+| `.`    | Any one character                       | `a.b`               | `a1b`, `a_b`                 |
+| `*`    | Zero or more of the preceding token     | `ab*c`              | `ac`, `abc`, `abbc`          |
+| `+`    | One or more of the preceding token      | `ab+c`              | `abc`, `abbbc`               |
+| `.*`   | Any number of any characters (wildcard) | `admin.*@gmail.com` | `admin123@gmail.com`         |
+| `\\`   | Escape for special characters in regex  | `@gmail\\.com`      | Matches literal `@gmail.com` |
+
+---
+
+## ✅ Practical Email Match
+
+```sql
+SELECT *
+FROM users
+WHERE REGEXP_LIKE(email, '^[a-z0-9._-]+@gmail\\.com$', 'c');  -- 'c' = case sensitive in MySQL 8+
+```
 

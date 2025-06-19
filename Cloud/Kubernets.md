@@ -1,6 +1,34 @@
 https://how.dev/answers/the-kubernetes-architecture-simplified
 Study from this site 
 
+--> green  and blue deployment --> for zero down time (https://www.youtube.com/shorts/F0STBUxjtUo)
+--> config server and secret  -->configmap to load the configuration/environment variable  and secrets is to load the sensetive data which is encoded not encrypted. (https://www.youtube.com/shorts/7xpewAvYRO0)
+
+--> liveness and rediness probe.. -> Liveness checks the container is healthy or not if not it restarts the pods whereas the readiness probe checks whether the container is ready or not if not it will remove from cluster still running in the background when it is ready it add backs to the cluster...................
+
+
+
+
+Excellent comparison topic! In **Kubernetes**, both **ConfigMap** and **Secret** are used to **externalize configuration**, but they serve different purposes and have different security and encoding implications.
+
+---
+
+## ✅ Quick Summary Table
+
+| Feature                | **ConfigMap**                     | **Secret**                                      |
+| ---------------------- | --------------------------------- | ----------------------------------------------- |
+| **Purpose**            | Store non-sensitive configuration | Store sensitive data (e.g., passwords, tokens)  |
+| **Data Format**        | Plaintext (key-value pairs)       | Base64-encoded (still decodable, not encrypted) |
+| **Use Cases**          | App settings, flags, env vars     | DB creds, API keys, TLS certs                   |
+| **K8s Object Type**    | `ConfigMap`                       | `Secret`                                        |
+| **Mounted As**         | Env vars or volume                | Env vars or volume                              |
+| **Access Control**     | RBAC (standard access control)    | RBAC + stricter permissioning recommended       |
+| **Default Encryption** | ❌ No (just plain key-values)      | ⚠️ Base64 only (not real encryption)            |
+| **Better for**         | Public config, feature flags      | Private, sensitive info                         |
+
+
+
+
 
 The purpose of Kubernetes is to host your application, in the form of containers, in an automated fashion so that you can easily deploy, scale-in and scale-out (as required), and enable communications between different services inside your application.
 
@@ -105,15 +133,15 @@ Use deployment if you want upgrades, rollback and easier lifecycle management of
 
 Tabular form
 
-|Feature|**ReplicaSet**|**Deployment**|
-|---|---|---|
-|**Purpose**|Ensures a **fixed number of pods** are running|Manages **ReplicaSets** and handles **rolling updates**|
-|**Manages Pods?**|Yes|Yes, **indirectly** via ReplicaSets|
-|**Rolling Updates?**|❌ Not supported|✅ Yes, supports zero-downtime updates|
-|**Rollback Support?**|❌ No|✅ Yes, can roll back to previous versions|
-|**Typical Use**|Rarely used directly by users|Commonly used in real-world deployments|
-|**Version History?**|❌ No history maintained|✅ Keeps history of previous ReplicaSets|
-|**Scaling**|Manual or via HPA (Horizontal Pod Autoscaler)|Easier, supports declarative scaling with history|
+| Feature               | **ReplicaSet**                                 | **Deployment**                                          |
+| --------------------- | ---------------------------------------------- | ------------------------------------------------------- |
+| **Purpose**           | Ensures a **fixed number of pods** are running | Manages **ReplicaSets** and handles **rolling updates** |
+| **Manages Pods?**     | Yes                                            | Yes, **indirectly** via ReplicaSets                     |
+| **Rolling Updates?**  | ❌ Not supported                                | ✅ Yes, supports zero-downtime updates                   |
+| **Rollback Support?** | ❌ No                                           | ✅ Yes, can roll back to previous versions               |
+| **Typical Use**       | Rarely used directly by users                  | Commonly used in real-world deployments                 |
+| **Version History?**  | ❌ No history maintained                        | ✅ Keeps history of previous ReplicaSets                 |
+| **Scaling**           | Manual or via HPA (Horizontal Pod Autoscaler)  | Easier, supports declarative scaling with history       |
 
 ---
 
@@ -224,16 +252,112 @@ Manage **Pods** and ensure the desired number of replicas are running.
 | **ResourceQuota Controller**           | Ensures limits and quotas are enforced on namespaces.                                                                                                                                                                                                                    |
 ### 📦 **Storage Controllers**
 
-|Controller|Description|
+| Controller                       | Description                                                               |
+| -------------------------------- | ------------------------------------------------------------------------- |
+| **PersistentVolume Controller**  | Watches and manages lifecycle of PersistentVolumes.                       |
+| **PVC Binder Controller**        | Binds PersistentVolumeClaims (PVCs) to available PersistentVolumes (PVs). |
+| **Volume Attachment Controller** | Handles volume attach/detach operations for nodes.                        |
+
+
+Great question! ✅ Understanding **liveness vs. readiness probes** is **crucial for Kubernetes interviews** and real-world deployments. Here's a clear breakdown with examples and diagrams.
+
+---
+
+## 🔎 Quick Summary Table
+
+|Feature|**Liveness Probe**|**Readiness Probe**|
+|---|---|---|
+|**Purpose**|Checks **if the app is _alive_** (running or stuck?)|Checks **if the app is _ready to serve traffic_**|
+|**If it fails...**|K8s **kills and restarts** the container|K8s **removes the pod from Service endpoints**|
+|**Triggers restart?**|✅ Yes|❌ No (just stops traffic)|
+|**When is it used?**|Continuous health monitoring|Load balancer / Service-level availability|
+|**Traffic impact**|No impact on routing|Affects service routing / load balancing|
+
+---
+
+## 🎯 When to Use
+
+- **Liveness Probe**: Your app might hang or deadlock but still be running (e.g., stuck thread). You want to detect this and restart the app.
+    
+- **Readiness Probe**: App takes time to warm up (e.g., load models, open DB connections). Until it's ready, **don’t send traffic**.
+    
+
+---
+
+## 💡 Analogy: Restaurant
+
+|Concept|Analogy|
 |---|---|
-|**PersistentVolume Controller**|Watches and manages lifecycle of PersistentVolumes.|
-|**PVC Binder Controller**|Binds PersistentVolumeClaims (PVCs) to available PersistentVolumes (PVs).|
-|**Volume Attachment Controller**|Handles volume attach/detach operations for nodes.|
+|Liveness Probe|Is the chef alive and cooking?|
+|Readiness Probe|Is the chef ready to take orders?|
+
+---
+
+## 🔧 Example YAML
+
+### ✅ Liveness Probe (restart on stuck process)
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  failureThreshold: 3
+```
+
+### ✅ Readiness Probe (don’t send traffic until ready)
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 2
+```
+
+> Both support `httpGet`, `tcpSocket`, or `exec` commands.
+
+---
+
+## 🔁 Lifecycle of a Pod with Both Probes
+
+```plaintext
+Startup → Readiness FAIL → no traffic sent
+         ↓
+Readiness OK → traffic allowed
+         ↓
+Liveness FAIL → container restarted
+         ↓
+Back to startup → repeat
+```
+
+---
+
+## 🧪 Tip: Can you have both?
+
+✅ YES, and you should:
+
+- Use **readiness** to delay traffic until the pod is ready
+    
+- Use **liveness** to detect and recover from hang/crash situations
+    
+
+---
+
+## 🧠 Interview Tip
+
+> “The **liveness probe** ensures the container is still functioning; if it’s stuck or crashed, it gets restarted. The **readiness probe** ensures the app is ready to receive requests; if not, it’s removed from load balancers but kept running. Both are vital for zero-downtime and self-healing systems.”
+
+
 
 
 Best practises:
 
-It is recommended to run the one container per pods. If you have dependency or have some other cross cutting concerns like logging then you can run the multiple containers per pods which is the sideCar... 
+It is recommended to run the one container per pods. If you have dependency or have some other cross cutting concerns like logging then you can run the multiple containers per pods which is the sideCar pattern... 
 
 
 Sir notes 

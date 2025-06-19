@@ -2,7 +2,7 @@
 Kafka streams DSL —> Stateless and stateful transformation can be done here**
  **vs Processor Api -> Define the topology and add the source node, other nodes and marked the termination with sink node. —> it lets to create the own DAG(Direct acyclic graph ) for custom use case while designing the stream processing application..** 
 
-  
+  Gobal k table --> is without the partition whereas normal k table is with the partition.......
 
 Consumer producer app  
   
@@ -35,7 +35,7 @@ mapValues(values ->
 map(key, value) ->  
 filter((key, value) ->  Long.parseValue(value) > 1000)  
   
-Kstream -> can subscripe to the multiple topic…  
+Kstream -> can subscribe to the multiple topic…  
 KTable —> it can only subscribe to the single table  
   
   
@@ -98,10 +98,10 @@ Diagram: Visualizing KStream & KTable Joins
 
 **Use Case**: Enriching real-time events with user or product metadata.
 
-|Example|Why It’s Useful|
-|---|---|
-|Join orders (KStream) with user profile (KTable)|Add loyalty status, shipping preferences before fulfillment.|
-|Join purchase stream with product info table|Attach price, category, inventory status.|
+| Example                                          | Why It’s Useful                                              |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| Join orders (KStream) with user profile (KTable) | Add loyalty status, shipping preferences before fulfillment. |
+| Join purchase stream with product info table     | Attach price, category, inventory status.                    |
 
 📝 **Code Snippet**:
 
@@ -347,15 +347,15 @@ Kafka (pre-3.0) relies on **ZooKeeper** for cluster state. ZooKeeper itself is r
 
 ## 💡 Summary Table
 
-|Feature|Fault Tolerance Role|
-|---|---|
-|Replication|Ensures multiple copies of data|
-|Leader Election|Keeps partition available even if a broker fails|
-|Durable Disk Storage|Messages are recoverable after crashes|
-|ISR & Acks|Guarantees committed messages are safely replicated|
-|Idempotent Producer|Prevents duplicates during retries|
-|Consumer Rebalancing|Keeps consumption going even if a consumer dies|
-|ZooKeeper/KRaft|Manages leader election and cluster state|
+| Feature              | Fault Tolerance Role                                |
+| -------------------- | --------------------------------------------------- |
+| Replication          | Ensures multiple copies of data                     |
+| Leader Election      | Keeps partition available even if a broker fails    |
+| Durable Disk Storage | Messages are recoverable after crashes              |
+| ISR & Acks           | Guarantees committed messages are safely replicated |
+| Idempotent Producer  | Prevents duplicates during retries                  |
+| Consumer Rebalancing | Keeps consumption going even if a consumer dies     |
+| ZooKeeper/KRaft      | Manages leader election and cluster state           |
 
 ---
 
