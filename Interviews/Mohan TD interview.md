@@ -319,13 +319,13 @@ You need to **balance** kitchen speed and waiter efficiency.
 
 ## ✅ Summary Table
 
-| Area          | Parameter / Action                         | Effect                                             |
-| ------------- | ------------------------------------------ | -------------------------------------------------- |
-| Producer      | `linger.ms`, `batch.size`, `buffer.memory` | Controls batching and throughput                   |
-| Consumer      | `max.poll.records`, bounded queues         | Controls load and parallelism                      |
-| Processing    | Async / multi-threaded logic               | Decouples Kafka thread from slow logic             |
-| Error control | Retry + DLT                                | Prevents poison messages from causing backpressure |
-| Monitoring    | Lag metrics, queue size, CPU/memory        | Detects pressure early                             |
+| Area          | Parameter / Action                                                | Effect                                             |
+| ------------- | ----------------------------------------------------------------- | -------------------------------------------------- |
+| Producer      | `linger.ms`, `batch.size`, `buffer.memory`                        | Controls batching and throughput                   |
+| Consumer      | `max.poll.records`, fetch.max.wait, fetch.min.byte bounded queues | Controls load and parallelism                      |
+| Processing    | Async / multi-threaded logic                                      | Decouples Kafka thread from slow logic             |
+| Error control | Retry + DLT                                                       | Prevents poison messages from causing backpressure |
+| Monitoring    | Lag metrics, queue size, CPU/memory                               | Detects pressure early                             |
 
 ---
 
@@ -515,13 +515,13 @@ public UserSummary getUserDailyStats(Long userId) {
 
 ## 🚦 Combining Techniques
 
-|Scenario|Recommended Strategy|
-|---|---|
-|Real-time dashboards|Kafka Streams + Materialized Cache|
-|Daily summary reports|Materialized View + Partitioning|
-|Ad-hoc queries with heavy filters|Partitioning + Indexing|
-|Repeating slow queries|Caching|
-|Massive event data (e.g., IoT)|BRIN indexes + roll-up table|
+| Scenario                          | Recommended Strategy               |
+| --------------------------------- | ---------------------------------- |
+| Real-time dashboards              | Kafka Streams + Materialized Cache |
+| Daily summary reports             | Materialized View + Partitioning   |
+| Ad-hoc queries with heavy filters | Partitioning + Indexing            |
+| Repeating slow queries            | Caching                            |
+| Massive event data (e.g., IoT)    | BRIN indexes + roll-up table       |
 
 ---
 
