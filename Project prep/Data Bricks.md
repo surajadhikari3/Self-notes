@@ -86,3 +86,27 @@ Because of the databricksIQ it allows to run the natural language to run   and p
 With the AI/BI genie we can create the genie space and can query own data using the natural language which is backed up by the Databricks intelligence.
 
 ![[Pasted image 20250621160158.png]]
+
+
+![[Pasted image 20250621161204.png]]
+
+Delta Lake Architecture
+
+![[Pasted image 20250621173652.png]]
+
+![[Pasted image 20250621181244.png]]
+![[Pasted image 20250621181439.png]]
+
+![[Pasted image 20250621182403.png]]
+
+
+
+![[Pasted image 20250621183235.png]]
+![[Pasted image 20250621183640.png]]
+
+
+
+
+![[Pasted image 20250621183856.png]]
+
+![[Pasted image 20250621201435.png]]
