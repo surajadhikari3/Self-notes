@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project prep/DataBricks concepts.md",
+                "file": "Project prep/Dremio.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "DataBricks concepts"
+              "title": "Dremio"
             }
           }
         ]
@@ -181,8 +181,9 @@
   },
   "active": "82892ff59e1df29f",
   "lastOpenFiles": [
-    "Project prep/Data Bricks.md",
     "Project prep/DataBricks concepts.md",
+    "Project prep/Dremio.md",
+    "Project prep/Data Bricks.md",
     "Pasted image 20250621212020.png",
     "Pasted image 20250621201435.png",
     "Pasted image 20250621183856.png",
