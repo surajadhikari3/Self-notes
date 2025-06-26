@@ -35,3 +35,6 @@ It's a common approach to building data pipelines, often referred to as "multi-h
 
 
 ![](../Pasted%20image%2020250626163025.png)
+
+
+![[Pasted image 20250626172451.png]]
