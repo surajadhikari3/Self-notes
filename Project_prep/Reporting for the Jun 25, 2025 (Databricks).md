@@ -1,4 +1,4 @@
-!![](../Pasted%20image%2020250619101030.png)
+![](../Pasted%20image%2020250619101030.png)
 
 
 # How is Unity Catalog doing cataloging of data in databricks?
