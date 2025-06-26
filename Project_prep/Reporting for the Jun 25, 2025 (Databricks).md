@@ -172,22 +172,23 @@ Metastore B (us-west-2)
 ---
 
 
-![[Pasted image 20250625154439.png]]
+![](../Pasted%20image%2020250625154439.png)
+
 
 
 # How the Databricks does the access management.?
 
 In the settings -> Advanced Settings -> Admin can give the access control, Personal Access Token (PAT) for authorization 
-![[Pasted image 20250625161122.png]]
+![](../Pasted%20image%2020250625161122.png)
 
 
 Can also provide the Table based access..
-![[Pasted image 20250625161621.png]]
+![](../Pasted%20image%2020250625161621.png)
 
 Access control in **Databricks** is governed by **Unity Catalog**, which provides **fine-grained governance** for data and AI assets, enabling secure collaboration across teams. Here’s a structured view of **how access control works in Databricks**, especially across components like catalogs, schemas, tables, and beyond:
 
 
-![[Pasted image 20250625162500.png]]
+![](../Pasted%20image%2020250625162500.png)
 
 ---
 
