@@ -187,22 +187,12 @@ In the settings -> Advanced Settings -> Admin can give the access control, Perso
 # How the Databricks does the access management.?
 
 
-
-![](../Pasted%20image%2020250625161122.png)
-
-
-Can also provide the Table based access from the security ..
-
-
 Access control in **Databricks** is governed by **Unity Catalog**, which provides **fine-grained governance** for data and AI assets, enabling secure collaboration across teams. Here’s a structured view of **how access control works in Databricks**, especially across components like catalogs, schemas, tables, and beyond:
 
 
 ![](../Pasted%20image%2020250625162500.png)
 
 ---
-
-1. Access Management from the Databrics
-
 
 ### ✅ 1. **Access Control Flow in Databricks (Unity Catalog)**
 
@@ -234,7 +224,7 @@ Databricks supports authentication via:
     
 - Service Principals (for non-interactive apps)
 
-![](../Pasted%20image%2020250625161122.png)
+![[Pasted image 20250626152902.png]]
 
 ---
 
