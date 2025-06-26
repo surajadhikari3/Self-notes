@@ -13,11 +13,11 @@ A **Data Lakehouse** is a modern data architecture that **combines the best feat
 
 ### 🔍 Quick Definitions First:
 
-|Term|Definition|
-|---|---|
-|**Data Lake**|Stores raw, unstructured, and semi-structured data at scale (e.g., JSON, Parquet, CSV, video files).|
-|**Data Warehouse**|Stores structured, cleaned, and processed data for analytics (e.g., tables, SQL-friendly).|
-|**Lakehouse**|Unifies the raw flexibility of a **lake** with the structure and governance of a **warehouse**.|
+| Term               | Definition                                                                                           |
+| ------------------ | ---------------------------------------------------------------------------------------------------- |
+| **Data Lake**      | Stores raw, unstructured, and semi-structured data at scale (e.g., JSON, Parquet, CSV, video files). |
+| **Data Warehouse** | Stores structured, cleaned, and processed data for analytics (e.g., tables, SQL-friendly).           |
+| **Lakehouse**      | Unifies the raw flexibility of a **lake** with the structure and governance of a **warehouse**.      |
 
 ---
 
@@ -80,14 +80,14 @@ Think of a **DLT pipeline** as a smart system where you define **what data trans
 
 ### 🧠 **Key Features of DLT Pipelines:**
 
-|Feature|Description|
-|---|---|
-|🧾 **Declarative ETL**|You declare _what_ should happen (`CREATE LIVE TABLE ...`) instead of writing imperative Spark jobs.|
-|📊 **Data Quality Rules (Expectations)**|Use `EXPECT` clauses to define and enforce data quality checks at the row level.|
-|🔁 **Automatic Lineage Tracking**|Visual graph of all table dependencies in the pipeline.|
-|⚙️ **Incremental Processing**|DLT supports change data capture (CDC) and only processes **new or updated data**.|
-|🔍 **Monitoring and Logging**|Built-in metrics, error tracking, and performance monitoring for pipelines.|
-|☁️ **Fully Managed**|Databricks handles orchestration, scaling, retries, and optimizations under the hood.|
+| Feature                                  | Description                                                                                          |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 🧾 **Declarative ETL**                   | You declare _what_ should happen (`CREATE LIVE TABLE ...`) instead of writing imperative Spark jobs. |
+| 📊 **Data Quality Rules (Expectations)** | Use `EXPECT` clauses to define and enforce data quality checks at the row level.                     |
+| 🔁 **Automatic Lineage Tracking**        | Visual graph of all table dependencies in the pipeline.                                              |
+| ⚙️ **Incremental Processing**            | DLT supports change data capture (CDC) and only processes **new or updated data**.                   |
+| 🔍 **Monitoring and Logging**            | Built-in metrics, error tracking, and performance monitoring for pipelines.                          |
+| ☁️ **Fully Managed**                     | Databricks handles orchestration, scaling, retries, and optimizations under the hood.                |
 
 ---
 
@@ -207,14 +207,14 @@ It solves major limitations of older table formats like Hive:
 
 ## 🆚 Iceberg vs Delta Lake vs Hudi
 
-|Feature|**Delta Lake**|**Iceberg**|**Apache Hudi**|
-|---|---|---|---|
-|ACID Transactions|✅ Yes|✅ Yes|✅ Yes|
-|Schema Evolution|✅ Yes|✅ Yes|⚠️ Limited|
-|Time Travel|✅ Yes|✅ Yes|✅ Yes|
-|Partition Evolution|❌ No|✅ Yes|⚠️ Experimental|
-|Compatibility|Spark, Databricks|Spark, Trino, Flink|Spark, Hive|
-|Storage Format|Parquet|Parquet, ORC, Avro|Parquet|
+| Feature             | **Delta Lake**    | **Iceberg**         | **Apache Hudi** |
+| ------------------- | ----------------- | ------------------- | --------------- |
+| ACID Transactions   | ✅ Yes             | ✅ Yes               | ✅ Yes           |
+| Schema Evolution    | ✅ Yes             | ✅ Yes               | ⚠️ Limited      |
+| Time Travel         | ✅ Yes             | ✅ Yes               | ✅ Yes           |
+| Partition Evolution | ❌ No              | ✅ Yes               | ⚠️ Experimental |
+| Compatibility       | Spark, Databricks | Spark, Trino, Flink | Spark, Hive     |
+| Storage Format      | Parquet           | Parquet, ORC, Avro  | Parquet         |
 
 ---
 
