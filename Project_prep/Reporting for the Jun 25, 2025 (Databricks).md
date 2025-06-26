@@ -349,6 +349,10 @@ From ui the access can be managed as shown below for both notebook and dashboard
 
 ![[Pasted image 20250626132731.png]]
 
+
+https://www.databricks.com/discover/pages/access-control#introHear
+
+
 # If the underlying datasource changes, how are the reports affected
 
 
@@ -535,3 +539,5 @@ It is a data design pattern that organizes data within a lake-house into layers(
 It's a common approach to building data pipelines, often referred to as "multi-hop" because data progresses through distinct stages. The three main layers are Bronze (raw data), Silver (validated data), and Gold (enriched data).
 
 ![[Pasted image 20250626125120.png]]
+
+![[Pasted image 20250626134329.png]]
