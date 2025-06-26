@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/Reporting for the Jun 25, 2025 (Databricks).md",
+                "file": "Project_prep/Reporting for the Jun 26, 2025.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Reporting for the Jun 25, 2025 (Databricks)"
+              "title": "Reporting for the Jun 26, 2025"
             }
           }
         ]
@@ -181,8 +181,11 @@
   },
   "active": "1e99797de3eb049b",
   "lastOpenFiles": [
-    "Project_prep/Reporting for the Jun 26, 2025.md",
+    "Pasted image 20250626163025.png",
     "Project_prep/Reporting for the Jun 25, 2025 (Databricks).md",
+    "Project_prep/Reporting for the Jun 26, 2025.md",
+    "Pasted image 20250626162724.png",
+    "Pasted image 20250626162225.png",
     "Project_prep/Azure Databricks.md",
     "Project_prep/Data Bricks.md",
     "Project_prep/DataBricks concepts.md",
@@ -196,8 +199,6 @@
     "Pasted image 20250626132731.png",
     "Pasted image 20250626125120.png",
     "Pasted image 20250626122318.png",
-    "Pasted image 20250626120442.png",
-    "Pasted image 20250626120432.png",
     "Sql Functions Guide.pdf",
     "Project_prep/Apache Flink, Spark and kafka.md",
     "Pasted.md",
@@ -218,7 +219,6 @@
     "Gems/Java basics.md",
     "Gems/Java 8.md",
     "Gems/Garbage collection.md",
-    "Coding things/Java 8 hands-on notes.md",
     "Untitled 1.canvas",
     "Project_prep",
     "Untitled.canvas",
