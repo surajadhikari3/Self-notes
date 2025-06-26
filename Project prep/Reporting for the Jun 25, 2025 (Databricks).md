@@ -1,5 +1,7 @@
 ![](Pasted%20image%2020250619101030.png)
 
+![](Password.png)
+
 # How is Unity Catalog doing cataloging of data in databricks?
 
 Unity Catalog in **Databricks** is a unified governance solution that provides **fine-grained access control, centralized metadata management**, and **data lineage tracking** across **workspaces** and **cloud platforms** (AWS, Azure, GCP). It acts as a **central catalog service** for managing all data assets—tables, views, volumes, functions, files, and ML models.
