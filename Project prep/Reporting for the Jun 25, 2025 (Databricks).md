@@ -1,6 +1,5 @@
 ![](Pasted%20image%2020250619101030.png)
 
-![](Password.png)
 
 # How is Unity Catalog doing cataloging of data in databricks?
 
@@ -171,6 +170,7 @@ Metastore B (us-west-2)
     
 
 ---
+![Pasted image](Pasted%20image%2020250625154439.png)
 
 
 ![[Pasted image 20250625154439.png]]
