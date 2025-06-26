@@ -239,6 +239,13 @@ Unity Catalog introduces a **three-level hierarchical model**:
 | **Table/View** | Actual data objects                    | `SELECT`, `INSERT`, `UPDATE`, `DELETE`  |
 
  Access Control  From Ui
+
+
+![](../Pasted%20image%2020250626164339.png)
+
+
+![](../Pasted%20image%2020250626164059.png)
+
 ![](../Pasted%20image%2020250625161621.png)
 
 
