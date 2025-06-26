@@ -110,3 +110,11 @@ Delta Lake Architecture
 ![[Pasted image 20250621183856.png]]
 
 ![[Pasted image 20250621201435.png]]
+
+
+![[Pasted image 20250626133543.png]]
+
+![[Pasted image 20250626134109.png]]
+
+
+![[Pasted image 20250626134238.png]]

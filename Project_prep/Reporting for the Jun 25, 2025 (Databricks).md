@@ -178,6 +178,13 @@ Metastore B (us-west-2)
 
 # How the Databricks does the access management.?
 
+Reporting level --> 
+
+BI Analytics --> Acess Management
+
+
+Ask Aneesha at which level report or catlog level or both -- >ASK 
+
 In the settings -> Advanced Settings -> Admin can give the access control, Personal Access Token (PAT) for authorization 
 ![](../Pasted%20image%2020250625161122.png)
 
@@ -323,7 +330,24 @@ GRANT USE CATALOG ON CATALOG main.my_catalog TO `data_analyst_group`;
 |Clusters|Shared vs Secure|Secure clusters enforce UC rules|
 |External Storage|External Location ACLs|Controlled via Unity Catalog objects|
 
+------------------------------------------------------------------------------------
 
+## 🛠️   **How Are GRANTS Provided? (SQL vs UI)**
+
+|Level|Controlled By|Access Method|Notes|
+|---|---|---|---|
+|**Catalog**|Unity Catalog ACL|✅ SQL Only|`GRANT USAGE ON CATALOG catalog_name TO user/group`|
+|**Schema**|Unity Catalog ACL|✅ SQL Only|`GRANT USAGE ON SCHEMA catalog.schema TO user/group`|
+|**Table/View**|Unity Catalog ACL|✅ SQL Only|`GRANT SELECT ON TABLE catalog.schema.table TO user/group`|
+|**Row/Column**|Secure Views|✅ SQL Only|Define views using filters like `WHERE region = current_user()`|
+|**Notebooks / Dashboards**|Workspace ACL|✅ UI + ✅ SQL|Via UI (share, run access) or API|
+
+⚠️ **Only dashboard/notebook access** can be granted via the **UI**, all **data-level access is SQL-only**.
+
+
+From ui the access can be managed as shown below for both notebook and dashboard and for the rest the access is granted via sql level................ 
+
+![[Pasted image 20250626132731.png]]
 
 # If the underlying datasource changes, how are the reports affected
 
@@ -483,3 +507,31 @@ Even the dremio does not support this  (So have to handle explicitly on both )
 
 
 
+
+Reporting -> 2025-06-26
+
+
+Data bricks visualization 
+
+![[Pasted image 20250626113301.png]]
+
+
+![[Pasted image 20250626115026.png]]
+
+
+
+![[Pasted image 20250626120442.png]]
+
+
+Visualization can also be done directly from the notebook once the table is executed there is the option to add the visualization  
+
+![[Pasted image 20250626122318.png]]
+
+
+Medallion Architecture
+
+It is a data design pattern that organizes data within a lake-house into layers(zones) to improve quality and accessibility.
+
+It's a common approach to building data pipelines, often referred to as "multi-hop" because data progresses through distinct stages. The three main layers are Bronze (raw data), Silver (validated data), and Gold (enriched data).
+
+![[Pasted image 20250626125120.png]]
