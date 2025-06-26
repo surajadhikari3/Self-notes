@@ -309,7 +309,8 @@ You can manage ACLs via:
 ---
 
 
- 2.   Persona Mangement using Teraform --> Can define the template providing the role access to respective user and can fed to Teraform 
+ 2.   Persona/Group Mangement using Teraform 
+	    --> Can define the template providing the role access to respective user and can fed to Terraform 
 (https://www.databricks.com/discover/pages/access-control#introHear )
 ---
 
