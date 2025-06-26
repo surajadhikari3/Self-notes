@@ -242,7 +242,7 @@ Unity Catalog introduces a **three-level hierarchical model**:
 ![](../Pasted%20image%2020250625161621.png)
 
 
-Access Control line From CommandLine 
+Access Control line From SQL 
 
 ```sql
 -- Granting access to a table
@@ -509,33 +509,3 @@ Even the dremio does not support this  (So have to handle explicitly on both )
 
 
 
-
-Reporting -> 2025-06-26
-
-
-Data bricks visualization 
-
-![[Pasted image 20250626113301.png]]
-
-
-![[Pasted image 20250626115026.png]]
-
-
-
-![[Pasted image 20250626120442.png]]
-
-
-Visualization can also be done directly from the notebook once the table is executed there is the option to add the visualization  
-
-![[Pasted image 20250626122318.png]]
-
-
-Medallion Architecture
-
-It is a data design pattern that organizes data within a lake-house into layers(zones) to improve quality and accessibility.
-
-It's a common approach to building data pipelines, often referred to as "multi-hop" because data progresses through distinct stages. The three main layers are Bronze (raw data), Silver (validated data), and Gold (enriched data).
-
-![[Pasted image 20250626125120.png]]
-
-![[Pasted image 20250626134329.png]]
