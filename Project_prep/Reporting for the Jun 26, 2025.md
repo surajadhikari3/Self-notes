@@ -1,13 +1,16 @@
 Data bricks visualization 
 
-![[Pasted image 20250626113301.png]]
-
-
-![[Pasted image 20250626115026.png]]
+![](../Pasted%20image%2020250626113301.png)
 
 
 
-![[Pasted image 20250626120442.png]]
+![](../Pasted%20image%2020250626115026.png)
+
+
+
+
+![](../Pasted%20image%2020250626120442.png)
+
 
 
 Visualization can also be done directly from the notebook once the table is executed there is the option to add the visualization  
