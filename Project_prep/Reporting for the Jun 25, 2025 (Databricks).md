@@ -285,8 +285,6 @@ GRANT USE CATALOG ON CATALOG main.my_catalog TO `data_analyst_group`;
     
 - These clusters use **credential passthrough** or **identity federation** to impersonate users and apply ACLs properly.
     
-    
-
 ---
 
 ### ✅ 6. **Auditing and Governance**
@@ -311,7 +309,7 @@ You can manage ACLs via:
 ---
 
 
- 2.   Persona Mangement using  Teraform --> Can define the template providing the role access to respective user
+ 2.   Persona Mangement using Teraform --> Can define the template providing the role access to respective user and can fed to Teraform 
 (https://www.databricks.com/discover/pages/access-control#introHear )
 ---
 
