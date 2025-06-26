@@ -1,5 +1,5 @@
 ![[Pasted image 20250619101030.png]]
-How is Unity Catalog doing cataloging of data in databricks?
+# How is Unity Catalog doing cataloging of data in databricks?
 
 Unity Catalog in **Databricks** is a unified governance solution that provides **fine-grained access control, centralized metadata management**, and **data lineage tracking** across **workspaces** and **cloud platforms** (AWS, Azure, GCP). It acts as a **central catalog service** for managing all data assets—tables, views, volumes, functions, files, and ML models.
 
@@ -173,7 +173,7 @@ Metastore B (us-west-2)
 ![[Pasted image 20250625154439.png]]
 
 
-How the Databricks does the access management.?
+# How the Databricks does the access management.?
 
 In the settings -> Advanced Settings -> Admin can give the access control, Personal Access Token (PAT) for authorization 
 ![[Pasted image 20250625161122.png]]
