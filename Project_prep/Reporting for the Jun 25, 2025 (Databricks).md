@@ -176,21 +176,23 @@ Metastore B (us-west-2)
 
 
 
-# How the Databricks does the access management.?
-
-Reporting level --> 
-
-BI Analytics --> Acess Management
 
 
-Ask Aneesha at which level report or catlog level or both -- >ASK 
+Questions to be asked: 
+
+Does the access managment needs to handle at the reporting or catalog level?
 
 In the settings -> Advanced Settings -> Admin can give the access control, Personal Access Token (PAT) for authorization 
+
+# How the Databricks does the access management.?
+
+
+
 ![](../Pasted%20image%2020250625161122.png)
 
 
-Can also provide the Table based access..
-![](../Pasted%20image%2020250625161621.png)
+Can also provide the Table based access from the security ..
+
 
 Access control in **Databricks** is governed by **Unity Catalog**, which provides **fine-grained governance** for data and AI assets, enabling secure collaboration across teams. Here’s a structured view of **how access control works in Databricks**, especially across components like catalogs, schemas, tables, and beyond:
 
@@ -198,6 +200,9 @@ Access control in **Databricks** is governed by **Unity Catalog**, which provide
 ![](../Pasted%20image%2020250625162500.png)
 
 ---
+
+1. Access Management from the Databrics
+
 
 ### ✅ 1. **Access Control Flow in Databricks (Unity Catalog)**
 
@@ -223,12 +228,13 @@ Databricks supports authentication via:
 
 - Azure Active Directory (Azure AD)
     
-- SCIM (for user/group sync)
+- SCIM(System for Cross-domain Identity Management) (for user/group sync)
     
 - Personal Access Tokens (PATs)
     
 - Service Principals (for non-interactive apps)
-    
+
+![](../Pasted%20image%2020250625161122.png)
 
 ---
 
@@ -236,12 +242,28 @@ Databricks supports authentication via:
 
 Unity Catalog introduces a **three-level hierarchical model**:
 
-|Level|Description|Example Permissions|
-|---|---|---|
-|**Catalog**|Top-level namespace (like a DB server)|`USE CATALOG`, `CREATE SCHEMA`, `GRANT`|
-|**Schema**|Like a database within a catalog|`CREATE TABLE`, `SELECT`, `MODIFY`|
-|**Table/View**|Actual data objects|`SELECT`, `INSERT`, `UPDATE`, `DELETE`|
+| Level          | Description                            | Example Permissions                     |
+| -------------- | -------------------------------------- | --------------------------------------- |
+| **Catalog**    | Top-level namespace (like a DB server) | `USE CATALOG`, `CREATE SCHEMA`, `GRANT` |
+| **Schema**     | Like a database within a catalog       | `CREATE TABLE`, `SELECT`, `MODIFY`      |
+| **Table/View** | Actual data objects                    | `SELECT`, `INSERT`, `UPDATE`, `DELETE`  |
 
+ Access Control  From Ui
+![](../Pasted%20image%2020250625161621.png)
+
+
+Access Control line From CommandLine 
+
+```sql
+-- Granting access to a table
+GRANT SELECT ON TABLE main.my_catalog.sales.orders TO `data_analyst_group`;
+
+-- Granting usage of schema
+GRANT USE SCHEMA ON SCHEMA main.my_catalog.sales TO `data_analyst_group`;
+
+-- Granting usage of catalog
+GRANT USE CATALOG ON CATALOG main.my_catalog TO `data_analyst_group`;
+```
 #### 🟩 Example Flow:
 
 - A user must have `USE CATALOG` on the catalog → `USE SCHEMA` on the schema → `SELECT` on the table to run a query.
@@ -273,12 +295,6 @@ Unity Catalog introduces a **three-level hierarchical model**:
     
 - These clusters use **credential passthrough** or **identity federation** to impersonate users and apply ACLs properly.
     
-
-#### 🔸 DBFS & External Locations:
-
-- Access to external locations (like ADLS, S3) is controlled via **External Location ACLs** and **storage credentials**.
-    
-- These are defined and managed within Unity Catalog, with specific grants.
     
 
 ---
@@ -304,19 +320,9 @@ You can manage ACLs via:
 
 ---
 
-### ✅ 8. **Sample SQL for Access Control**
 
-```sql
--- Granting access to a table
-GRANT SELECT ON TABLE main.my_catalog.sales.orders TO `data_analyst_group`;
-
--- Granting usage of schema
-GRANT USE SCHEMA ON SCHEMA main.my_catalog.sales TO `data_analyst_group`;
-
--- Granting usage of catalog
-GRANT USE CATALOG ON CATALOG main.my_catalog TO `data_analyst_group`;
-```
-
+ 2.   Persona Mangement using  Teraform --> Can define the template providing the role access to respective user
+(https://www.databricks.com/discover/pages/access-control#introHear )
 ---
 
 ### 🧠 Summary
@@ -347,10 +353,12 @@ GRANT USE CATALOG ON CATALOG main.my_catalog TO `data_analyst_group`;
 
 From ui the access can be managed as shown below for both notebook and dashboard and for the rest the access is granted via sql level................ 
 
+Go to Share and select the access level 
+
 ![[Pasted image 20250626132731.png]]
 
 
-https://www.databricks.com/discover/pages/access-control#introHear
+
 
 
 # If the underlying datasource changes, how are the reports affected
