@@ -38,3 +38,7 @@ It's a common approach to building data pipelines, often referred to as "multi-h
 
 
 ![](../Pasted%20image%2020250626172451.png)
+
+![[Pasted image 20250626174147.png]]
+
+There is rocksdb that keeps the state of the data even it keeps track of file and only process the changed file.
