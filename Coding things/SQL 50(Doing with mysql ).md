@@ -370,12 +370,12 @@ WHERE avg_amt > 120;
 
 ## ✅ Why Use CTEs?
 
-|Feature|Benefit|
-|---|---|
-|Readability|Breaks down complex queries|
-|Reusability|Use the same logic multiple times|
-|Maintainability|Easier to debug and edit|
-|Recursion|Can be used for hierarchical data|
+| Feature         | Benefit                           |
+| --------------- | --------------------------------- |
+| Readability     | Breaks down complex queries       |
+| Reusability     | Use the same logic multiple times |
+| Maintainability | Easier to debug and edit          |
+| Recursion       | Can be used for hierarchical data |
 
 ---
 

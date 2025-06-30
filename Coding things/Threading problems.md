@@ -35,9 +35,6 @@ CopyEdit
 
 🔧 You simulate this by:
 
-java
-
-CopyEdit
 
 `// Producer Thread.sleep(1500);  // Slow  // Consumer Thread.sleep(100);  // Fast`
 
