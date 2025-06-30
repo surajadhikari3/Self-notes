@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Spring/Spring cloud.md",
+                "file": "Project_prep/Jun 30.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Spring cloud"
+              "title": "Jun 30"
             }
           }
         ]
@@ -78,7 +78,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 255.50296020507812
+    "width": 255.50296020507812,
+    "collapsed": true
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -181,13 +182,14 @@
   },
   "active": "1e99797de3eb049b",
   "lastOpenFiles": [
-    "Spring/Todos.md",
+    "Project_prep/Reporting for the Jun 25, 2025 (Databricks).md",
+    "Project_prep/Jun 30.md",
     "Spring/Spring cloud.md",
+    "Spring/Todos.md",
     "Coding things/Java 8 hands-on notes.md",
     "Coding things/linux_command_cheatsheet.pdf",
     "Coding things/Threading problems.md",
     "Coding things/SQL 50(Doing with mysql ).md",
-    "Project_prep/Reporting for the Jun 25, 2025 (Databricks).md",
     "temp.md",
     "Project_prep/DataBricks concepts.md",
     "Project_prep/Azure Databricks.md",
@@ -219,7 +221,6 @@
     "Cloud/Architecture.md",
     "Untitled 2.canvas",
     "Project_prep/Angular/Angular nuts and bolts.md",
-    "Coding things/Coding concepts...md",
     "Untitled 1.canvas",
     "Project_prep",
     "Untitled.canvas",
