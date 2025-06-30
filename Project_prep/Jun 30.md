@@ -109,6 +109,14 @@ Or through **Unity Catalog REST APIs** for automation, lineage, and metadata ext
 |Data Lineage|Understand origins and dependencies|
 |APIs & SQL Commands|Automation and scripting|
 
+![](../Pasted%20image%2020250630163226.png)
+
+
+
+
+![](../Pasted%20image%20250630163507.png)
+
+![[Pasted image 20250630163507.png]]
 ---
 
  how to get data from Oracle / Mysql / Mongo into DataBricks catalog -> schema -> table structure
