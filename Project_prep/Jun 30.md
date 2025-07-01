@@ -100,17 +100,17 @@ Or through **Unity Catalog REST APIs** for automation, lineage, and metadata ext
 
 ### ✅ Summary Table
 
-|Method|Purpose|
-|---|---|
-|Unity Catalog|Central metadata and governance|
-|Data Explorer|Visual navigation and search|
-|Global Search|Fast lookup across workspace|
-|Table & Column Metadata|Understand schema, tags, usage|
-|Data Lineage|Understand origins and dependencies|
-|APIs & SQL Commands|Automation and scripting|
+| Method                  | Purpose                             |
+| ----------------------- | ----------------------------------- |
+| Unity Catalog           | Central metadata and governance     |
+| Data Explorer           | Visual navigation and search        |
+| Global Search           | Fast lookup across workspace        |
+| Table & Column Metadata | Understand schema, tags, usage      |
+| Data Lineage            | Understand origins and dependencies |
+| APIs & SQL Commands     | Automation and scripting            |
+|                         |                                     |
 
 ![](../Pasted%20image%2020250630163226.png)
-
 
 
 ![](../Pasted%20image%2020250630163507.png)
@@ -290,3 +290,10 @@ There is the data visualization, Dashboard in the Databricks. Is it Better than 
 |Want beautiful, interactive dashboards|✅ Tableau|
 |Need real-time streaming insights from Delta|✅ Databricks Dashboards|
 |Cost and speed is a concern|✅ Stick with Databricks dashboard (no extra licensing)|
+
+
+Visualiztion 
+
+
+![](../Pasted%20image%2020250630203128.png)
+
