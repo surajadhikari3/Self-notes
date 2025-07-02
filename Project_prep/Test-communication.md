@@ -1,4 +1,9 @@
 
+
+
+``
+```python
+
 import os
 import json
 import time
@@ -25,8 +30,6 @@ categories = {
 }
 
 # Generate multiple JSON files simulating streaming data
-
-
 for file_index in range(10):  # 10 files
     records = []
     for _ in range(10):  # 10 records per file
@@ -58,3 +61,5 @@ for file_index in range(10):  # 10 files
 
     print(f"Generated {file_path}")
     time.sleep(2)  # simulate file arrival over time
+
+```
