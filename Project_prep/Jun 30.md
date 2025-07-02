@@ -318,12 +318,12 @@ Visualiztion
 
 
 
+![](../Pasted%20image%2020250702125723.png)
 
 
-![[Pasted image 20250702125723.png]]
+![](../Pasted%20image%2020250702131227.png)
 
 
-![[Pasted image 20250702131227.png]]
 
 Producer and consumer flow.
 
