@@ -537,6 +537,99 @@ jdbc:spark://<databricks-sql-endpoint>:443/default;transportMode=http;ssl=1;http
 |7|External Viz|BI Integration|Power BI, Tableau|✅|
 |8|Sharing|Stakeholder Access|SQL/ACLs|✅|
 
+
 ---
 
-Would you like me to generate a **new updated diagram** with these improvements labeled and aligned with this flow?
+## ✅ Step 8: Generate and Share Analytics (SQL Queries, Visualizations, Dashboards) via API
+
+Once data is available in the Gold layer (transformed Delta tables), you can programmatically create and share analytics using the following API-based flow:
+
+### 🧭 8.1. Create a SQL Query
+
+Use the Queries API to define your SQL logic:
+
+```bash
+curl -X POST https://<DATABRICKS_INSTANCE>/api/2.0/sql/queries \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Revenue by Region",
+    "query": "SELECT region, SUM(sales) as revenue FROM gold.sales GROUP BY region",
+    "data_source_id": "<SQL_WAREHOUSE_ID>"
+  }'
+```
+
+🔁 Store the query_id from the response.
+
+---
+
+### 📊 8.2. Create a Visualization (e.g., Bar Chart)
+
+Attach a chart to that query using the Visualizations API:
+
+```bash
+curl -X POST https://<DATABRICKS_INSTANCE>/api/2.0/sql/visualizations \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "barchart",
+    "name": "Revenue Chart",
+    "query_id": "<query_id>",
+    "options": {
+        "xColumn": "region",
+        "yColumn": "revenue",
+        "aggregation": "SUM"
+    }
+  }'
+```
+
+🔁 Store the visualization_id from the response.
+
+---
+
+### 📋 8.3. Create or Reuse a Dashboard
+
+Use the Dashboards API to create a container for the visual:
+
+```bash
+curl -X POST https://<DATABRICKS_INSTANCE>/api/2.0/sql/dashboards \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{ "name": "Sales Overview Dashboard" }'
+```
+
+🔁 Store dashboard_id from the response.
+
+---
+
+### 🧱 8.4. Add the Visualization to the Dashboard (as a Widget)
+
+Databricks supports adding visuals via internal widget APIs (currently not well-documented externally), but can be automated using the UI and shared via permission API (next step).
+
+---
+
+### 🔐 8.5. Share Dashboard or Query with Teams
+
+Use the Permissions API to grant access to consumers (analysts, BI teams, business users):
+
+```bash
+curl -X PATCH https://<DATABRICKS_INSTANCE>/api/2.0/permissions/sql/dashboard/<dashboard_id> \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "access_control_list": [
+      {
+        "group_name": "executive_team",
+        "permission_level": "CAN_VIEW"
+      }
+    ]
+  }'
+```
+
+---
+
+✅ Result: The data consumer group now sees the full dashboard with charts in their Databricks SQL workspace, based on governed Gold-layer data.
+
+---
+
+Would you like a simple diagram of this Step 8 API-based flow, or a Postman collection to test all endpoints?
