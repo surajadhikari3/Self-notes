@@ -631,5 +631,3 @@ curl -X PATCH https://<DATABRICKS_INSTANCE>/api/2.0/permissions/sql/dashboard/<d
 ✅ Result: The data consumer group now sees the full dashboard with charts in their Databricks SQL workspace, based on governed Gold-layer data.
 
 ---
-
-Would you like a simple diagram of this Step 8 API-based flow, or a Postman collection to test all endpoints?
