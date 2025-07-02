@@ -316,3 +316,227 @@ Visualiztion
 
 ![](../Pasted%20image%2020250702105714.png)
 
+
+
+
+
+![[Pasted image 20250702125723.png]]
+
+
+![[Pasted image 20250702131227.png]]
+
+Producer and consumer flow.
+
+1. Producing to Databricks
+	1.1 If the file is in cloud storage it can directly be ingested to the databricks using the Autoloader
+   1.2  If the file source is in on-prem then it can be batch loaded to the Cloud storage, and using the Autoloader it can be produced to to Databricks to  the Bronze table
+   1.3 If the cloud storage is not to be used then CDC has to be manually implemented using the CDC tools like Debezium, Goldengate and publish the event to the kafka and kafka will produce to the Databricks.
+2. Once the data is in Databricks it can be produced as delta managed table and can be written into the Bronze table.
+   Bronze table act as the source for different consumer and they can process the data as per their requirement and can generate the analytics on it.
+3. Role management for differnet users and groups via unity catalog
+4. Data cleaning and transformation from bronzeto silver layer
+5. Aggregation and some transformation based on the business need and the generation of the Gold layer
+6. Generation of visualization, dashboards using the databricks platform itself
+7. Extending the visulization , dashboards to the tools like Tabalaue, Power BI, Looker for more enhancement
+8. Sharing of the generated Visualization with the analyst or other stake holders. Databricks provide the publishing and role based sharing with other users.
+
+
+Here's your **enhanced Producer-Consumer flow with Databricks**, updated with missing components, proper terminology, best practices, and **inline code snippets** for each stage based on your image and outline:
+
+---
+
+## ✅ **Enhanced Producer to Consumer Flow (with Code Snippets)**
+
+---
+
+### 🔹 **Step 1: Producing to Databricks**
+
+#### 1.1 If file is in **Cloud Storage** → Use **AutoLoader**:
+
+Autoloader automatically tracks new files from S3, ADLS, or GCS and writes to Bronze.
+
+```python
+bronze_df = (
+    spark.readStream.format("cloudFiles")
+    .option("cloudFiles.format", "json")  # or csv/parquet
+    .option("cloudFiles.schemaLocation", "/mnt/schema/bronze/")
+    .load("/mnt/raw/events/")
+)
+
+bronze_df.writeStream.format("delta") \
+    .option("checkpointLocation", "/mnt/checkpoints/bronze/") \
+    .start("/mnt/bronze/events")
+```
+
+---
+
+#### 1.2 If file is from **On-Prem**:
+
+- Batch upload it to **Cloud Storage** first.
+    
+- Then use **AutoLoader** as above.
+    
+
+📌 **Tip**: Use Azure Data Factory, AWS DataSync, or gsutil to transfer on-prem files to the cloud.
+
+---
+
+#### 1.3 If cloud storage is **not used**, ingest via **CDC tools + Kafka**:
+
+Use tools like **Debezium / GoldenGate** to capture changes and publish to **Kafka**.
+
+```python
+kafka_df = (
+    spark.readStream.format("kafka")
+    .option("kafka.bootstrap.servers", "broker:9092")
+    .option("subscribe", "cdc.orders")
+    .load()
+)
+
+value_df = kafka_df.selectExpr("CAST(value AS STRING)")
+bronze_df = spark.read.json(value_df.rdd.map(lambda x: x["value"]))
+
+bronze_df.writeStream.format("delta") \
+    .option("checkpointLocation", "/mnt/checkpoints/bronze_kafka/") \
+    .start("/mnt/bronze/cdc_orders")
+```
+
+---
+
+### 🔹 **Step 2: Bronze Table in Databricks**
+
+- All raw data lands here.
+    
+- Stored in **Delta Lake** format.
+    
+- Immutable, append-only.
+    
+
+🧠 Acts as the single source of truth for downstream processing.
+
+```python
+# Example Bronze Query
+spark.read.format("delta").load("/mnt/bronze/events").display()
+```
+
+---
+
+### 🔹 **Step 3: Role Management with Unity Catalog**
+
+- Unity Catalog handles:
+    
+    - Table-level, column-level, row-level access control
+        
+    - Governance (lineage, audit, tags)
+        
+- Integrated with identity providers like Azure AD
+    
+
+```sql
+GRANT SELECT ON TABLE bronze.events TO `analyst_group`;
+```
+
+---
+
+### 🔹 **Step 4: Silver Table (Cleaned and Enriched)**
+
+Transforms Bronze data:
+
+- Cleans nulls
+    
+- Fixes formats
+    
+- Deduplicates
+    
+- Adds reference data
+    
+
+```python
+bronze_df = spark.read.format("delta").load("/mnt/bronze/events")
+
+silver_df = (
+    bronze_df
+    .filter("event_type IS NOT NULL")
+    .withColumn("event_time", to_timestamp("event_time"))
+    .dropDuplicates(["event_id"])
+)
+
+silver_df.write.format("delta").mode("overwrite").save("/mnt/silver/cleaned_events")
+```
+
+---
+
+### 🔹 **Step 5: Gold Table (Aggregated Business KPIs)**
+
+Performs business-level aggregations:
+
+- KPIs, metrics, reporting summaries
+    
+
+```python
+silver_df = spark.read.format("delta").load("/mnt/silver/cleaned_events")
+
+gold_df = (
+    silver_df.groupBy("user_id")
+    .agg(
+        count("*").alias("event_count"),
+        max("event_time").alias("last_event_time")
+    )
+)
+
+gold_df.write.format("delta").mode("overwrite").save("/mnt/gold/user_summary")
+```
+
+---
+
+### 🔹 **Step 6: Dashboards in Databricks**
+
+- Use **SQL Editor → Visualizations** to build dashboards from Gold Tables.
+    
+- Supports charts, time series, KPIs, pivot tables.
+    
+
+📌 Dashboards can be shared with users/groups based on Unity Catalog permissions.
+
+---
+
+### 🔹 **Step 7: External Visualization (Power BI, Tableau, Looker, Qlik)**
+
+- Use **JDBC/ODBC connectors** or **SQL Warehouses** to connect BI tools.
+    
+
+Example: Tableau connection string to Databricks SQL endpoint.
+
+```bash
+jdbc:spark://<databricks-sql-endpoint>:443/default;transportMode=http;ssl=1;httpPath=<path>
+```
+
+---
+
+### 🔹 **Step 8: Stakeholder Sharing**
+
+- Dashboards can be **published directly** from Databricks.
+    
+- Shared via role-based access (analyst, execs).
+    
+- Also accessible via BI tools (if integrated).
+    
+
+---
+
+### 🧭 Summary Table
+
+|Step|Layer|Purpose|Technology|Code Snippet Included|
+|---|---|---|---|---|
+|1|Ingest|Raw data into Databricks|Autoloader / Kafka|✅|
+|2|Bronze|Raw Delta Table|Delta Lake|✅|
+|3|Access|Role-based control|Unity Catalog|✅|
+|4|Silver|Cleaned Data|PySpark/SQL|✅|
+|5|Gold|Aggregated Data|PySpark/SQL|✅|
+|6|Visualization|Internal Dashboards|Databricks Viz|⚡|
+|7|External Viz|BI Integration|Power BI, Tableau|✅|
+|8|Sharing|Stakeholder Access|SQL/ACLs|✅|
+
+---
+
+Would you like me to generate a **new updated diagram** with these improvements labeled and aligned with this flow?
