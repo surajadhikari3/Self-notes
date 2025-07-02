@@ -347,6 +347,18 @@ You can manage ACLs via:
 ⚠️ **Only dashboard/notebook access** can be granted via the **UI**, all **data-level access is SQL-only**.
 
 
+
+## Inheritance model
+
+Securable objects in Unity Catalog are hierarchical, and privileges are inherited downward. The highest level object that privileges are inherited from is the catalog. This means that granting a privilege on a catalog or schema automatically grants the privilege to all current and future objects within the catalog or schema. For example, if you give a user the `SELECT` privilege on a catalog, then that user will be able to select (read) all tables and views in that catalog. Privileges that are granted on a Unity Catalog metastore are not inherited.
+
+![](../Pasted%20image%2020250702072827.png)
+
+
+Owners of an object are automatically granted all privileges on that object. In addition, object owners can grant privileges on the object itself and on all of its child objects. This means that owners of a schema do not automatically have all privileges on the tables in the schema, but they can grant themselves privileges on the tables in the schema.
+
+
+
 From ui the access can be managed as shown below for both notebook and dashboard and for the rest the access is granted via sql level................ 
 
 Go to Share and select the access level 
