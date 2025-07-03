@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "b66f98f3e2d95386",
+        "id": "62e6c196f92554ec",
         "type": "tabs",
         "children": [
           {
-            "id": "1e99797de3eb049b",
+            "id": "e773d168c4662165",
             "type": "leaf",
             "state": {
               "type": "markdown",
@@ -78,7 +78,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 255.50296020507812
+    "width": 255.50296020507812,
+    "collapsed": true
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -179,10 +180,11 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "1e99797de3eb049b",
+  "active": "e773d168c4662165",
   "lastOpenFiles": [
-    "Project_prep/Test-communication.md",
+    "PR-docs/Sec- Paragon.md",
     "Project_prep/Spark Streaming..............md",
+    "Project_prep/Test-communication.md",
     "Project_prep/Jun 30.md",
     "Pasted image 20250702131227.png",
     "Pasted image 20250702125723.png",
@@ -218,7 +220,6 @@
     "Interviews/Gurpreet.md",
     "Gems/Collections.md",
     "Cloud/Kubernets.md",
-    "Cloud/AWS.md",
     "Untitled 2.canvas",
     "Untitled 1.canvas",
     "Project_prep",

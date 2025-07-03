@@ -1,49 +1,72 @@
-```python
-import pandas as pd
-import random
-import uuid
-from datetime import datetime, timedelta
-import os
 
-# Directory to store generated files
-output_dir = "./generated_data"
-os.makedirs(output_dir, exist_ok=True)
+Auto Loader (Supports Volume/DBFS/ Cloud Storage Objects)............
 
-# Static dataset: country code mapping
-countries = [
-    {"country_code": "US", "country_name": "United States"},
-    {"country_code": "CA", "country_name": "Canada"},
-    {"country_code": "UK", "country_name": "United Kingdom"},
-    {"country_code": "IN", "country_name": "India"},
-    {"country_code": "AU", "country_name": "Australia"},
-]
+**Auto Loader** is Databricks' **incremental file ingestion engine** for streaming large volumes of files efficiently, using:
 
-# Save static CSV
-country_df = pd.DataFrame(countries)
-static_path = os.path.join(output_dir, "country_codes.csv")
-country_df.to_csv(static_path, index=False)
+- **Directory listing** (for DBFS/Volumes)
+    
+- **File notification services** (for cloud storage like S3/ADLS)
 
-# Streaming dataset: random user events
-event_types = ["login", "purchase", "logout", "click"]
-now = datetime.now()
-stream_events = []
 
-for _ in range(500):
-    event = {
-        "user_id": str(uuid.uuid4())[:8],
-        "country_code": random.choice([c["country_code"] for c in countries]),
-        "event_time": (now - timedelta(minutes=random.randint(0, 30))).strftime("%Y-%m-%d %H:%M:%S"),
-        "event_type": random.choice(event_types),
-    }
-    stream_events.append(event)
+## POC Objective:
 
-streaming_df = pd.DataFrame(stream_events)
+Demonstrate how Apache Spark Structured Streaming processes real-time data from a file system (Volumes) using:
 
-# Save as newline-delimited JSON (suitable for Spark readStream)
-stream_path = os.path.join(output_dir, "sample_streaming_events.json")
-streaming_df.to_json(stream_path, orient="records", lines=True)
+- **Bronze → Silver → Gold** architecture
+    
+- **Stream-static joins**
+    
+- **Watermarking and window-based aggregations**
+    
+- **Delta Lake** for transactional streaming
+    
+- **Auto Loader** 
+    
+- Output written as **queryable Delta tables**
+    
 
-print(f"✔ Static file saved to: {static_path}")
-print(f"✔ Streaming file saved to: {stream_path}")
+---
 
-```
+Components to Include
+
+### 1. **Raw Input Simulation**
+
+- 2 JSON files dropped as micro-batches     
+
+### 2. **Bronze Layer** – Raw Ingestion
+
+- Uses  `cloudFiles`
+    
+- Writes to a Delta location with checkpointing
+    
+- Registered as `bronze_events` table
+    
+
+### 3. **Silver Layer** – Enrichment via Stream-Static Join
+
+- Joins Bronze with a static `country_codes` Delta table
+    
+- Creates `silver_events` table
+    
+
+### 4. **Gold Layer** – Analytics with Watermarking
+
+- Groups data by country + event_type in 5-minute windows
+    
+- Applies watermark of 10 minutes to handle late data
+    
+- Writes to `gold_aggregated_events` table
+    
+
+---
+Key Streaming Patterns Highlighted
+
+| Pattern                       | Where it's shown                         |
+| ----------------------------- | ---------------------------------------- |
+| **Raw file stream ingestion** | Bronze layer                             |
+| **Stream-static join**        | Silver layer with country lookup         |
+| **Watermarking**              | Gold layer to handle late data           |
+| **Window aggregation**        | Gold layer (5-min rolling window)        |
+| **Delta Lake storage**        | All layers use Delta tables              |
+| **Checkpoints**               | Enabled per layer for fault tolerance    |
+| **Schema enforcement**        | JSON with defined schema in Bronze layer |
