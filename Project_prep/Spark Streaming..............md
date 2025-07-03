@@ -424,3 +424,70 @@ spark.read.format("delta").load(f"{base_path}/gold_aggregated") \
 ---
 
 Let me know if you want this wrapped into a `.ipynb` file or want to add alerts or dashboards to visualize the gold layer!
+
+
+```python
+import pandas as pd
+import random
+import uuid
+from datetime import datetime, timedelta
+import os
+
+# Set output directory
+output_dir = "./generated_dual_stream_data"
+os.makedirs(output_dir, exist_ok=True)
+
+# Static country reference
+countries = [
+    {"country_code": "US", "country_name": "United States"},
+    {"country_code": "CA", "country_name": "Canada"},
+    {"country_code": "UK", "country_name": "United Kingdom"},
+    {"country_code": "IN", "country_name": "India"},
+    {"country_code": "AU", "country_name": "Australia"},
+]
+
+# Save country codes as static file
+country_df = pd.DataFrame(countries)
+country_df.to_csv(os.path.join(output_dir, "country_codes.csv"), index=False)
+
+# Generate shared user IDs
+user_ids = [str(uuid.uuid4())[:8] for _ in range(50)]
+
+# Time reference
+now = datetime.now()
+
+# Stream 1: User events
+user_events = []
+for _ in range(300):
+    event = {
+        "event_id": str(uuid.uuid4())[:10],
+        "user_id": random.choice(user_ids),
+        "event_time": (now - timedelta(minutes=random.randint(0, 30))).strftime("%Y-%m-%d %H:%M:%S"),
+        "event_type": random.choice(["login", "logout", "click"]),
+        "country_code": random.choice([c["country_code"] for c in countries])
+    }
+    user_events.append(event)
+
+# Save Stream 1
+user_df = pd.DataFrame(user_events)
+user_df.to_json(os.path.join(output_dir, "input_1_stream.json"), orient="records", lines=True)
+
+# Stream 2: Transaction events
+transaction_events = []
+for _ in range(300):
+    event = {
+        "event_id": str(uuid.uuid4())[:10],
+        "user_id": random.choice(user_ids),
+        "event_time": (now - timedelta(minutes=random.randint(0, 30))).strftime("%Y-%m-%d %H:%M:%S"),
+        "transaction_type": random.choice(["purchase", "refund"]),
+        "amount": round(random.uniform(5, 500), 2)
+    }
+    transaction_events.append(event)
+
+# Save Stream 2
+txn_df = pd.DataFrame(transaction_events)
+txn_df.to_json(os.path.join(output_dir, "input_2_stream.json"), orient="records", lines=True)
+
+print("✅ Files generated in:", output_dir)
+
+```
