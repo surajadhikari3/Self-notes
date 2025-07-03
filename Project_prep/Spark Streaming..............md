@@ -226,6 +226,201 @@ except:
 |Dead-Letter Queue|Resilience to bad data|
 |Auto Schema Evolution|Adapts to incoming structure changes|
 
+--------------------------------
+
+Absolutely! Here's a clean, beginner-friendly and **fully explained Spark Structured Streaming POC** using **two streaming sources**, **Auto Loader**, and includes:
+
+- ✅ Deduplication with watermark
+    
+- ✅ Stream-to-stream join
+    
+- ✅ Windowed aggregation
+    
+- ✅ Bronze → Silver → Gold layers
+    
+- ✅ Delta table registration
+    
+
+No complications — just what you've asked for.
+
 ---
 
-Let me know if you'd like a Markdown or HTML version of this for direct inclusion in your documentation!
+## 📁 Assumptions
+
+You're using this path structure:
+
+```python
+base_path = "/Volumes/main/default/stream_demo"
+```
+
+|Component|Path|
+|---|---|
+|Stream 1 Files|`/Volumes/main/default/stream_demo/input_1/`|
+|Stream 2 Files|`/Volumes/main/default/stream_demo/input_2/`|
+|Static Country|`/Volumes/main/default/stream_demo/country_codes.csv`|
+
+---
+
+## ✅ Step-by-Step Code and Explanation
+
+---
+
+### 🟫 1. Bronze Layer – Read Both Streams Using Auto Loader with Deduplication
+
+#### Stream 1 (user events)
+
+```python
+stream1_bronze = (
+  spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", f"{base_path}/_schema/stream1")
+    .load(f"{base_path}/input_1")
+    .withWatermark("event_time", "10 minutes")               # allow late data
+    .dropDuplicates(["event_id", "event_time"])              # prevent reprocessing same event
+)
+
+stream1_bronze.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", f"{base_path}/checkpoints/bronze/stream1") \
+  .start(f"{base_path}/bronze_events_1")
+```
+
+---
+
+#### Stream 2 (transactions)
+
+```python
+stream2_bronze = (
+  spark.readStream
+    .format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", f"{base_path}/_schema/stream2")
+    .load(f"{base_path}/input_2")
+    .withWatermark("event_time", "10 minutes")
+    .dropDuplicates(["event_id", "event_time"])
+)
+
+stream2_bronze.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", f"{base_path}/checkpoints/bronze/stream2") \
+  .start(f"{base_path}/bronze_events_2")
+```
+
+---
+
+### 🥈 2. Silver Layer – Enrich and Join Streams
+
+#### Read both bronze layers
+
+```python
+bronze_df_1 = spark.readStream.format("delta").load(f"{base_path}/bronze_events_1")
+bronze_df_2 = spark.readStream.format("delta").load(f"{base_path}/bronze_events_2")
+```
+
+#### Read static country table (already saved as Delta table)
+
+```python
+country_df = spark.read.format("delta").load(f"{base_path}/country_codes_delta")
+```
+
+#### Enrich Stream 1 with country name
+
+```python
+bronze_df_1 = bronze_df_1.join(country_df, on="country_code", how="left")
+```
+
+#### Stream-to-Stream Join
+
+```python
+from pyspark.sql.functions import expr
+
+joined_df = bronze_df_1 \
+  .withWatermark("event_time", "10 minutes") \
+  .join(
+    bronze_df_2.withWatermark("event_time", "10 minutes"),
+    expr("""
+      bronze_df_1.user_id = bronze_df_2.user_id AND
+      bronze_df_1.event_time BETWEEN bronze_df_2.event_time - INTERVAL 5 minutes AND bronze_df_2.event_time + INTERVAL 5 minutes
+    """)
+  )
+```
+
+#### Write Silver Layer
+
+```python
+joined_df.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", f"{base_path}/checkpoints/silver") \
+  .start(f"{base_path}/silver_events")
+```
+
+---
+
+### 🥇 3. Gold Layer – Windowed Aggregation
+
+```python
+from pyspark.sql.functions import window
+
+silver_df = spark.readStream.format("delta").load(f"{base_path}/silver_events")
+
+gold_df = silver_df \
+  .withWatermark("event_time", "10 minutes") \
+  .groupBy(
+    window("event_time", "5 minutes"),
+    "country_name",
+    "event_type"
+  ).count()
+```
+
+#### Write to Delta
+
+```python
+gold_df.writeStream \
+  .format("delta") \
+  .outputMode("append") \
+  .option("checkpointLocation", f"{base_path}/checkpoints/gold") \
+  .start(f"{base_path}/gold_aggregated")
+```
+
+---
+
+### 📦 4. Register All Delta Tables for SQL Access
+
+```python
+# Bronze Tables
+spark.read.format("delta").load(f"{base_path}/bronze_events_1") \
+  .write.mode("overwrite").saveAsTable("main.default.bronze_events_1")
+
+spark.read.format("delta").load(f"{base_path}/bronze_events_2") \
+  .write.mode("overwrite").saveAsTable("main.default.bronze_events_2")
+
+# Silver Table
+spark.read.format("delta").load(f"{base_path}/silver_events") \
+  .write.mode("overwrite").saveAsTable("main.default.silver_events")
+
+# Gold Table
+spark.read.format("delta").load(f"{base_path}/gold_aggregated") \
+  .write.mode("overwrite").saveAsTable("main.default.gold_aggregated")
+```
+
+---
+
+## ✅ Summary of What This POC Shows
+
+|Pattern|Where Used|
+|---|---|
+|**Auto Loader**|For both streaming sources (input_1 & 2)|
+|**Deduplication + Watermark**|Bronze layer with `dropDuplicates`|
+|**Stream-Static Join**|Bronze stream 1 + country table|
+|**Stream-Stream Join**|Silver layer — on user_id & time window|
+|**Windowed Aggregation**|Gold layer — 5-minute event summaries|
+|**Delta Lake Output**|All layers use Delta|
+|**SQL-accessible Tables**|`saveAsTable` registered output|
+
+---
+
+Let me know if you want this wrapped into a `.ipynb` file or want to add alerts or dashboards to visualize the gold layer!
