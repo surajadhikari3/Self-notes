@@ -491,3 +491,190 @@ txn_df.to_json(os.path.join(output_dir, "input_2_stream.json"), orient="records"
 print("✅ Files generated in:", output_dir)
 
 ```
+
+
+
+
+# 🌟 Real-Time Streaming Architecture Using File-Based Ingestion in Apache Spark
+
+## 🎯 POC Objective:
+
+Demonstrate how Apache Spark Structured Streaming processes real-time data from a file system (Volumes) using:
+
+- Bronze → Silver → Gold architecture
+    
+- Stream-static joins
+    
+- Stream-to-stream joins
+    
+- Watermarking and window-based aggregations
+    
+- Delta Lake for transactional streaming
+    
+- Auto Loader for optimized ingestion
+    
+- Output written as queryable Delta tables
+    
+
+---
+
+## 🔧 Components
+
+### 1. Raw Input Simulation
+
+- Two Auto Loader-compatible JSON input folders:
+    
+    - `input_1/` for login/click events
+        
+    - `input_2/` for purchase/refund transactions
+        
+- Static file: `country_codes.csv`
+    
+- Simulated using Python-generated datasets
+    
+
+```
+/Volumes/main/default/stream_demo/
+├── input_1/                      ← streaming file input (events)
+├── input_2/                      ← streaming file input (transactions)
+├── country_codes.csv             ← static lookup
+```
+
+### 2. Bronze Layer – Raw Ingestion via Auto Loader
+
+- Format: `cloudFiles` with `json`
+    
+- Schema: Inferred and stored in `_schema/`
+    
+- Output to: `bronze_events_1/` and `bronze_events_2/`
+    
+- Checkpoint: `checkpoints/bronze_1/` and `checkpoints/bronze_2/`
+    
+- Tables: `bronze_events_1`, `bronze_events_2`
+    
+
+```python
+bronze_df_1 = (
+  spark.readStream.format("cloudFiles")
+    .option("cloudFiles.format", "json")
+    .option("cloudFiles.schemaLocation", f"{base_path}/_schema/stream1")
+    .load(f"{base_path}/input_1")
+)
+
+bronze_df_1.writeStream.format("delta")
+  .option("checkpointLocation", f"{base_path}/checkpoints/bronze_1")
+  .start(f"{base_path}/bronze_events_1")
+```
+
+Repeat similarly for `bronze_df_2`.
+
+### 3. Silver Layer – Enrichment & Stream-to-Stream Join
+
+- Static country table: `country_codes.csv` ➔ Delta `country_codes_delta`
+    
+- Join `bronze_df_1` with country_codes on `country_code`
+    
+- Join enriched `bronze_df_1` with `bronze_df_2` on `user_id` and time range
+    
+- Output to: `silver_events/`
+    
+- Checkpoint: `checkpoints/silver/`
+    
+- Table: `silver_events`
+    
+
+```python
+from pyspark.sql.functions import expr
+
+df1 = bronze_df_1.alias("df1")
+df2 = bronze_df_2.alias("df2")
+
+joined_df = df1.withWatermark("event_time", "10 minutes")
+  .join(
+    df2.withWatermark("event_time", "10 minutes"),
+    expr("""
+      df1.user_id = df2.user_id AND
+      df1.event_time BETWEEN df2.event_time - INTERVAL 5 minutes AND df2.event_time + INTERVAL 5 minutes
+    """)
+  )
+
+cleaned_df = joined_df.selectExpr(
+    "df1.user_id as user_id", "df1.event_time", "df1.event_type", "df1.country_code",
+    "df2.transaction_type", "df2.amount"
+)
+
+cleaned_df.writeStream.format("delta")
+  .option("checkpointLocation", f"{base_path}/checkpoints/silver")
+  .start(f"{base_path}/silver_events")
+```
+
+### 4. Gold Layer – Aggregation with Watermark
+
+- Group by: `country_code`, `event_type`
+    
+- Window: 5-minute tumbling
+    
+- Watermark: 10 minutes
+    
+- Output to: `gold_aggregated/`
+    
+- Checkpoint: `checkpoints/gold/`
+    
+- Table: `gold_aggregated_events`
+    
+
+```python
+from pyspark.sql.functions import window
+
+gold_df = cleaned_df.withWatermark("event_time", "10 minutes")
+  .groupBy(
+    window("event_time", "5 minutes"),
+    "country_code", "event_type"
+  ).count()
+
+gold_df.writeStream.format("delta")
+  .outputMode("append")
+  .option("checkpointLocation", f"{base_path}/checkpoints/gold")
+  .start(f"{base_path}/gold_aggregated")
+```
+
+---
+
+## 📊 Key Streaming Patterns Highlighted
+
+|Pattern|Where it's Shown|
+|---|---|
+|Raw file stream ingestion|Bronze layer via Auto Loader|
+|Stream-static join|Bronze + country_codes in Silver|
+|Stream-stream join|Between bronze_df_1 and df_2|
+|Watermarking|Silver and Gold layer joins|
+|Window aggregation|Gold layer (5-minute window)|
+|Delta Lake storage|All output layers|
+|Checkpoints|Each streaming output sink|
+|Schema enforcement|Auto Loader schema inference|
+
+---
+
+## 🔨 Optional Enhancements
+
+- Use `foreachBatch` to sync to other sinks (e.g., JDBC, S3)
+    
+- CDC: Use Delta Change Data Feed on output tables
+    
+- Add fraud detection or anomaly streams
+    
+- Create dashboards on top of gold tables
+    
+
+---
+
+## 📆 Deliverables
+
+|Deliverable|Format|
+|---|---|
+|Notebook|`.ipynb` or `.dbc`|
+|Delta Tables|bronze_events_1, bronze_events_2, silver_events, gold_aggregated|
+|Sample Queries/Insights|SQL cells, dashboard widgets|
+|Markdown Docs / README|Explained per layer|
+
+Let me know if you want this exported as a runnable `.ipynb` or a zipped POC package!
