@@ -1,4 +1,4 @@
-
+ 
 #### **What is the Java Collections Framework (JCF)?**
 
 Java Collections Framework is a set of **interfaces and classes** that support operations on **data structures like lists, sets, queues and maps**. It provides algorithms and utilities for sorting, searching, and more.

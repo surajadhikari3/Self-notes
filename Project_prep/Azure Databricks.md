@@ -1,7 +1,7 @@
 
 ![[Pasted image 20250624142322.png]]
 
-Enable hierarchy namespace --> Enable the lakehouse if not it will create the blob file
+Enable hierarchy namespace --> Enable the lake-house if not it will create the blob file
 
 
 Compute

@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/Spark Streaming..............md",
+                "file": "Project_prep/User.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Spark Streaming............."
+              "title": "User"
             }
           }
         ]
@@ -78,8 +78,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 255.50296020507812,
-    "collapsed": true
+    "width": 255.50296020507812
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -182,8 +181,20 @@
   },
   "active": "e773d168c4662165",
   "lastOpenFiles": [
-    "PR-docs/Sec- Paragon.md",
+    "Coding things/SQL 50(Doing with mysql ).md",
+    "Project_prep/User.md",
+    "Coding things/linux_command_cheatsheet.pdf",
+    "Coding things/Java 8 hands-on notes.md",
+    "Coding things/Cmds.md",
+    "Coding things/Coding concepts...md",
+    "Gems/Garbage collection.md",
+    "Gems/Java 8.md",
+    "Gems/Collections.md",
+    "Project_prep/Data Bricks.md",
+    "Project_prep/Azure Databricks.md",
+    "Project_prep/Apache Flink, Spark and kafka.md",
     "Project_prep/Spark Streaming..............md",
+    "PR-docs/Sec- Paragon.md",
     "Project_prep/Test-communication.md",
     "Project_prep/Jun 30.md",
     "Pasted image 20250702131227.png",
@@ -202,24 +213,12 @@
     "Project_prep/Medalion Architecture and Pipelines in Databricks.md",
     "Spring/Spring cloud.md",
     "Spring/Todos.md",
-    "Coding things/Java 8 hands-on notes.md",
-    "Coding things/linux_command_cheatsheet.pdf",
     "Coding things/Threading problems.md",
-    "Coding things/SQL 50(Doing with mysql ).md",
     "temp.md",
     "Project_prep/DataBricks concepts.md",
-    "Project_prep/Azure Databricks.md",
-    "Project_prep/Data Bricks.md",
     "Project_prep/Dremio.md",
     "Project_prep/MongoDB.md",
     "Sql Functions Guide.pdf",
-    "Project_prep/Apache Flink, Spark and kafka.md",
-    "Pasted.md",
-    "Interviews/Mohan TD interview.md",
-    "Interviews/On-class interview -Mohan.md",
-    "Interviews/Gurpreet.md",
-    "Gems/Collections.md",
-    "Cloud/Kubernets.md",
     "Untitled 2.canvas",
     "Untitled 1.canvas",
     "Project_prep",
