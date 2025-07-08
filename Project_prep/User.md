@@ -558,3 +558,14 @@ Let me know if you'd like a **visual partition-aware vs unaware write comparison
 
 
 
+
+
+## All Write Modes in Delta Lake
+
+|Mode|Description|Best Used For|
+|---|---|---|
+|`append`|Adds new rows to the table|Streaming, event logs|
+|`overwrite`|Replaces **entire dataset**|Full snapshot replacements|
+|`overwrite + replaceWhere`|Replaces only matching partitions|Partition-aware updates|
+|`ignore`|Writes **only if the table doesn’t exist**|Initial loads|
+|`error` or `errorifexists`|Fails if table/path already exists|Prevents accidental overwrite|
