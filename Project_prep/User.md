@@ -313,6 +313,58 @@ spark.sql("""
 """)
 ```
 
+### **Steps:**
+
+1. **Choose Data Source:**
+    
+    - Click **“Upload File”** or select from existing mount points (e.g., `/mnt/data/`, DBFS, ADLS, S3).
+        
+    - Optionally drag and drop your file.
+        
+2. **Select File Format:**
+    
+    - Supported: CSV, JSON, Parquet, Avro, ORC, Delta.
+        
+    - The file is **previewed with automatic schema detection**.
+        
+3. **Configure Table Settings:**
+    
+    - Choose:
+        
+        - **Catalog** (e.g., `main`)
+            
+        - **Schema** (aka Database, e.g., `bronze_layer`)
+            
+        - **Table Name**
+            
+        - **Table Type**:
+            
+            - `Managed Table` (default)
+                
+            - `External Table` (optional if you specify a location)
+                
+4. **Edit Schema (Optional):**
+    
+    - You can rename columns, change data types, and set nullability.
+        
+5. **Choose Table Format:**
+    
+    - `DELTA` (recommended)
+        
+    - `PARQUET`, `CSV`, etc.
+        
+6. **Advanced Options (Optional):**
+    
+    - Set custom table comment
+        
+    - Modify `LOCATION` path if creating an external table
+        
+7. **Click `Create Table`:**
+    
+    - Table is created and registered in metastore or Unity Catalog.
+        
+    - Optionally click **“Create notebook”** for immediate exploration.
+
 ### ✅ Notes:
 
 - Table points to data already saved.
@@ -326,16 +378,16 @@ spark.sql("""
 
 ## 🔹 Summary Table
 
-|Method|SQL/Python|Schema Definition|Table Type|Notes|
-|---|---|---|---|---|
-|`CREATE TABLE`|SQL|Explicit|Managed|Standard|
-|CTAS|SQL|Inferred|Managed|Fast, simple|
-|`.saveAsTable()`|PySpark|Inferred/manual|Managed|PySpark native|
-|External Table|SQL|Explicit|Unmanaged|Path-based|
-|Auto Loader|PySpark|Inferred|Managed|Streaming|
-|Unity Catalog Table|SQL|Explicit|Managed/Unmanaged|Fine-grained access|
-|Temporary Table|SQL|Inferred|Temp|Non-persistent|
-|Register Existing Data|PySpark + SQL|Already saved|External|Two-step|
+| Method                 | SQL/Python    | Schema Definition | Table Type        | Notes               |
+| ---------------------- | ------------- | ----------------- | ----------------- | ------------------- |
+| `CREATE TABLE`         | SQL           | Explicit          | Managed           | Standard            |
+| CTAS                   | SQL           | Inferred          | Managed           | Fast, simple        |
+| `.saveAsTable()`       | PySpark       | Inferred/manual   | Managed           | PySpark native      |
+| External Table         | SQL           | Explicit          | Unmanaged         | Path-based          |
+| Auto Loader            | PySpark       | Inferred          | Managed           | Streaming           |
+| Unity Catalog Table    | SQL           | Explicit          | Managed/Unmanaged | Fine-grained access |
+| Temporary Table        | SQL           | Inferred          | Temp              | Non-persistent      |
+| Register Existing Data | PySpark + SQL | Already saved     | External          | Two-step            |
 
 ---
 
