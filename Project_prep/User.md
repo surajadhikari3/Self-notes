@@ -301,3 +301,160 @@ SELECT * FROM sqlserver_catalog.dbo.orders;
 |Concurrency control|External DB’s responsibility|Delta transaction log + locks|
 |Data versioning|Not available|Supported with Delta Lake|
 |Time travel / rollback|Not available|Supported with Delta Lake|
+
+
+---
+
+## **Databricks Table Schema Creation Options – Comprehensive Guide**
+
+---
+
+### **1. SQL-Based Table Creation**
+
+#### **Managed Table (Stored in Databricks-managed location)**
+
+```sql
+CREATE TABLE sales_db.customers (
+    id INT,
+    name STRING,
+    signup_date DATE
+);
+```
+
+- Storage managed by Databricks.
+    
+- Appears under workspace or Unity Catalog depending on context.
+    
+
+---
+
+####  **Unmanaged / External Table**
+
+```sql
+CREATE TABLE sales_db.customers_external (
+    id INT,
+    name STRING
+)
+USING DELTA
+LOCATION 'abfss://rawdata@datalake.dfs.core.windows.net/sales/customers/';
+```
+
+- Table metadata is managed in metastore.
+    
+- Data physically exists in external storage.
+    
+
+---
+
+####  **Create Table from Query (CTAS)**
+
+```sql
+CREATE TABLE analytics_db.active_customers
+USING DELTA
+AS
+SELECT * FROM sales_db.customers WHERE status = 'active';
+```
+
+- Schema inferred from query.
+    
+- Good for quick transformations.
+    
+
+---
+
+###  **2. PySpark-Based Table Creation**
+
+#### **Define Schema and Create Table**
+
+```python
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType
+from pyspark.sql import SparkSession
+
+schema = StructType([
+    StructField("id", IntegerType(), True),
+    StructField("name", StringType(), True)
+])
+
+df = spark.read.schema(schema).json("dbfs:/mnt/raw/customers.json")
+
+df.write.format("delta").saveAsTable("sales_db.customers")
+```
+
+- You can define explicit schema before reading data.
+    
+- `saveAsTable()` registers it in the metastore.
+    
+
+---
+
+####  **Write to External Path First, Then Register**
+
+```python
+df.write.format("delta").save("abfss://landing@storage.dfs.core.windows.net/customers/")
+
+spark.sql("""
+  CREATE TABLE external.customers
+  USING DELTA
+  LOCATION 'abfss://landing@storage.dfs.core.windows.net/customers/'
+""")
+```
+
+---
+
+###  **3. Unity Catalog Table Creation**
+
+> Unity Catalog helps manage **access control**, **data lineage**, and **cross-workspace queries**.
+
+#### **UC Table with Description & Location**
+
+```sql
+CREATE TABLE main.analytics_db.transactions (
+    txn_id STRING,
+    amount DOUBLE,
+    timestamp TIMESTAMP
+)
+USING DELTA
+COMMENT "Transaction data from financial systems"
+LOCATION 'abfss://bronze@datalake.dfs.core.windows.net/transactions/';
+```
+
+- Requires catalog (`main`, `dev`, etc.)
+    
+- Helps with governance and auditability.
+    
+
+---
+
+###  **4. Create from Autoloader or Streaming (Schema Inference)**
+
+```python
+df = (
+  spark.readStream.format("cloudFiles")
+  .option("cloudFiles.format", "json")
+  .load("abfss://stream@lakehouse.dfs.core.windows.net/incoming/")
+)
+
+df.writeStream.format("delta").option("checkpointLocation", "/tmp/chk") \
+  .table("bronze_layer.incoming_events")
+```
+
+- Schema is auto-inferred.
+    
+- You can add schema evolution with `mergeSchema`.
+    
+
+---
+
+##  Summary Table
+
+|Method|Format|Code Tool|Notes|
+|---|---|---|---|
+|Managed Table|`CREATE TABLE`|SQL|Data in Databricks-managed storage|
+|External Table|`CREATE TABLE ... LOCATION`|SQL|Data in ADLS/Blob; metadata in metastore|
+|DataFrame Table|`.saveAsTable()`|Python (PySpark)|Fast DataFrame to Table write|
+|Unity Catalog|`main.catalog.schema.table`|SQL|Fine-grained access control, lineage|
+|Streaming|`.writeStream.table()`|PySpark|Continuous write from streaming source|
+
+---
+
+If you'd like a downloadable image or architecture view of this process (once image generation is back), I can build one for documentation or slides. Would you like that saved as a diagram or in Markdown format too?
