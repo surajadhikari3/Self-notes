@@ -241,4 +241,18 @@ df.write.format("delta").mode("overwrite").save("/mnt/bronze/feed_gen/your_table
 
 ---
 
-Would you like me to help you find the table name and ideal partition column from your `feed_gen` DB schema?
+
+
+```python
+
+import socket
+host = "siechosdvyri0.d2-tdbfg.com"
+port = 3341
+
+try:
+    with socket.create_connection((host, port), timeout=5):
+        print(f"✅ Successfully connected to {host}:{port}")
+except Exception as e:
+    print(f"❌ Failed to connect to {host}:{port} – {e}")
+
+```
