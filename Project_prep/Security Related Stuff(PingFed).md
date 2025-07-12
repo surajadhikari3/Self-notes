@@ -217,6 +217,109 @@ You're absolutely right — **Active Directory (AD)** is traditionally a **Micro
 |Mobile/web app auth (OAuth2/OIDC)|**Firebase Auth / AWS Cognito / Azure B2C**|
 |Enterprise federation with on-prem AD|Azure AD / AWS AD Connector|
 
+
 ---
 
-Would you like a diagram showing how these services map to each other?
+## 🛡️ What is **Kerberos**?
+
+**Kerberos** is a **network authentication protocol** designed to provide **strong security** using **secret-key cryptography**. It authenticates users and services **without sending passwords over the network**.
+
+It was originally developed at **MIT** and is widely used in enterprise environments — especially in **Windows Active Directory**.
+
+---
+
+## 🎯 Purpose:
+
+Authenticate a user **once**, and let them access multiple services securely — **Single Sign-On (SSO)**.
+
+---
+
+## 🧠 Layman Analogy:
+
+> Imagine you check into a secure building and get a **badge** (Kerberos ticket) from the front desk (Authentication Server). Now you can use this badge to access all secure rooms (services) without needing to show your ID again.
+
+---
+
+## 🔁 How Kerberos Works (Step-by-Step)
+
+### 🏢 Components:
+
+|Component|Description|
+|---|---|
+|**Client**|The user or machine requesting access|
+|**KDC** (Key Distribution Center)|Core of Kerberos, contains:|
+|→ **AS** (Authentication Server)|Authenticates the user|
+|→ **TGS** (Ticket Granting Server)|Issues service tickets|
+|**Service Server (SS)**|The resource (e.g., database, app) being accessed|
+
+### 🔐 Flow:
+
+1. **Login Request**  
+    Client sends login request (e.g., username) to the **Authentication Server (AS)**
+    
+2. **TGT Issued**  
+    AS checks credentials (usually password-derived key) and responds with a **TGT (Ticket Granting Ticket)** — encrypted using a key only the user can decrypt.
+    
+3. **Service Ticket Request**  
+    When accessing a service, the client sends the TGT to the **Ticket Granting Server (TGS)** asking for access.
+    
+4. **Service Ticket Issued**  
+    TGS responds with a **service ticket**.
+    
+5. **Access Resource**  
+    The client sends the service ticket to the **Service Server**, which decrypts and validates it, and grants access.
+    
+
+---
+
+## 🔒 Key Advantages:
+
+- **No password sent over the network**
+    
+- **Mutual authentication** (both client and server can verify each other)
+    
+- **SSO (Single Sign-On)** experience
+    
+- **Prevents replay attacks** with timestamps
+    
+
+---
+
+## 📦 Where is Kerberos Used?
+
+|Use Case|Example|
+|---|---|
+|Windows Domain Authentication|Active Directory uses Kerberos by default|
+|UNIX/Linux environments|PAM modules, Hadoop clusters|
+|Enterprise SSO|Internal apps in secure networks|
+|Big Data|Apache Hadoop, Apache Hive (via MIT Kerberos)|
+
+---
+
+## 🆚 Kerberos vs. LDAP
+
+|Feature|**Kerberos**|**LDAP**|
+|---|---|---|
+|Purpose|Authentication protocol|Directory access/search protocol|
+|Handles Auth?|✅ Yes|🔶 Usually used for lookup/auth|
+|Transport|Uses secure encrypted tickets|Usually plain or TLS-protected|
+|Example|"Prove who I am"|"Get my user details"|
+
+---
+
+## 🧠 Real-World Example (Hadoop):
+
+When a user tries to run a Spark job on a secure Hadoop cluster:
+
+- The client authenticates via **Kerberos**
+    
+- Gets a TGT
+    
+- Uses the TGT to request access to HDFS or YARN
+    
+- Kerberos tickets are used to verify identity without passwords
+    
+
+---
+
+Would you like a **flow diagram** for the Kerberos authentication process?
