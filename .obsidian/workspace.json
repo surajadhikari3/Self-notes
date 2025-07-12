@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/User.md",
+                "file": "Project_prep/Security Related Stuff(PingFed).md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "User"
+              "title": "Security Related Stuff(PingFed)"
             }
           }
         ]
@@ -181,6 +181,8 @@
   },
   "active": "6ad18ab30a1635d6",
   "lastOpenFiles": [
+    "Project_prep/User.md",
+    "Project_prep/Security Related Stuff(PingFed).md",
     "Project_prep/OAUTH GRANT FLOW.md",
     "Pasted image 20250710130745.png",
     "Pasted image 20250710125913.png",
@@ -192,7 +194,6 @@
     "Project_prep/Apache Flink, Spark and kafka.md",
     "Coding things/SQL 50(Doing with mysql ).md",
     "PR-docs/Sec- Paragon.md",
-    "Project_prep/User.md",
     "Project_prep/Reporting for the Jun 25, 2025 (Databricks).md",
     "Pasted image 20250708171734.png",
     "Pasted image 20250708171659.png",
