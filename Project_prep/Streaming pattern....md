@@ -616,3 +616,121 @@ streamDF.writeStream.foreachBatch(write_to_mysql).start()
 
 ---
 
+FOREACH BATCH
+
+---
+
+# 🔁 **Apache Spark Structured Streaming – `forEachBatch` Pattern**
+
+---
+
+## ✅ **Description**
+
+`forEachBatch` is a method in **Structured Streaming** that allows **custom logic** to be applied to **each micro-batch** of streaming data as a standard **Spark batch DataFrame**.
+
+It bridges the gap between **streaming ingestion** and **flexible batch-style processing**, enabling full access to Spark transformations and actions.
+
+> ⚡ This is especially useful when you need capabilities like `MERGE INTO`, JDBC writes, multi-sink logic, or conditional branching — all of which are difficult or impossible using `writeStream.format(...).start()`.
+
+---
+
+## 🖼️ **Diagram**
+
+```
++-------------------+
+|  Streaming Source |
++--------+----------+
+         |
+         v
++----------------------------+
+|  Micro-Batch DataFrame     |
+|  forEachBatch((df, id) => {|
+|    Custom Logic Here       |
+|  })                        |
++--------+---------+---------+
+         |         |
+     +---v---+  +--v----+
+     | Sink A|  | Sink B|
+     +-------+  +-------+
+```
+
+---
+
+## 🎯 **Use Cases**
+
+|Scenario|Why use `forEachBatch`|
+|---|---|
+|**Delta Lake Upserts (MERGE)**|`writeStream` can’t perform `MERGE INTO`|
+|**Writing to Multiple Sinks**|Write to S3, Delta, Kafka, etc. in the same batch|
+|**Calling External APIs**|Call REST APIs, databases, or send alerts|
+|**Deduplication Logic**|Run `dropDuplicates()` or use window + rank|
+|**Dynamic Routing**|Branch data conditionally by content|
+|**Enrichment Joins**|Join streaming data with static tables before writing|
+
+---
+
+## 💡 **Simple Code Example**
+
+```python
+from pyspark.sql import SparkSession
+from delta.tables import DeltaTable
+
+spark = SparkSession.builder.getOrCreate()
+
+def custom_batch_logic(df, batchId):
+    # Example: Upsert into Delta table
+    target = DeltaTable.forPath(spark, "/mnt/delta/target")
+
+    (target.alias("t")
+     .merge(df.alias("s"), "t.id = s.id")
+     .whenMatchedUpdateAll()
+     .whenNotMatchedInsertAll()
+     .execute())
+
+# Read Kafka stream
+kafka_df = (spark.readStream
+            .format("kafka")
+            .option("kafka.bootstrap.servers", "localhost:9092")
+            .option("subscribe", "input_topic")
+            .load())
+
+# Extract value column as string
+json_df = kafka_df.selectExpr("CAST(value AS STRING) as raw_json")
+
+# Parse JSON into schema (e.g., id, name, timestamp)
+parsed_df = spark.read.json(json_df.rdd.map(lambda x: x.raw_json))
+
+# Use forEachBatch to apply custom logic
+(parsed_df.writeStream
+ .foreachBatch(custom_batch_logic)
+ .option("checkpointLocation", "/mnt/checkpoints/upsert_logic")
+ .start())
+```
+
+---
+
+## 🧠 Notes & Best Practices
+
+|Tip|Description|
+|---|---|
+|Handle idempotency|`forEachBatch` may retry the same batch after failure|
+|Use `batchId` for logging or checkpoint validation||
+|Avoid expensive operations like `.collect()` inside the batch function||
+|Always define a reliable schema if reading from JSON or raw source||
+
+---
+
+## 🧾 Summary
+
+|Feature|Description|
+|---|---|
+|**Pattern**|`forEachBatch`|
+|**Granularity**|Per micro-batch|
+|**Control**|Full access to batch transformations|
+|**Fault Tolerance**|Inherited from Spark's structured streaming checkpointing|
+|**Supported Sinks**|All (Delta, JDBC, Kafka, REST, etc.)|
+|**Ideal For**|MERGE, multi-sink writes, external integrations|
+
+---
+
+Would you like a **Markdown export**, a **PDF**, or a **Confluence-compatible table block** of this section? I can also extend it with advanced examples (multi-sink, dedup, etc.) if needed.
