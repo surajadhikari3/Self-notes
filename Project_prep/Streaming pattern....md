@@ -859,6 +859,197 @@ query = (raw_stream.writeStream
 
 ---
 
-Would you like a **PNG diagram** for this workflow or a **Confluence/Markdown export** of the content?
+Dashboard stuff................
 
-I can also generate advanced examples (multi-sink, schema evolution, audit table writes) if needed.
+# 📊 Databricks Dashboard Documentation
+
+## 1. Overview
+
+**Databricks Dashboards** are interactive visual interfaces that allow users to visualize data using SQL queries or Delta tables directly within the Databricks workspace. Dashboards help teams monitor metrics, detect anomalies, and derive insights without needing to export data to external BI tools.
+
+Dashboards are tightly integrated with the **Databricks Lakehouse platform**, enabling seamless access to data through **Unity Catalog**, and supporting advanced governance, sharing, and automation.
+
+---
+
+## 2. How Dashboards Integrate with Unity Catalog
+
+### 📌 Description:
+
+Databricks dashboards rely on SQL queries, which in turn access data stored in tables and views governed by **Unity Catalog**. Unity Catalog provides **fine-grained access control**, **auditing**, and **data lineage**, ensuring that dashboard users only see what they are allowed to access.
+
+### 🧠 How it works:
+
+- The dashboard queries reference **catalog.schema.table** format.
+    
+- Access control is enforced at the catalog level, ensuring secure and governed access to data.
+    
+- When a user accesses a dashboard, Unity Catalog evaluates their permissions before returning results.
+    
+
+### ✅ Use Case:
+
+A business analyst creates a dashboard summarizing sales data across regions. The data is stored in `main.sales_db.sales_summary`. Unity Catalog ensures:
+
+- The analyst only sees tables they have permission to access.
+    
+- Unauthorized users cannot view or modify the dashboard unless explicitly granted access.
+    
+
+### 💡 Example:
+
+```sql
+SELECT region, SUM(revenue)
+FROM main.sales_db.sales_summary
+GROUP BY region;
+```
+
+This SQL block powers a pie chart in a dashboard panel. The access to `main.sales_db.sales_summary` is validated by Unity Catalog.
+
+---
+
+## 3. Impact of Changes in Underlying Data Sources
+
+### 📌 Description:
+
+If the underlying **data source/table/view/schema** changes, dashboards may be impacted based on the **type of change**.
+
+### ⚠️ Types of Changes and Their Impacts:
+
+|Change Type|Impact on Dashboard|
+|---|---|
+|Table schema change (e.g. drop column)|SQL queries may break or return incorrect results|
+|Table/view renamed or deleted|Dashboard panel will fail to load|
+|Permissions changed|Users may see "Access Denied" or missing data|
+|Data format/type changes|Visualizations might display inconsistently|
+|Data content change|Charts may show updated values (real-time or refresh-based)|
+
+### 🧠 Use Case:
+
+If a data engineer renames a column used in a dashboard query:
+
+```sql
+SELECT old_column_name FROM table_x
+```
+
+The dashboard panel using this query will throw an error until updated.
+
+### ✅ Best Practices:
+
+- Use **views** instead of raw tables to provide abstraction.
+    
+- Communicate schema changes via release notes.
+    
+- Test dashboards post-migration or after major ETL updates.
+    
+
+---
+
+## 4. Dashboard Sharing, Embedding, and Access Permissioning
+
+### 📌 Description:
+
+Databricks dashboards can be **shared** within the workspace, **embedded** externally, and protected using **granular permission settings**.
+
+---
+
+### 🔒 Access Permissioning:
+
+- Dashboards follow **workspace object permissions**:
+    
+    - **Can View** – view-only access
+        
+    - **Can Run** – view + refresh
+        
+    - **Can Edit** – modify queries, visuals
+        
+    - **Can Manage** – full control including delete & permissions
+        
+- Unity Catalog also restricts access to the **underlying data** in the dashboard via table/view permissions.
+    
+
+**Note:** Having access to the dashboard **does not imply access to the data** inside it unless granted via Unity Catalog.
+
+---
+
+### 🤝 Sharing Options:
+
+- **Within Workspace**: Share with users or groups in Databricks.
+    
+- **Public Sharing** _(if allowed)_: Embed via iframe for non-authenticated access (workspace admin-controlled).
+    
+- **Email Subscription**: Schedule dashboards to email results as PDF or static image.
+    
+
+---
+
+### 🌐 Embedding:
+
+- Dashboards can be embedded in external apps via iframe (if public sharing is enabled).
+    
+- Embedding requires:
+    
+    - Enabling **public access to the dashboard**
+        
+    - Admin toggling **"Allow Public Sharing"** setting
+        
+
+---
+
+### ✅ Use Case:
+
+A project manager wants a real-time executive overview shared with leadership. They:
+
+1. Create a dashboard.
+    
+2. Set SQL queries to auto-refresh.
+    
+3. Share with stakeholders (view-only).
+    
+4. Schedule daily emails at 8 AM.
+    
+5. Optionally embed into internal wiki via iframe.
+    
+
+---
+
+## 5. Example: Dashboard Setup & Usage
+
+1. **Create Dashboard**:
+    
+    - Click “+ Create” → Dashboard
+        
+    - Add a query:
+        
+        ```sql
+        SELECT product, SUM(sales) as total FROM main.retail_db.sales GROUP BY product
+        ```
+        
+    - Choose chart: Bar Chart
+        
+2. **Set Permissions**:
+    
+    - Add TeamX with "Can View"
+        
+    - Add Analyst with "Can Edit"
+        
+3. **Embed / Share**:
+    
+    - Click “Share”
+        
+    - Toggle "Allow Public Access"
+        
+    - Copy iframe code or set up email schedule
+        
+
+---
+
+## 6. Summary
+
+|Feature|Description|
+|---|---|
+|Integration with Unity Catalog|Ensures secure, governed access to data in dashboards|
+|Data source changes|May break dashboards if schema/tables/views are modified|
+|Sharing|Share with specific users/groups, or publicly with proper admin config|
+|Embedding|Enable public embedding via iframe for external visualization|
+|Permissioning|Dashboard + data-level access managed separately via object ACLs + catalog|
+
