@@ -733,4 +733,132 @@ parsed_df = spark.read.json(json_df.rdd.map(lambda x: x.raw_json))
 
 ---
 
-Would you like a **Markdown export**, a **PDF**, or a **Confluence-compatible table block** of this section? I can also extend it with advanced examples (multi-sink, dedup, etc.) if needed.
+------------------------------------------------------------
+
+---
+
+# 🔁 **Databricks Spark Structured Streaming – `forEachBatch` Pattern (File Source)**
+
+---
+
+## ✅ **Description**
+
+`forEachBatch` in Structured Streaming provides a **powerful control point** to apply **custom batch logic** to each **micro-batch** of data as it is ingested from a streaming source — such as **files landing in a directory** (e.g., `/mnt/raw/`).
+
+Unlike regular `.writeStream.format(...).start()`, the `forEachBatch` method enables:
+
+- Complex batch operations (e.g., **MERGE INTO**, **deduplication**, **validation**)
+    
+- **Multi-sink writes**
+    
+- **Calling external systems** (e.g., JDBC, APIs)
+    
+
+This pattern is ideal when ingesting files into **bronze → silver → gold** tables or implementing **upserts** with Delta Lake.
+
+---
+
+## 🖼️ **Diagram – forEachBatch with File Source**
+
+```plaintext
++------------------------+
+| File Source (CSV/JSON)|
+|   /mnt/raw/           |
++----------+------------+
+           |
+     +-----v-----+
+     | Auto Loader|
+     | or readStream |
+     +-----+-----+
+           |
+           v
++------------------------+
+| forEachBatch((df, id) => { |
+|   custom logic per batch   |
+| })                         |
++-----+----------------------+
+      |
+      v
++------------------+
+| Delta Lake Sink  |
+| JDBC Sink / API  |
++------------------+
+```
+
+---
+
+## 🎯 **Use Cases**
+
+|Scenario|Why `forEachBatch` Is Ideal|
+|---|---|
+|**File-based CDC Updates**|Merge file-based change logs into Delta tables|
+|**Multi-stage ETL**|Clean/transform incoming files into silver tables|
+|**Custom Filtering or Deduplication**|Apply logic like dropDuplicates()|
+|**Audit Logging & Alerting**|Trigger alerts or logs for specific records|
+|**Upserts to Golden Tables**|`MERGE INTO` for target Delta table using batch logic|
+
+---
+
+## 💡 **Simple Example: Ingest Files → Merge into Delta Table**
+
+```python
+from delta.tables import DeltaTable
+from pyspark.sql.functions import col
+
+# 1. Define upsert logic
+def merge_batch(microBatchDF, batchId):
+    delta_target = DeltaTable.forPath(spark, "/mnt/delta/target_table")
+
+    (delta_target.alias("t")
+     .merge(
+         microBatchDF.alias("s"),
+         "t.id = s.id"
+     )
+     .whenMatchedUpdateAll()
+     .whenNotMatchedInsertAll()
+     .execute())
+
+# 2. Read incoming files (streaming source)
+raw_stream = (spark.readStream
+              .format("cloudFiles")  # use 'csv' or 'json' for simple readStream
+              .option("cloudFiles.format", "csv")
+              .option("header", "true")
+              .schema("id STRING, name STRING, updated_at TIMESTAMP")
+              .load("/mnt/raw/cdc-files/"))
+
+# 3. Apply forEachBatch with merge logic
+query = (raw_stream.writeStream
+         .foreachBatch(merge_batch)
+         .option("checkpointLocation", "/mnt/checkpoints/cdc_merge/")
+         .start())
+```
+
+---
+
+## ⚙️ Key Considerations
+
+|Point|Details|
+|---|---|
+|`microBatchDF`|A full DataFrame of newly arrived file rows|
+|`batchId`|A long value for the micro-batch ID (can be used for auditing)|
+|Checkpointing|Required to avoid duplicate processing after failures|
+|Schema|Must be explicitly defined for file formats like CSV or JSON|
+|Idempotency|Recommended to avoid duplication if batch retries|
+
+---
+
+## 📌 Summary
+
+|Feature|Value|
+|---|---|
+|**Source**|File-based (CSV, JSON, Parquet)|
+|**Pattern**|`forEachBatch((df, batchId) => {})`|
+|**Control**|Full DataFrame access per micro-batch|
+|**Write Support**|Delta Lake, JDBC, REST, multi-sink|
+|**Best Use Case**|Merge, dedup, enrichment, complex ETL|
+
+---
+
+Would you like a **PNG diagram** for this workflow or a **Confluence/Markdown export** of the content?
+
+I can also generate advanced examples (multi-sink, schema evolution, audit table writes) if needed.
