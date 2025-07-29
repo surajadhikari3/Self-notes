@@ -1238,74 +1238,78 @@ Certainly! Here's the **complete Databricks notebook code** as a single copy-pas
 
 ---
 
-### 🚖 **NYCTaxi Dashboard with Schema Evolution Best Practices**
+
+Here's the full **updated code snippet** for your Databricks notebook, designed to demonstrate end-to-end best practices for a real-time dashboard using the `samples.nyctaxi.trips` dataset — with only Bronze layer schema evolution.
+
+---
+
+### 🚖 NYC Taxi Trip Data – Real-Time Dashboard with Schema Best Practices
+
+#### 🔁 Step 1: Ingest to Bronze Layer (Schema Evolution ON)
 
 ```python
-# ---------------------------------------------
-# 1️⃣ Ingest Raw Data to Bronze with Schema Evolution
-# ---------------------------------------------
-bronze_path = "/mnt/bronze/nyctaxi_tripdata"
+# Simulated Bronze Ingestion from sample Delta table
+bronze_path = "/mnt/bronze/nyctaxi_trips"
 
-raw_df = spark.read.table("samples.nyctaxi.tripdata")
+raw_df = spark.read.table("samples.nyctaxi.trips")
 
-# Save to Bronze layer (schema evolution enabled)
 raw_df.write.format("delta") \
     .option("mergeSchema", "true") \
     .mode("append") \
     .save(bronze_path)
 ```
 
+---
+
+#### 🧽 Step 2: Create Cleaned Silver Table (Fixed Schema)
+
 ```python
-# ---------------------------------------------
-# 2️⃣ Clean and Write Silver Table (Schema Controlled)
-# ---------------------------------------------
 from pyspark.sql.functions import col
 
-silver_table = "main.nyctaxi.trip_cleaned"
+silver_table = "main.nyctaxi.trips_cleaned"
 
 bronze_df = spark.read.format("delta").load(bronze_path)
 
 clean_df = bronze_df.select(
     col("tpep_pickup_datetime"),
     col("tpep_dropoff_datetime"),
-    col("passenger_count"),
     col("trip_distance"),
     col("fare_amount"),
-    col("tip_amount"),
-    col("payment_type")
+    col("pickup_zip"),
+    col("dropoff_zip")
 )
 
-# Write as Silver Delta Table
 clean_df.write.format("delta") \
     .mode("overwrite") \
     .saveAsTable(silver_table)
 ```
 
+---
+
+#### 👓 Step 3: Create Stable View for Dashboard
+
 ```python
-# ---------------------------------------------
-# 3️⃣ Create Stable View for Dashboards
-# ---------------------------------------------
-stable_view = "main.nyctaxi.trip_dashboard_view"
+stable_view = "main.nyctaxi.trips_dashboard_view"
 
 spark.sql(f"""
 CREATE OR REPLACE VIEW {stable_view} AS
 SELECT
   tpep_pickup_datetime,
   tpep_dropoff_datetime,
-  passenger_count,
   trip_distance,
   fare_amount,
-  tip_amount,
-  payment_type
+  pickup_zip,
+  dropoff_zip
 FROM {silver_table}
 """)
 ```
 
+---
+
+#### 🧪 Step 4: (Optional) Create Dev/Dynamic View
+
 ```python
-# ---------------------------------------------
-# 4️⃣ Optional: Create Latest (Exploratory) View
-# ---------------------------------------------
-latest_view = "main.nyctaxi.trip_dashboard_view_latest"
+latest_view = "main.nyctaxi.trips_dashboard_view_latest"
 
 spark.sql(f"""
 CREATE OR REPLACE VIEW {latest_view} AS
@@ -1313,51 +1317,40 @@ SELECT * FROM {silver_table}
 """)
 ```
 
+---
+
+#### 🛡️ Step 5: Schema Drift Detection (Optional)
+
 ```python
-# ---------------------------------------------
-# 5️⃣ Schema Drift Detection Logic
-# ---------------------------------------------
-table_schema = set((f.name, str(f.dataType)) for f in spark.table(silver_table).schema)
+silver_schema = set((f.name, str(f.dataType)) for f in spark.table(silver_table).schema)
 view_schema = set((f.name, str(f.dataType)) for f in spark.table(stable_view).schema)
 
-added = table_schema - view_schema
-removed = view_schema - table_schema
+added = silver_schema - view_schema
+removed = view_schema - silver_schema
 
 if added or removed:
-    print("⚠️ Schema Drift Detected:")
-    if added:
-        print("➕ New fields in Silver Table:", added)
-    if removed:
-        print("➖ Missing fields in View:", removed)
+    print("⚠️ Schema Drift Detected")
+    if added: print("➕ New columns in table:", added)
+    if removed: print("➖ Missing columns in table:", removed)
 else:
-    print("✅ No schema drift detected — dashboard view is stable.")
-```
-
-```markdown
-# ---------------------------------------------
-# 📊 Final Step: Build Dashboard in UI
-# ---------------------------------------------
-
-Use `main.nyctaxi.trip_dashboard_view` in Databricks SQL dashboard to build visuals like:
-
-- Total Fare by Pickup Date
-- Avg Tip by Passenger Count
-- Trip Distance by Payment Type
-- Filters: Date range, Passenger Count, Payment Type
-
-Use `trip_dashboard_view_latest` to safely explore new fields before updating the stable view.
+    print("✅ Schema matches view")
 ```
 
 ---
 
+#### 📊 Step 6: Build Dashboard (Manually in Databricks SQL)
 
+Use the view `main.nyctaxi.trips_dashboard_view` and create visuals such as:
 
-- ✅ Schema evolution only at the Bronze layer
+- Total fare by `pickup_zip`
     
-- ✅ Fixed schema in Silver
+- Avg. trip distance by `dropoff_zip`
     
-- ✅ Stable and dynamic views
+- Line chart of trips by `tpep_pickup_datetime`
     
-- ✅ Schema drift detection
+- Filters on ZIP codes and pickup/dropoff time
     
-- ✅ Dashboard build guidance
+
+---
+
+Let me know if you want me to generate a `.ipynb` or `.dbc` file from this code!
