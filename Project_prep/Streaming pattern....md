@@ -1234,73 +1234,78 @@ I’ll share code snippets tailored to your demo environment.
 
 ---
 
-### 📒 **Retail Revenue Dashboard – Schema Safe & Real-Time Notebook**
+Certainly! Here's the **complete Databricks notebook code** as a single copy-pasteable snippet, showcasing **real-time dashboard best practices** using `samples.nyctaxi.tripdata`.
+
+---
+
+### 🚖 **NYCTaxi Dashboard with Schema Evolution Best Practices**
 
 ```python
 # ---------------------------------------------
-# 🛠️ Step 1: Load Bronze Data (Allow Schema Evolution)
+# 1️⃣ Ingest Raw Data to Bronze with Schema Evolution
 # ---------------------------------------------
-from pyspark.sql.functions import *
+bronze_path = "/mnt/bronze/nyctaxi_tripdata"
 
-raw_path = "/databricks-datasets/retail-org/transactions"
-bronze_table_path = "/mnt/retail/bronze/retail_sales_raw"
+raw_df = spark.read.table("samples.nyctaxi.tripdata")
 
-df_raw = spark.read.option("inferSchema", True).csv(raw_path, header=True)
-
-df_raw.write.format("delta") \
+# Save to Bronze layer (schema evolution enabled)
+raw_df.write.format("delta") \
     .option("mergeSchema", "true") \
     .mode("append") \
-    .save(bronze_table_path)
+    .save(bronze_path)
 ```
 
 ```python
 # ---------------------------------------------
-# 🧽 Step 2: Transform & Clean Data for Silver Layer (Fixed Schema)
+# 2️⃣ Clean and Write Silver Table (Schema Controlled)
 # ---------------------------------------------
-silver_table = "retail.revenue.orders_cleaned"
+from pyspark.sql.functions import col
 
-df_silver = spark.read.format("delta").load(bronze_table_path)
+silver_table = "main.nyctaxi.trip_cleaned"
 
-# Select only expected columns
-cleaned = df_silver.select(
-    col("order_id"),
-    col("customer_id"),
-    col("order_timestamp").alias("order_date"),
-    col("store_id"),
-    col("product_id"),
-    col("quantity"),
-    col("sale_price").alias("revenue")
+bronze_df = spark.read.format("delta").load(bronze_path)
+
+clean_df = bronze_df.select(
+    col("tpep_pickup_datetime"),
+    col("tpep_dropoff_datetime"),
+    col("passenger_count"),
+    col("trip_distance"),
+    col("fare_amount"),
+    col("tip_amount"),
+    col("payment_type")
 )
 
-# Save as a managed Delta table
-cleaned.write.format("delta") \
+# Write as Silver Delta Table
+clean_df.write.format("delta") \
     .mode("overwrite") \
     .saveAsTable(silver_table)
 ```
 
 ```python
 # ---------------------------------------------
-# 👓 Step 3: Create Stable View for Dashboard (Fixed Schema)
+# 3️⃣ Create Stable View for Dashboards
 # ---------------------------------------------
-stable_view = "retail.revenue.dashboard_sales_view"
+stable_view = "main.nyctaxi.trip_dashboard_view"
 
 spark.sql(f"""
 CREATE OR REPLACE VIEW {stable_view} AS
 SELECT
-  order_id,
-  store_id,
-  product_id,
-  revenue,
-  order_date
+  tpep_pickup_datetime,
+  tpep_dropoff_datetime,
+  passenger_count,
+  trip_distance,
+  fare_amount,
+  tip_amount,
+  payment_type
 FROM {silver_table}
 """)
 ```
 
 ```python
 # ---------------------------------------------
-# 🧪 Step 4: Create Latest View for Dev/Test (Dynamic Schema)
+# 4️⃣ Optional: Create Latest (Exploratory) View
 # ---------------------------------------------
-latest_view = "retail.revenue.dashboard_sales_view_latest"
+latest_view = "main.nyctaxi.trip_dashboard_view_latest"
 
 spark.sql(f"""
 CREATE OR REPLACE VIEW {latest_view} AS
@@ -1310,10 +1315,10 @@ SELECT * FROM {silver_table}
 
 ```python
 # ---------------------------------------------
-# 🔍 Step 5: Schema Drift Detection (Table vs View)
+# 5️⃣ Schema Drift Detection Logic
 # ---------------------------------------------
-table_schema = set((field.name, str(field.dataType)) for field in spark.table(silver_table).schema)
-view_schema = set((field.name, str(field.dataType)) for field in spark.table(stable_view).schema)
+table_schema = set((f.name, str(f.dataType)) for f in spark.table(silver_table).schema)
+view_schema = set((f.name, str(f.dataType)) for f in spark.table(stable_view).schema)
 
 added = table_schema - view_schema
 removed = view_schema - table_schema
@@ -1321,31 +1326,38 @@ removed = view_schema - table_schema
 if added or removed:
     print("⚠️ Schema Drift Detected:")
     if added:
-        print("➕ New fields in table:", added)
+        print("➕ New fields in Silver Table:", added)
     if removed:
-        print("➖ Missing fields in view:", removed)
+        print("➖ Missing fields in View:", removed)
 else:
-    print("✅ Schema is stable and matches the dashboard view.")
+    print("✅ No schema drift detected — dashboard view is stable.")
 ```
 
 ```markdown
-# 📊 Final Step: Build Dashboard
-- Go to **Databricks SQL** → **Dashboards**
-- Create a new dashboard using: `retail.revenue.dashboard_sales_view`
-- Add charts like:
-  - Total revenue by `store_id`
-  - Revenue over time by `order_date`
-  - Product-level sales breakdown
-- Use filters like `store_id`, `product_id`, `order_date`
-- Experiment with new schema fields in `dashboard_sales_view_latest`
+# ---------------------------------------------
+# 📊 Final Step: Build Dashboard in UI
+# ---------------------------------------------
+
+Use `main.nyctaxi.trip_dashboard_view` in Databricks SQL dashboard to build visuals like:
+
+- Total Fare by Pickup Date
+- Avg Tip by Passenger Count
+- Trip Distance by Payment Type
+- Filters: Date range, Passenger Count, Payment Type
+
+Use `trip_dashboard_view_latest` to safely explore new fields before updating the stable view.
 ```
 
 ---
 
-Let me know if you'd like:
 
-- A `.dbc` or `.ipynb` export
+
+- ✅ Schema evolution only at the Bronze layer
     
-- Unity Catalog permission automation
+- ✅ Fixed schema in Silver
     
-- Or dashboard visualization templates based on this view
+- ✅ Stable and dynamic views
+    
+- ✅ Schema drift detection
+    
+- ✅ Dashboard build guidance
