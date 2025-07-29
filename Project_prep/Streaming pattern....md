@@ -1053,3 +1053,299 @@ A project manager wants a real-time executive overview shared with leadership. T
 |Embedding|Enable public embedding via iframe for external visualization|
 |Permissioning|Dashboard + data-level access managed separately via object ACLs + catalog|
 
+-----------------------------------------------------------------
+
+
+Dashbaord
+
+---
+
+## ✅ Best Practices for Schema Evolution in Retail Revenue & Supply Chain Dashboards in Databricks
+
+These built-in dashboards use **Delta Lake**, **Unity Catalog**, and **SQL/Dashboards** to visualize real-time metrics like revenue, order count, stock levels, and fulfillment KPIs.
+
+When you're **experimenting, updating ingestion pipelines, or evolving schemas**, follow this strategy:
+
+---
+
+### ⚙️ 1. **Allow Schema Evolution ONLY at the Bronze Layer**
+
+If you're ingesting from Autoloader or streaming CSV/Parquet files into Delta, enable schema evolution there:
+
+```python
+df.write.format("delta") \
+  .option("mergeSchema", "true") \
+  .mode("append") \
+  .save("/mnt/retail/bronze/retail_sales_raw")
+```
+
+> 🟨 **Use `mergeSchema` ONLY here**, because dashboards don’t point to this raw data.
+
+---
+
+### 🧽 2. **Control Schema in Silver Layer (Refined Tables)**
+
+When transforming from Bronze to Silver (`retail_sales_clean`, `orders_refined`, etc.), use **explicit schema projection**:
+
+```python
+df.select("order_id", "customer_id", "order_date", "store_id", "product_id", "quantity", "revenue")
+  .write.format("delta")
+  .mode("overwrite")
+  .saveAsTable("retail.revenue.orders_cleaned")
+```
+
+> ✅ Prevents new fields from “leaking” into the refined layer without review.
+
+---
+
+### 👓 3. **Expose Data to Dashboard via Stable Views Only**
+
+Create or replace SQL views with fixed schema, like:
+
+```sql
+CREATE OR REPLACE VIEW retail.revenue.dashboard_sales_view AS
+SELECT
+  order_id,
+  store_id,
+  product_id,
+  revenue,
+  order_date
+FROM retail.revenue.orders_cleaned;
+```
+
+- 🛡️ This acts as a **contract**: dashboards only see expected columns.
+    
+- New columns added during evolution will not affect this view until explicitly updated.
+    
+
+---
+
+### 🧠 4. **Use Dashboard-View Versioning for Stability and Dev Testing**
+
+|View Name|Purpose|
+|---|---|
+|`dashboard_sales_view_v1`|Used by production dashboard|
+|`dashboard_sales_view_latest`|Shows evolving schema for analysts/testers|
+
+- Production dashboards **always point to `v1`** (no breakage).
+    
+- You can inspect new fields in `latest` without breaking visuals.
+    
+
+---
+
+### 🔍 5. **Run Schema Drift Checks Periodically (Optional Notebook)**
+
+Write a notebook to **compare current base table schema vs. dashboard view schema**.
+
+```python
+df_table = spark.table("retail.revenue.orders_cleaned").schema
+df_view  = spark.table("retail.revenue.dashboard_sales_view").schema
+
+if df_table != df_view:
+    print("⚠️ Schema has changed — review required!")
+```
+
+- 📢 Alert the dev team if new fields appear.
+    
+- Prevents silent breaking of dashboards.
+    
+
+---
+
+### 🔐 6. **Restrict Schema Changes on Silver/Gold Tables with Unity Catalog**
+
+Use Unity Catalog to **block accidental drops or changes** on tables/views used in dashboards:
+
+```sql
+-- Example
+GRANT SELECT ON TABLE retail.revenue.orders_cleaned TO analysts;
+DENY ALTER ON TABLE retail.revenue.orders_cleaned TO analysts;
+```
+
+> ❌ Prevent ALTER/REPLACE by non-admins  
+> ✅ Ensures dashboard stability
+
+---
+
+### 🖼️ 7. **Don't Use `SELECT *` in Views/Notebooks Feeding Dashboards**
+
+Avoid dynamic schema in views:
+
+```sql
+-- ❌ Risky
+CREATE OR REPLACE VIEW dashboard_view AS SELECT * FROM orders_cleaned;
+
+-- ✅ Safe
+CREATE OR REPLACE VIEW dashboard_view AS
+SELECT order_id, store_id, revenue FROM orders_cleaned;
+```
+
+---
+
+## 📘 Summary Table (for Retail Revenue Dashboard)
+
+|Layer|Strategy|
+|---|---|
+|Bronze|Allow schema evolution (`mergeSchema = true`)|
+|Silver/Gold|Use fixed schema (explicit `select(...)`)|
+|Views|Create stable views (`dashboard_sales_view`) with only required fields|
+|Dashboards|Point to stable views only|
+|Versioning|Maintain `v1`, `latest`, or staging versions of views|
+|Monitoring|Use notebook to detect schema drift|
+|Access Control|Use Unity Catalog to deny unauthorized schema changes|
+
+---
+
+## 🛠️ Example: In the Context of Retail Revenue Dashboard
+
+Let’s say the ingestion team adds a new column `delivery_partner_id` to `orders_cleaned`.
+
+### 🚫 What happens if dashboard points to table?
+
+- Dashboard **breaks** if filters or visualizations depend on old schema.
+    
+
+### ✅ If dashboard uses view:
+
+- View remains stable.
+    
+- You can **test the new column in `dashboard_sales_view_latest`**.
+    
+- Once confirmed, update the stable view `dashboard_sales_view_v1`.
+    
+
+---
+
+Let me know if you want:
+
+- A **template view manager notebook**
+    
+- A **schema audit tracker notebook**
+    
+- Sample **CI checks for schema diff**
+    
+
+I’ll share code snippets tailored to your demo environment.
+
+
+
+---code
+
+---
+
+### 📒 **Retail Revenue Dashboard – Schema Safe & Real-Time Notebook**
+
+```python
+# ---------------------------------------------
+# 🛠️ Step 1: Load Bronze Data (Allow Schema Evolution)
+# ---------------------------------------------
+from pyspark.sql.functions import *
+
+raw_path = "/databricks-datasets/retail-org/transactions"
+bronze_table_path = "/mnt/retail/bronze/retail_sales_raw"
+
+df_raw = spark.read.option("inferSchema", True).csv(raw_path, header=True)
+
+df_raw.write.format("delta") \
+    .option("mergeSchema", "true") \
+    .mode("append") \
+    .save(bronze_table_path)
+```
+
+```python
+# ---------------------------------------------
+# 🧽 Step 2: Transform & Clean Data for Silver Layer (Fixed Schema)
+# ---------------------------------------------
+silver_table = "retail.revenue.orders_cleaned"
+
+df_silver = spark.read.format("delta").load(bronze_table_path)
+
+# Select only expected columns
+cleaned = df_silver.select(
+    col("order_id"),
+    col("customer_id"),
+    col("order_timestamp").alias("order_date"),
+    col("store_id"),
+    col("product_id"),
+    col("quantity"),
+    col("sale_price").alias("revenue")
+)
+
+# Save as a managed Delta table
+cleaned.write.format("delta") \
+    .mode("overwrite") \
+    .saveAsTable(silver_table)
+```
+
+```python
+# ---------------------------------------------
+# 👓 Step 3: Create Stable View for Dashboard (Fixed Schema)
+# ---------------------------------------------
+stable_view = "retail.revenue.dashboard_sales_view"
+
+spark.sql(f"""
+CREATE OR REPLACE VIEW {stable_view} AS
+SELECT
+  order_id,
+  store_id,
+  product_id,
+  revenue,
+  order_date
+FROM {silver_table}
+""")
+```
+
+```python
+# ---------------------------------------------
+# 🧪 Step 4: Create Latest View for Dev/Test (Dynamic Schema)
+# ---------------------------------------------
+latest_view = "retail.revenue.dashboard_sales_view_latest"
+
+spark.sql(f"""
+CREATE OR REPLACE VIEW {latest_view} AS
+SELECT * FROM {silver_table}
+""")
+```
+
+```python
+# ---------------------------------------------
+# 🔍 Step 5: Schema Drift Detection (Table vs View)
+# ---------------------------------------------
+table_schema = set((field.name, str(field.dataType)) for field in spark.table(silver_table).schema)
+view_schema = set((field.name, str(field.dataType)) for field in spark.table(stable_view).schema)
+
+added = table_schema - view_schema
+removed = view_schema - table_schema
+
+if added or removed:
+    print("⚠️ Schema Drift Detected:")
+    if added:
+        print("➕ New fields in table:", added)
+    if removed:
+        print("➖ Missing fields in view:", removed)
+else:
+    print("✅ Schema is stable and matches the dashboard view.")
+```
+
+```markdown
+# 📊 Final Step: Build Dashboard
+- Go to **Databricks SQL** → **Dashboards**
+- Create a new dashboard using: `retail.revenue.dashboard_sales_view`
+- Add charts like:
+  - Total revenue by `store_id`
+  - Revenue over time by `order_date`
+  - Product-level sales breakdown
+- Use filters like `store_id`, `product_id`, `order_date`
+- Experiment with new schema fields in `dashboard_sales_view_latest`
+```
+
+---
+
+Let me know if you'd like:
+
+- A `.dbc` or `.ipynb` export
+    
+- Unity Catalog permission automation
+    
+- Or dashboard visualization templates based on this view
