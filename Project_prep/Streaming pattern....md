@@ -1578,6 +1578,166 @@ ORDER BY total_fare DESC;
 |Dash|Filters, visuals, governed views|✅|
 |QA|Schema drift detection logic|✅|
 
+-----
+
+
+
+
+## 🔍 Objective
+
+Build a robust and modular real-time data pipeline using the **Medallion Architecture** with **Structured Streaming** in Databricks.  
+Data flows from raw ingestion → cleaned & validated → business aggregated, with **Kafka notifications** at validation (Silver) and result (Gold) stages.
+
 ---
 
-Would you like this exported as HTML, Confluence Wiki format, or PDF? I can generate it in your preferred format.
+## 🧱 Medallion Architecture Layers
+
+### 🥉 Bronze Layer (Raw)
+
+- **Source**: CSV / JSON via **Autoloader (`cloudFiles`)**
+    
+- **Pattern**: `Auto Loader + Checkpointing + CDC`
+    
+- **Features**:
+    
+    - Handles schema inference and evolution
+        
+    - Uses checkpoint for fault tolerance
+        
+    - Stores raw data as-is in Delta Lake with change data feed enabled
+        
+- ✅ Pattern Used: `Schema Evolution + Auto Loader + Delta WriteStream`
+    
+
+---
+
+### 🥈 Silver Layer (Validated)
+
+- **Purpose**: Clean, validate, normalize
+    
+- **Pattern**: `forEachBatch` processing for row-level validation and Kafka publishing
+    
+- **Kafka Notification**: Invalid records sent to topic `validation_topic`
+    
+- ✅ Patterns Used:
+    
+    - `forEachBatch`: to trigger Kafka producer logic on each batch
+        
+    - `WithColumnRenamed`, `Filter`, `Cast`, etc. for cleansing
+        
+    - `join` with static reference or external lookup can be added optionally here
+        
+
+---
+
+### 🥇 Gold Layer (Aggregated)
+
+- **Purpose**: Compute utilization metrics and business summary
+    
+- **Join**: Streaming data joined with validated Silver data (static or streaming)
+    
+- **Pattern**: `Streaming Join + Watermark + Aggregation + WriteStream`
+    
+- **Kafka Notification**: Final breach/utilization output to topic `utilization_topic`
+    
+- ✅ Patterns Used:
+    
+    - `join` between exposure and limits
+        
+    - `withWatermark()` to handle late data
+        
+    - `agg()` for metrics like `sum`, `max`, `count`
+        
+    - `writeStream.toTable()` to Gold Delta Tables
+        
+    - Kafka publishing within `foreachBatch`
+        
+
+---
+
+## 🌀 End-to-End Streaming Patterns Observed
+
+|🔧 Pattern|🔍 Use Case in Notebook|✅ Where Used|
+|---|---|---|
+|`Auto Loader`|Ingest CSV/JSON from external path with schema evolution|Bronze Layer|
+|`Delta Sink`|Store structured stream data with ACID and time-travel support|All Layers|
+|`forEachBatch`|Per-batch Kafka alert on validation failure or breach|Silver & Gold|
+|`Streaming Join`|Join exposure (stream) with limits (stream/static)|Gold Layer|
+|`Watermarking`|Define lateness tolerance in exposure data for accurate join/agg|Gold Layer|
+|`Aggregation`|Compute utilization, breach, summaries|Gold Layer|
+|`Schema Inference`|Infer schema of semi-structured files (e.g. JSON multiline)|Bronze Layer|
+|`Checkpointing`|Ensure state and fault tolerance in streaming writes|All Layers|
+|`Change Data Feed`|Enable incremental consumption downstream|Bronze Layer|
+
+---
+
+## 🔁 Kafka Topics
+
+|Kafka Topic|Produced From|Description|
+|---|---|---|
+|`validation_topic`|Silver Layer|Alerts when incoming rows fail validation|
+|`utilization_topic`|Gold Layer|Breach alerts or business insights|
+
+---
+
+## ⚙️ Streaming Workflow Diagram
+
+```mermaid
+flowchart TD
+    A[CSV / JSON Files] --> B[Bronze Layer (Auto Loader)]
+    B -->|Delta Table + CDC| C[Silver Layer (Validation)]
+    C -->|Valid Records| D[Gold Layer (Business Metrics)]
+    C -->|Invalid Records| K1[Kafka Topic: validation_topic]
+    D -->|Breach Summary| K2[Kafka Topic: utilization_topic]
+    D --> E[Dashboards / BI Consumption]
+```
+
+---
+
+## 📁 Directory Structure (Delta Volumes)
+
+```
+/Volumes/<catalog>.<schema>/
+├── bronze/
+│   ├── checkpoints/
+│   ├── raw_csv/
+├── silver/
+│   └── limits_cleaned, exposure_cleaned
+├── gold/
+│   └── utilization_summary
+```
+
+---
+
+## 🧠 Summary of Streaming Use Cases Applied
+
+|Layer|Transformation Type|Streaming Strategy|Output|
+|---|---|---|---|
+|Bronze|Raw ingestion|`cloudFiles.readStream`|Delta table with CDC|
+|Silver|Cleansing, validation|`forEachBatch + Kafka`|Delta + Kafka alert|
+|Gold|Aggregation, enrichment|`join + watermark + agg`|Final output + Kafka publish|
+
+---
+
+## 📸 Screenshot Placeholders
+
+> 📷 Bronze notebook code block with `cloudFiles` and CDC  
+> 📷 Silver validation block with `forEachBatch` and Kafka producer  
+> 📷 Gold layer join and aggregation logic with watermark  
+> 📷 Kafka payload sample  
+> 📷 Final dashboard view from Gold table
+
+---
+
+Let me know if you want:
+
+- ✅ Downloadable Word/Markdown version
+    
+- ✅ Embedded sample Kafka producer code
+    
+- ✅ Table or SQL view definition for final Gold output
+    
+- ✅ Export-ready diagrams (PNG/SVG/Mermaid Markdown)
+    
+
+Would you like this wrapped into a `.confluence` export or ready-to-paste Markdown?
