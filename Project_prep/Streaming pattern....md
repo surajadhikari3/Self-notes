@@ -1353,4 +1353,231 @@ Use the view `main.nyctaxi.trips_dashboard_view` and create visuals such as:
 
 ---
 
-Let me know if you want me to generate a `.ipynb` or `.dbc` file from this code!
+
+Best practises Documentation ................
+
+
+---
+
+# 🚖 Real-Time Dashboard Implementation with Schema Best Practices in Databricks
+
+This documentation outlines how a production-grade dashboard was built using **Databricks best practices**, based on the `samples.nyctaxi.trips` dataset. The pipeline follows a proper **Bronze → Silver → View → Dashboard** architecture with **schema control** and **observability** in place.
+
+---
+
+## ✅ Architecture Overview
+
+> **Data Flow:**  
+> Shared Dataset → Bronze Layer (Delta with schema evolution) → Silver Layer (fixed schema) → Views → SQL Queries → Visual Dashboard
+
+![Architecture Diagram Placeholder](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-architecture-diagram)
+
+---
+
+## 🟫 Step 1: Ingest to Bronze Table with Schema Evolution
+
+- Ingested raw trip data from `samples.nyctaxi.trips`
+    
+- Wrote data to `/mnt/bronze/nyctaxi_trips` using Delta format
+    
+- Enabled schema evolution (`mergeSchema=true`) to support ingestion flexibility
+    
+
+📌 **Purpose:** Allow evolving raw schemas (e.g., new fields) without blocking the pipeline
+
+```python
+raw_df = spark.read.table("samples.nyctaxi.trips")
+
+raw_df.write.format("delta") \
+    .option("mergeSchema", "true") \
+    .mode("append") \
+    .save("/mnt/bronze/nyctaxi_trips")
+```
+
+📸 _Screenshot: Code cell or notebook output_  
+![Bronze Layer Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 🪙 Step 2: Clean and Load Silver Table (Fixed Schema)
+
+- Read data from Bronze path
+    
+- Selected only known, required columns (e.g., pickup/dropoff time, fare, ZIPs)
+    
+- Wrote output to `main.nyctaxi.trips_cleaned` table using Delta format
+    
+
+📌 **Purpose:** Enforce schema control and filter out unnecessary or risky fields
+
+```python
+bronze_df = spark.read.format("delta").load("/mnt/bronze/nyctaxi_trips")
+
+clean_df = bronze_df.select(
+    "tpep_pickup_datetime", "tpep_dropoff_datetime",
+    "trip_distance", "fare_amount", "pickup_zip", "dropoff_zip"
+)
+
+clean_df.write.format("delta") \
+    .mode("overwrite") \
+    .saveAsTable("main.nyctaxi.trips_cleaned")
+```
+
+📸 _Screenshot: Cleaned data preview or notebook cell_  
+![Silver Layer Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 👓 Step 3: Create Stable View for Dashboard
+
+- Created a **named view** `main.nyctaxi.trips_dashboard_view`
+    
+- Includes only safe, well-defined columns
+    
+- Used by production dashboards
+    
+
+📌 **Purpose:** Decouples dashboard from table schema, preventing breakage on evolution
+
+```sql
+CREATE OR REPLACE VIEW main.nyctaxi.trips_dashboard_view AS
+SELECT
+  tpep_pickup_datetime,
+  tpep_dropoff_datetime,
+  trip_distance,
+  fare_amount,
+  pickup_zip,
+  dropoff_zip
+FROM main.nyctaxi.trips_cleaned;
+```
+
+📸 _Screenshot: SQL view definition_  
+![Stable View Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 🧪 Step 4: Create Latest View for Dev/Schema Exploration
+
+- Created a dynamic view `main.nyctaxi.trips_dashboard_view_latest` with `SELECT *`
+    
+- Used by developers to explore new columns added via schema evolution
+    
+
+📌 **Purpose:** Safe experimentation without impacting production dashboards
+
+```sql
+CREATE OR REPLACE VIEW main.nyctaxi.trips_dashboard_view_latest AS
+SELECT * FROM main.nyctaxi.trips_cleaned;
+```
+
+📸 _Screenshot: Dev view definition_  
+![Dynamic View Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 🛡️ Step 5: Implement Schema Drift Detection
+
+- Compared schema of Silver table vs. dashboard view
+    
+- Alerted if new fields were added or existing ones were removed
+    
+
+📌 **Purpose:** Early warning system for schema contract violations
+
+```python
+table_schema = set(f.name for f in spark.table("main.nyctaxi.trips_cleaned").schema)
+view_schema = set(f.name for f in spark.table("main.nyctaxi.trips_dashboard_view").schema)
+
+if table_schema != view_schema:
+    print("⚠️ Schema drift detected!")
+```
+
+📸 _Screenshot: Output or drift detection logic_  
+![Drift Detection Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 💡 Step 6: Author SQL Queries in Databricks SQL
+
+Created key SQL queries using the view:
+
+- **Fare by Pickup ZIP**
+    
+- **Avg Trip Distance by Dropoff ZIP**
+    
+- **Fare Over Time**
+    
+
+Example:
+
+```sql
+SELECT pickup_zip, SUM(fare_amount) AS total_fare
+FROM main.nyctaxi.trips_dashboard_view
+GROUP BY pickup_zip
+ORDER BY total_fare DESC;
+```
+
+📸 _Screenshot: Query editor with saved query_  
+![SQL Query Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 📊 Step 7: Create Visualizations
+
+- Created visualizations using bar, line, and pie charts
+    
+- Linked them to saved queries
+    
+
+|Visualization Name|Type|Data Source|
+|---|---|---|
+|Fare by Pickup ZIP|Bar Chart|SQL Query 1|
+|Avg Distance by Dropoff|Bar Chart|SQL Query 2|
+|Daily Fare Trend|Line Chart|SQL Query 3|
+
+📸 _Screenshot: Visualization configuration_  
+![Visualization Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 🧩 Step 8: Assemble and Configure Dashboard
+
+- Created `NYC Taxi Dashboard`
+    
+- Added visualizations, arranged layout
+    
+- Added **filters** for `pickup_zip`, `dropoff_zip`, and `pickup_date`
+    
+
+📌 **Purpose:** Enables interactive, dynamic exploration of trusted data
+
+📸 _Screenshot: Dashboard layout_  
+![Dashboard Screenshot](https://chatgpt.com/g/g-p-680bf5618d8481918b06e8101d344bea-suraj/c/insert-image-here)
+
+---
+
+## 🔐 Step 9: Access Control & Governance
+
+- View and table were created under Unity Catalog
+    
+- Access managed via `GRANT` commands (UI or SQL)
+    
+
+📌 **Purpose:** Fine-grained governance for production data and dashboards
+
+---
+
+## ✅ Summary of Best Practices Implemented
+
+|Layer|Best Practice|Applied?|
+|---|---|---|
+|Bronze|Schema evolution enabled|✅|
+|Silver|Explicit schema projection|✅|
+|Views|Stable + dynamic separation|✅|
+|SQL|Modular queries|✅|
+|Dash|Filters, visuals, governed views|✅|
+|QA|Schema drift detection logic|✅|
+
+---
+
+Would you like this exported as HTML, Confluence Wiki format, or PDF? I can generate it in your preferred format.
