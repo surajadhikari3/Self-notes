@@ -1741,3 +1741,66 @@ Let me know if you want:
     
 
 Would you like this wrapped into a `.confluence` export or ready-to-paste Markdown?
+
+
+------------------------------------------
+
+
+
+**Non-Structured Streaming** in Databricks refers to **batch-oriented processing** where data is processed using the `read()` and `write()` APIs in Apache Spark. It is **not streaming** in the real-time sense, but rather the term may be informally used to refer to **non-streaming (batch) pipelines** that still follow a **Bronze → Silver → Gold** architecture or staged processing steps.
+
+---
+
+## 📖 **Detailed Description**
+
+In **Non-Structured Streaming**:
+
+- You work with **bounded data** (static or pre-collected datasets), such as files from a specific folder, SQL table rows, or API responses.
+    
+- Spark treats **all the input as one logical batch**, even if it’s distributed across partitions.
+    
+- You manually **define what to process and when**, unlike Structured Streaming, which runs continuously.
+    
+- Jobs are **triggered by schedule (e.g., Databricks Jobs)** or manually by a user.
+    
+- This approach is **simpler**, **more deterministic**, and **cost-effective** when real-time data isn't required.
+    
+
+---
+
+### 🧠 Key Characteristics
+
+|Aspect|Non-Structured (Batch) Description|
+|---|---|
+|**Execution**|Discrete Spark job processing data at a point in time|
+|**Data Handling**|One-time read from input source (snapshot-based)|
+|**Scheduling**|User-triggered or scheduled via Jobs / ADF / Airflow|
+|**Latency**|Typically measured in minutes or hours|
+|**Error Recovery**|Re-run the job or pipeline manually|
+|**Cost Efficiency**|✅ Lower compared to always-running streaming pipelines|
+|**Flexibility**|Easily supports transformations, filters, aggregations|
+|**Examples**|Nightly sales reports, daily SFTP file drops, monthly audits|
+
+---
+
+## ⚖️ Structured Streaming vs. Non-Structured Streaming (Batch) in Databricks
+
+|🔍 **Category**|🟨 **Structured Streaming**|🟦 **Non-Structured Streaming (Batch)**|
+|---|---|---|
+|**Definition**|Real-time processing of continuously arriving data|On-demand or scheduled processing of bounded datasets|
+|**API Used**|`readStream()` + `writeStream()`|`read()` + `write()`|
+|**Execution Type**|Micro-batches (or continuous trigger)|One-time discrete batch execution|
+|**Data Type**|Unbounded (data keeps coming in)|Bounded (static or finite dataset)|
+|**Trigger Type**|Auto-triggered on new data or interval|Manual or scheduled (e.g., daily at 2 AM)|
+|**Input Sources**|Kafka, Auto Loader, cloudFiles, socket|Files, tables, APIs, JDBC, DataFrames|
+|**Output Mode**|Append, Update, Complete|Append, Overwrite, Merge|
+|**Watermarking Support**|✅ Yes|❌ No|
+|**Windowing**|✅ Tumbling, Sliding, Session|❌ Only simple timestamp grouping|
+|**Joins**|Stream-Stream, Stream-Static, Stateful|Only batch-time joins|
+|**Fault Tolerance**|✅ Checkpointing + offset tracking|❌ Manual recovery via job rerun|
+|**Replay Capability**|✅ Via checkpoint + Auto Loader metadata logs|✅ Re-execute notebook or job|
+|**Schema Evolution**|✅ Delta + Autoloader support|✅ Delta support (`mergeSchema`)|
+|**Cluster Type**|Requires streaming-capable or continuous cluster|Runs on standard job cluster or all-purpose cluster|
+|**Best For**|IoT, real-time dashboards, fraud detection|ETL jobs, historical loads, SCD, warehouse refreshes|
+|**Typical Latency**|Seconds to minutes|Minutes to hours|
+|**Example**|Live Kafka feed to dashboard|Daily customer snapshot to Delta table|
