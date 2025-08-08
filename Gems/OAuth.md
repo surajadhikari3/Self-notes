@@ -9,12 +9,11 @@ Grant Types: Based on the nature of app we use the different
 
 - **Notes —> Understand the auth code with pkce you will understand all….**
 
-
 - **Client-credentials. -> Machine to Machine / Server to Server / B2B (no user involved)**
 - Resource Owner **Password -> If the user trust the app it provides credentials to app itself which is running on server**
 - **Authorization code —> If user does not trust the  app it provide the credentials to the Identity Server (Like Okta/Google) and get the Authorization code which it forwards to the app and app request to Identity Server with AC and get the access token.**
 - **Implicit —> those app which is running in the front which does not have storage and cannot manage the client id and client secret then instead of authorization code user authenticates from the identity server and get the access code and send it directly to the application. This is highly risky** 
-- **Authorization code with PKCE —> here the app generates the code challange and encode it which is called code verifier along with the user credentials user present the code challenge that is sent by application. The application send the authorization code along with code verifier to the identity server and get the access token.  
+- **Authorization code with PKCE —> here the app generate code verifier and calculate the code challenge and send it along with the user credentials user present the code challenge that is sent by application to the identity server. The application send the authorization code along with code verifier to the identity server and get the access token.  
       
     ![[Does the Application.jpeg]]
 

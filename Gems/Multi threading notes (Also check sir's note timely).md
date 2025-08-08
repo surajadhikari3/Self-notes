@@ -1,7 +1,7 @@
 Life cycle of Thread 
 
 
-1. **New:** Thread is created.
+1. **New:** Thread is created. 
     
 2. **Runnable:** Thread is ready to run.
     
@@ -80,17 +80,28 @@ kill -3 <pid> --> It logs to the tomcat application terminal even you fire the  
 `jstack <pid>`
 
 ✅ On **Windows**: Use `CTRL+Break` in the command window running the app  
-Or use **JVisualVM** or **JConsole** (GUI tools)
+Or use **JVisualVM** or **JConsole** (GUI tools) --> Visual Tools
+
+
+Dynatrace --> Monitoring tools...
+
+say :
+
+kill -3 pid --> For linux
+Jconsole, JVisualVM --> Visual tool
+Dynatrace. --> Monitoring tools....
+
 
 
 # 🛠 Exception Handling: `execute()` vs `submit()`
 
-| Feature              | `execute()`                | `submit()`               |
-| :------------------- | :------------------------- | :----------------------- |
-| Exception Handling   | Terminates thread abruptly | Captured inside Future   |
-| Supports Callable<T> | ❌ No                       | ✅ Yes                    |
-| Can Retrieve Result  | ❌ No                       | ✅ Yes (via Future.get()) |
-| Exception Handling   | No                         | Yes                      |
+| Feature              | `execute()`                | `submit()`                 |
+| :------------------- | :------------------------- | :------------------------- |
+| Exception Handling   | Terminates thread abruptly | Captured inside Future     |
+| Supports Callable<T> | ❌ No                       | ✅ Yes                      |
+| Can Retrieve Result  | ❌ No                       | ✅ Yes (via Future.get())   |
+| Exception Handling   | No                         | Yes                        |
+| Takes                | Runnable                   | Both Runnable and Callable |
 
 > **Use `execute()`** when you **don’t need** a return value or exception handling.  
 > **Use `submit()`** when you **need a result** or **want to handle exceptions** properly. 🚀
@@ -391,7 +402,7 @@ System.out.println(future.join());  // Fallback Value: Oops`
 Daemon Threads -> Special type of threads that run in the background and performs the tasks like gc, cleanup or monitoring.
 
 new Thread(() -> {}).setDemon(true)..
-
+ 
 Note: -> It does not prevent the JVM from stoping since it is low priority background thread..
 
 Mutex (Mutual Exclusion), Semaphore, Cyclic barrier, lock, latch
@@ -451,6 +462,6 @@ Thread priority in Java is a number between 1 and 10, with higher numbers indica
 
 How can you ensure the thread safety?
 	 Avoiding the shared mutable state.
-	 synchronization for making the shared mutable state
-	 use the concurrent data structure like                                   			 
+	(Mutual exclusion ) synchronization, reentrant lock.. for making the shared mutable state
+	 use the concurrent, blocking (ArrayBlockingQueue, LinkedBlockingDeque) thread safe data structure                                   			 
 	

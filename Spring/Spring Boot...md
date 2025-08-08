@@ -1,7 +1,7 @@
 Spring boot over spring
 
 	1. Version Mangagement
-	2. Spring boot actuator --> For monitoring, threaddump and so on 
+	2. Spring boot actuator and dev tools like hot reload --> For monitoring, threaddump and so on 
 	3. Embedded server(Tomcat, jetty)
 	4. Slice based testing (@MockMVC, )
 	5. Auto Configuration --> automatically configures bean based on the classpath and application properties.
@@ -160,7 +160,7 @@ Testing...(Slice based testing)
 
 ### **Best Practices for Slice-Based Testing**
 
-1. **Mock Dependencies:** Use `@MockBean` to mock service/repository dependencies.
+1. **Mock Dependencies:** Use `@MockBean` to mock service/repository dependencies. //Mock bean is deprecated use the @MockitoBean
 2. **Focus on One Layer:** Avoid testing multiple layers in slice-based tests.
 3. **Use In-Memory Databases:** For `@DataJpaTest`, use H2 or an embedded database to test persistence logic.
 4. **Test Edge Cases:** Verify the behavior for invalid inputs, exceptions, and boundary conditions.
@@ -443,13 +443,13 @@ How to do the validation in the spring boot applications?
 
 Using @Valid and @Validated annotations
 
-@Valid --> Is simple and allows the nested validations
+@Valid --> Is simple and allows the nested validations (from jakatra)
 
-@Validated -> is the spring validation allows the group wise and method level validations.
+@Validated -> is the spring validation allows the group wise and method level validations. (from spring)
 
 Valid Vs Validated..
 
-| Feature                  | `@Valid`(javax)       | `@Validated` (Spring)               |
+| Feature                  | `@Valid`(jakatra)     | `@Validated` (Spring)               |
 | ------------------------ | --------------------- | ----------------------------------- |
 | Standard Java validation | ✅                     | ✅                                   |
 | Nested object validation | ✅ (`@Valid` on field) | ✅                                   |
@@ -466,7 +466,7 @@ public class UserDTO {
     @Email(message = "Email must be valid")
     private String email;
 
-    @Min(value = 18, message = "Must be 18 or older", groups =     Create.class)
+    @Min(value = 18, message = "Must be 18 or older", groups =Create.class)
     private int age;
 
     @Valid // triggers validation on nested AddressDTO
@@ -485,26 +485,26 @@ For logging, Monitoring ...
 
 ## ✅ Summary Table
 
-|Tool/Library|Category|Purpose|
-|---|---|---|
-|**Sleuth**|Logging + Tracing|Adds trace IDs for distributed tracing|
-|**Prometheus**|Monitoring (metrics)|Collects metrics from apps|
-|**Zipkin / Jaeger**|Distributed Tracing|Visualizes request paths|
-|**Micrometer**|Metrics abstraction|Bridges app metrics to Prometheus/etc|
-|**Logback/SLF4J**|Logging|Writes app logs|
-|**ELK / Loki / Graylog**|Log Aggregation|Centralized log collection + query|
-|**Dynatrace / Digma**|Observability (full stack)|Auto-trace, auto-metrics, commercial|
-|**Grafana**|Visualization|Dashboards for logs/metrics|
+| Tool/Library             | Category                   | Purpose                                |
+| ------------------------ | -------------------------- | -------------------------------------- |
+| **Sleuth**               | Logging + Tracing          | Adds trace IDs for distributed tracing |
+| **Prometheus**           | Monitoring (metrics)       | Collects metrics from apps             |
+| **Zipkin / Jaeger**      | Distributed Tracing        | Visualizes request paths               |
+| **Micrometer**           | Metrics abstraction        | Bridges app metrics to Prometheus/etc  |
+| **Logback/SLF4J**        | Logging                    | Writes app logs                        |
+| **ELK / Loki / Graylog** | Log Aggregation            | Centralized log collection + query     |
+| **Dynatrace / Digma**    | Observability (full stack) | Auto-trace, auto-metrics, commercial   |
+| **Grafana**              | Visualization              | Dashboards for logs/metrics            |
 
 ---
 
 ## 🧠 Easy Way to Remember
 
-|Problem|Tool You Need|
-|---|---|
-|App logs with trace ID|**Sleuth + Logback**|
-|Track HTTP latency, memory usage|**Prometheus + Micrometer**|
-|Visualize metrics|**Grafana**|
-|Centralized searchable logs|**ELK / Loki**|
-|Trace request path across services|**Sleuth + Zipkin**|
-|Enterprise full observability|**Dynatrace / Datadog**|
+| Problem                            | Tool You Need               |
+| ---------------------------------- | --------------------------- |
+| App logs with trace ID             | **Sleuth + Logback**        |
+| Track HTTP latency, memory usage   | **Prometheus + Micrometer** |
+| Visualize metrics                  | **Grafana**                 |
+| Centralized searchable logs        | **ELK / Loki**              |
+| Trace request path across services | **Sleuth + Zipkin**         |
+| Enterprise full observability      | **Dynatrace / Datadog**     |

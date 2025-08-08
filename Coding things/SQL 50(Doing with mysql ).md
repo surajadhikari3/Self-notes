@@ -643,3 +643,24 @@ FROM users
 WHERE REGEXP_LIKE(email, '^[a-z0-9._-]+@gmail\\.com$', 'c');  -- 'c' = case sensitive in MySQL 8+
 ```
 
+-----------common questions :
+
+unique third highest salary :
+
+select distinct salary 
+from salary
+order by salary desc
+limit 1 offset 2. 
+
+--> offset means skip n rows . here offset 2 means it skip first two rows and begin from 3rd rows and there is limit which limit to 1 row give the 3rd highest salary...............
+
+
+
+Using window function...............
+
+
+select distinct salary from (
+select salary , dense_rank over(order by salary desc) as rn
+) as high_sal
+where rn = 3
+
