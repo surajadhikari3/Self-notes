@@ -193,8 +193,9 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "6ad18ab30a1635d6",
+  "active": "03b5d6f27c6af6bd",
   "lastOpenFiles": [
+    "debezium-connector-mysql-2.6.1.Final-plugin.tar.gz",
     "Gems/Collections.md",
     "Gems/Microservice Architecture and Concepts.md",
     "Gems/Kafka.md",
@@ -221,7 +222,6 @@
     "Project_prep/Spark Streaming..............md",
     "Project_prep/Apache Flink, Spark and kafka.md",
     "Project_prep/Azure Databricks.md",
-    "Project_prep/Data Bricks.md",
     "Pasted image 20250721121945.png",
     "Pasted image 20250710130745.png",
     "Pasted image 20250710125913.png",
