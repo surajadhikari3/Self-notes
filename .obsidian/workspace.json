@@ -193,8 +193,9 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "03b5d6f27c6af6bd",
+  "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
+    "debezium-connector-mysql-2.6.1.tar.gz",
     "debezium-connector-mysql-2.6.1.Final-plugin.tar.gz",
     "Gems/Collections.md",
     "Gems/Microservice Architecture and Concepts.md",
@@ -242,7 +243,6 @@
     "Interviews",
     "LeetCode",
     "Cloud",
-    "Coding things",
-    "javascript"
+    "Coding things"
   ]
 }
