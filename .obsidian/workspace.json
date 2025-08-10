@@ -195,6 +195,7 @@
   },
   "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
+    "mysql-connector-j-8.0.33.jar",
     "debezium-connector-mysql-2.6.1.tar.gz",
     "debezium-connector-mysql-2.6.1.Final-plugin.tar.gz",
     "Gems/Collections.md",
@@ -242,7 +243,6 @@
     "Project_prep/Angular",
     "Interviews",
     "LeetCode",
-    "Cloud",
-    "Coding things"
+    "Cloud"
   ]
 }
