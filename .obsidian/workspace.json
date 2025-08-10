@@ -195,6 +195,7 @@
   },
   "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
+    "debezium-connector-mysql-3.2.0.Final-plugin.tar.gz",
     "mysql-connector-j-8.0.33.jar",
     "debezium-connector-mysql-2.6.1.tar.gz",
     "debezium-connector-mysql-2.6.1.Final-plugin.tar.gz",
@@ -242,7 +243,6 @@
     "PR-docs",
     "Project_prep/Angular",
     "Interviews",
-    "LeetCode",
-    "Cloud"
+    "LeetCode"
   ]
 }
