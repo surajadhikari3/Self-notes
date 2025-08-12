@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/Streaming pattern....md",
+                "file": "Gems/Collections.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Streaming pattern..."
+              "title": "Collections"
             }
           },
           {
@@ -193,8 +193,11 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "21a7aecd5be464f6",
+  "active": "6ad18ab30a1635d6",
   "lastOpenFiles": [
+    "confluentinc-kafka-connect-jdbc-10.8.4.zip",
+    "DatabricksJDBC42-2.7.3.1010.zip",
+    "Project_prep/Streaming pattern....md",
     "debezium-connector-mysql-3.2.0.Final-plugin.tar.gz",
     "mysql-connector-j-8.0.33.jar",
     "debezium-connector-mysql-2.6.1.tar.gz",
@@ -220,7 +223,6 @@
     "Project_prep/Security Related Stuff(PingFed).md",
     "PR-docs/Vocabs.md",
     "PR-docs/Sec- Paragon.md",
-    "Project_prep/Streaming pattern....md",
     "Pasted image 20250726182321.png",
     "Project_prep/Spark Streaming..............md",
     "Project_prep/Apache Flink, Spark and kafka.md",
@@ -241,8 +243,6 @@
     "Project_prep",
     "Untitled.canvas",
     "PR-docs",
-    "Project_prep/Angular",
-    "Interviews",
-    "LeetCode"
+    "Project_prep/Angular"
   ]
 }

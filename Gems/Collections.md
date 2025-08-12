@@ -21,7 +21,7 @@ List --> ArrayList, LinkedList
 Set --> HashSet, TreeSet, LinkedHashSet
 Queue --> PriorityQueue, Deque
 
-Map(is also a Interface) is not a subtype of Collection in jaca
+Map(is also a Interface) is not a subtype of Collection in java
 
 
 ![[Pasted image 20250512162816.png]]#### **Difference between HashSet and TreeSet?**
