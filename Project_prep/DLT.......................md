@@ -193,3 +193,140 @@ dlt.create_auto_cdc_flow(
     
 
 If you want, I can paste a minimal **pipeline JSON** you can drop into the DLT UI (with your catalog/schema as the target) so this runs with zero extra plumbing.
+
+
+--------------------
+
+
+
+You’ve got two separate issues showing up at once:
+
+1. **DLT is still seeing a column named `event_ts`** in `cdc_rows` → so the inferred schema has `event_ts`, but your declared target schema doesn’t.
+    
+2. In your notebook I can see a typo in the `except_column_list`: you wrote **`created_dt_ts`** (with a **d**) instead of `created_at_ts`. That means even your helper column might not be excluded.
+    
+
+Also—don’t run this notebook on a normal (Spark Connect) cluster; run it **inside a DLT pipeline** only (that “DLTImportException” at the bottom is from running on a regular cluster).
+
+---
+
+## Fix checklist (do these in order)
+
+1. **Make `cdc_rows` return only these columns** (and nothing else):
+    
+    - `id, name, email, created_at` (the business columns)
+        
+    - helpers: `is_delete, op, created_at_ts`
+        
+    - **No `event_ts` anywhere.**
+        
+2. **Exclude the helpers correctly**:
+    
+    ```python
+    except_column_list=["is_delete", "op", "created_at_ts"]   # no typos
+    ```
+    
+    (You had `created_dt_ts` in the screenshot.)
+    
+3. **Run the pipeline with Full refresh** (schema changed and streaming state remembers the old schema):
+    
+    - In the DLT UI → **Settings** → enable **Full refresh** (or “Run with full refresh”) → Start.
+        
+4. **Run only in DLT** (don’t attach this notebook to a normal cluster).
+    
+
+---
+
+## Minimal, corrected code block
+
+Paste this as-is (it hard-selects the columns so no stray `event_ts` can leak through):
+
+```python
+import dlt
+from pyspark.sql.functions import col, get_json_object, from_json, to_timestamp, coalesce, current_timestamp
+from pyspark.sql.types import StructType, StructField, IntegerType, StringType
+
+after_schema = StructType([
+    StructField("id", IntegerType(), True),
+    StructField("name", StringType(), True),
+    StructField("email", StringType(), True),
+    StructField("created_at", StringType(), True),
+])
+
+@dlt.view
+def bronze_raw():
+    return spark.readStream.table(
+        "d4001-centralus-tdvip-tdsbi_catalog.bronze.debezium_user_events"
+    ).selectExpr("CAST(payload AS STRING) AS payload")
+
+@dlt.table
+def cdc_rows():
+    env = dlt.read_stream("bronze_raw").selectExpr(
+        "get_json_object(payload, '$.payload.op') AS op",
+        "get_json_object(payload, '$.payload.after')  AS after_json",
+        "get_json_object(payload, '$.payload.before') AS before_json"
+    ).where("payload IS NOT NULL AND length(trim(payload)) > 0")
+
+    rows = env.selectExpr(
+        "CASE WHEN op='d' THEN before_json ELSE after_json END AS row_json",
+        "op"
+    ).where("row_json IS NOT NULL")
+
+    parsed = rows.select(
+        (col("op") == "d").alias("is_delete"),
+        col("op"),
+        from_json(col("row_json"), after_schema).alias("r")
+    ).select(
+        col("is_delete"),
+        col("op"),
+        col("r.id").alias("id"),
+        col("r.name").alias("name"),
+        col("r.email").alias("email"),
+        col("r.created_at").alias("created_at")
+    ).withColumn(
+        "created_at_ts",
+        coalesce(to_timestamp(col("created_at"), "yyyy-MM-dd HH:mm:ss"), current_timestamp())
+    )
+
+    # 🔒 return ONLY these columns (no event_ts can slip through)
+    return parsed.select("is_delete", "op", "id", "name", "email", "created_at", "created_at_ts")
+
+# Target SCD2 table (no event_ts here)
+dlt.create_streaming_table(
+    name="users_scd2",
+    table_properties={"delta.enableChangeDataFeed": "true"},
+    schema="""
+      id INT,
+      name STRING,
+      email STRING,
+      created_at STRING,
+      __START_AT TIMESTAMP,
+      __END_AT TIMESTAMP
+    """
+)
+
+# AUTO CDC → SCD2 using created_at_ts
+dlt.create_auto_cdc_flow(
+    target="users_scd2",
+    source="cdc_rows",
+    keys=["id"],
+    sequence_by="created_at_ts",
+    apply_as_deletes="is_delete = true",
+    stored_as_scd_type=2,
+    except_column_list=["is_delete", "op", "created_at_ts"]   # ✅ correct names only
+)
+```
+
+---
+
+## If it still shows `event_ts` in the inferred schema
+
+- You likely have an **old `cdc_rows` definition** (maybe in another cell or another notebook that the pipeline points to) still returning `event_ts`.
+    
+- Ensure the pipeline’s **Notebook path** is the one you edited; click **Open** from the pipeline to verify.
+    
+- Toggle **Development mode** on, hit **Save** in the notebook, then **Run with full refresh**.
+    
+
+After this, `DESCRIBE TABLE <catalog>.<schema>.users_scd2` should show only:  
+`id, name, email, created_at, __START_AT, __END_AT` (no `event_ts`).

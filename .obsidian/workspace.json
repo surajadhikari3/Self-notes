@@ -195,8 +195,9 @@
   },
   "active": "6ad18ab30a1635d6",
   "lastOpenFiles": [
-    "Project_prep/User.md",
+    "Gems/OAuth.md",
     "Project_prep/DLT.......................md",
+    "Project_prep/User.md",
     "PR-docs/Sec- Paragon.md",
     "PR-docs/Vocabs.md",
     "dz parse.md",
@@ -211,7 +212,6 @@
     "Gems/Microservice Architecture and Concepts.md",
     "Gems/Kafka.md",
     "Gems/SSL (Two way SSL ).md",
-    "Gems/OAuth.md",
     "Gems/Multi threading notes (Also check sir's note timely).md",
     "Spring/Spring Security.md",
     "Spring/Spring hibernate.md",
