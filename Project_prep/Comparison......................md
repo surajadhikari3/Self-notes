@@ -93,19 +93,49 @@ Here’s a clean, ready-to-paste Confluence table comparing them across multiple
 
 ### **Summary Table with Visual Cues (Confluence Macro Styling Example)**
 
-|Feature / Criteria|ADF CDC|Debezium CDC|
-|---|---|---|
-|**Setup Effort**|✅ Easy wizard-based|⚠ Manual, infra-heavy|
-|**Source Support**|⚠ Limited to Azure connectors|✅ Wide DB support|
-|**Latency**|⚠ Near real-time (mins)|✅ True real-time|
-|**Transformations**|✅ Built-in in ADF|⚠ Needs external layer|
-|**Maintenance**|✅ Fully managed|⚠ Self-managed|
-|**Scalability**|⚠ Azure cost impact|✅ Kafka-level scaling|
-|**Cost Model**|✅ Pay-per-use|⚠ Infra & ops costs|
-|**Integration**|✅ Azure-native|✅ Multi-platform|
-|**Security**|✅ Azure RBAC, Key Vault|⚠ Manual hardening|
+| Feature / Criteria  | ADF CDC                       | Debezium CDC           |
+| ------------------- | ----------------------------- | ---------------------- |
+| **Setup Effort**    | ✅ Easy wizard-based           | ⚠ Manual, infra-heavy  |
+| **Source Support**  | ⚠ Limited to Azure connectors | ✅ Wide DB support      |
+| **Latency**         | ⚠ Near real-time (mins)       | ✅ True real-time       |
+| **Transformations** | ✅ Built-in in ADF             | ⚠ Needs external layer |
+| **Maintenance**     | ✅ Fully managed               | ⚠ Self-managed         |
+| **Scalability**     | ⚠ Azure cost impact           | ✅ Kafka-level scaling  |
+| **Cost Model**      | ✅ Pay-per-use                 | ⚠ Infra & ops costs    |
+| **Integration**     | ✅ Azure-native                | ✅ Multi-platform       |
+| **Security**        | ✅ Azure RBAC, Key Vault       | ⚠ Manual hardening     |
 
 ---
 
 If you like, I can also make this **look exactly like your BI Tools Feature Matrix** with **green/yellow/red status labels** for each criterion so it visually matches your Confluence page format.  
 That would make it instantly recognizable for your team.
+
+
+------------------------------------------------
+
+
+|**Aspect**|**ADF Out-of-the-Box CDC**|**Debezium CDC (Manual Integration – MySQL)**|
+|---|---|---|
+|**Setup Effort**|**Strengths**:• Wizard-based setup.• Minimal infra provisioning.• Fast POC deployment. **Weaknesses**:• Limited fine-grained control.• Fixed connector logic.|**Strengths**:• Fully configurable.• Cross-Kafka ecosystem friendly.• Portable via containers.**Weaknesses**:• Manual DB + binlog setup.• Kafka Connect infra overhead.|
+|**Supported Sources**|**Strengths**:• Native Azure DBs, SQL Server, Cosmos.**Weaknesses**:• Limited to Microsoft-supported connectors.|**Strengths**:• Broad DB support (MySQL, Postgres, Oracle, Mongo, etc.).**Weaknesses**:• Some sources need extra tuning/plugins.|
+|**Data Latency**|**Strengths**:• Near real-time for most workloads.**Weaknesses**:• Trigger/poll based, not sub-second.|**Strengths**:• Sub-second possible from binlog.• True event streaming.**Weaknesses**:• Scaling config sensitive.|
+|**Transformation Capabilities**|**Strengths**:• Built-in mapping/joins.• No extra ETL engine needed.**Weaknesses**:• Cost rises with complex flows.• Not optimized for micro-event transforms.|**Strengths**:• Flexible via downstream stream processors.**Weaknesses**:• No built-in transforms.|
+|**Infrastructure & Maintenance**|**Strengths**:• Fully managed by Azure.• Minimal ops overhead.**Weaknesses**:• Less control over runtime internals.|**Strengths**:• Full infra control.**Weaknesses**:• Manage scaling, patches, fault tolerance.|
+|**Scalability**|**Strengths**:• Scales with Azure IR capacity.**Weaknesses**:• Cost scaling at high throughput.|**Strengths**:• Kafka horizontal scaling.• Millions of events/sec possible.**Weaknesses**:• DB/Kafka tuning required.|
+|**Cost Model**|**Strengths**:• Pay-per-use predictable at medium loads.**Weaknesses**:• Costly for 24/7 micro-batching.|**Strengths**:• No license fee.• Infra cost controllable.**Weaknesses**:• Ops headcount adds hidden cost.|
+|**Integration Options**|**Strengths**:• Native Azure integrations.**Weaknesses**:• Non-Azure requires extra ETL.|**Strengths**:• Broad event-driven ecosystem.**Weaknesses**:• Azure requires connector bridge.|
+|**Security**|**Strengths**:• AAD, MI, Key Vault.• Encryption at rest/in-transit.**Weaknesses**:• Azure RBAC model only.|**Strengths**:• TLS/SASL/Kerberos supported.**Weaknesses**:• Manual hardening/rotation needed.|
+|**Use Case Fit**|**Best for**:• Azure-centric BI & analytics pipelines.• Low/medium-velocity CDC to ADLS/Synapse.• ELT into Azure Data Lake for reporting. **Not ideal for**:• Sub-second microservice events.• Cross-cloud CDC.|**Best for**:• Real-time microservices and streaming analytics.• Cross-cloud data movement.• Complex multi-DB topologies. **Not ideal for**:• Pure Azure BI/reporting without Kafka.• Teams without Kafka/connector expertise.|
+
+
+|Feature / Criteria|ADF CDC|Debezium CDC|
+|---|---|---|
+|Setup Effort|✅ Easy wizard-based|⚠️ Manual, infra-heavy|
+|Source Support|⚠️ Limited to Azure connectors|✅ Wide DB support|
+|Latency|⚠️ Near real-time (mins)|✅ True real-time|
+|Transformations|✅ Built-in in ADF|⚠️ Needs external layer|
+|Maintenance|✅ Fully managed|⚠️ Self-managed|
+|Scalability|⚠️ Azure cost impact|✅ Kafka-level scaling|
+|Cost Model|✅ Pay-per-use|⚠️ Infra & ops costs|
+|Integration|✅ Azure-native|✅ Multi-platform|
+|Security|✅ Azure RBAC, Key Vault|⚠️ Manual hardening|
