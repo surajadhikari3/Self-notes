@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "cdc.md",
+                "file": "Project_prep/Comparison......................md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "cdc"
+              "title": "Comparison....................."
             }
           },
           {
@@ -210,8 +210,9 @@
   },
   "active": "aa54ec177449a60d",
   "lastOpenFiles": [
-    "Project_prep/DLT.......................md",
     "cdc.md",
+    "Project_prep/Comparison......................md",
+    "Project_prep/DLT.......................md",
     "Project_prep/Dremio.md",
     "Gems/OAuth.md",
     "Project_prep/User.md",
@@ -241,7 +242,6 @@
     "Coding things/SQL 50(Doing with mysql ).md",
     "Coding things/Java 8 hands-on notes.md",
     "Coding things/Coding concepts...md",
-    "Coding things/Cmds.md",
     "Pasted image 20250726182321.png",
     "Pasted image 20250721121945.png",
     "Pasted image 20250710130745.png",
