@@ -210,8 +210,9 @@
   },
   "active": "aa54ec177449a60d",
   "lastOpenFiles": [
-    "cdc.md",
+    "Gems/Collections.md",
     "Project_prep/Comparison......................md",
+    "cdc.md",
     "Project_prep/DLT.......................md",
     "Project_prep/Dremio.md",
     "Gems/OAuth.md",
@@ -220,7 +221,6 @@
     "PR-docs/Vocabs.md",
     "dz parse.md",
     "Project_prep/Streaming pattern....md",
-    "Gems/Collections.md",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",
     "debezium-connector-mysql-3.2.0.Final-plugin.tar.gz",

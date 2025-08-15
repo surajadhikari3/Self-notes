@@ -158,3 +158,21 @@ That would make it instantly recognizable for your team.
 
 If you want, I can now add **one last row for "Use Case Fit"** in the same bullet-point style so that this table becomes a **full decision matrix** showing exactly when to use ADF CDC vs Debezium CDC.  
 Do you want me to add that?
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------------
+
+
+links :
+
+https://learn.microsoft.com/en-us/answers/questions/2124559/cdc-support-for-azure-postgresql-flexible-server?utm_source=chatgpt.com
+
