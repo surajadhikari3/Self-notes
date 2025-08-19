@@ -10,16 +10,16 @@ It breaks down a large monolithic application into independent, loosely coupled 
 
 ### ⚙️ **Key Components of Microservices Architecture**
 
-| Component                        | Description                                                                 |
-| -------------------------------- | --------------------------------------------------------------------------- |
-| **API Gateway**                  | Entry point for all client requests. Handles routing, rate limiting, auth.  |
-| **Service Registry & Discovery** | Allows services to find each other. E.g., Eureka, Consul.                   |
-| **Microservices**                | Each service is independently deployable and loosely coupled.               |
-| **Database per service**         | Each microservice manages its own database to ensure decoupling.            |
-| **Centralized Configuration**    | Externalized config management. E.g., Spring Cloud Config.                  |
-| **Service Communication**        | Synchronous (REST, gRPC) or Asynchronous (Kafka, RabbitMQ).                 |
-| **Monitoring/Logging**           | Centralized logging and monitoring. E.g., ELK, Prometheus + Grafana.        |
-| **Security**                     | AuthN/AuthZ, usually with OAuth2/JWT at API Gateway or individual services. |
+| Component                        | Description                                                                                                    |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **API Gateway**                  | Entry point for all client requests. Handles routing, rate limiting, auth.                                     |
+| **Service Registry & Discovery** | Allows services to find each other. E.g., Eureka, Consul.                                                      |
+| **Microservices**                | Each service is independently deployable and loosely coupled.                                                  |
+| **Database per service**         | Each microservice manages its own database to ensure decoupling.                                               |
+| **Externalized Configuration**   | Externalized config management. E.g., Spring Cloud Config.                                                     |
+| **Service Communication**        | Synchronous (REST, gRPC) or Asynchronous tightly coupled(webclient), Asynchronous decoupled (Kafka, RabbitMQ). |
+| **Monitoring/Logging**           | Centralized logging and monitoring. E.g., ELK, Prometheus + Grafana.                                           |
+| **Security**                     | AuthN/AuthZ, usually with OAuth2/JWT at API Gateway or individual services.                                    |
 
 
 

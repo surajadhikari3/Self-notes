@@ -316,14 +316,14 @@ tasks.stream().collect(Collectors.groupingBy(
 
 ## 🧠 Summary Table
 
-|Collector|Use Case|Returns|
-|---|---|---|
-|`toMap(k, v)`|Unique key-value mapping|`Map<K, V>`|
-|`toMap(k, v, mergeFn)`|Merge duplicate keys|`Map<K, V>`|
-|`toMap(k, v, m, s)`|Custom map implementation (e.g., TreeMap)|Custom `Map<K, V>`|
-|`groupingBy(f)`|Group by a classifier, collect to list|`Map<K, List<T>>`|
-|`groupingBy(f, c)`|Group by classifier, apply collector (sum, count, etc.)|`Map<K, R>` (R is result type)|
-|`groupingBy(f, m, c)`|Group with custom map and collector|Custom `Map<K, R>`|
+| Collector              | Use Case                                                | Returns                        |
+| ---------------------- | ------------------------------------------------------- | ------------------------------ |
+| `toMap(k, v)`          | Unique key-value mapping                                | `Map<K, V>`                    |
+| `toMap(k, v, mergeFn)` | Merge duplicate keys                                    | `Map<K, V>`                    |
+| `toMap(k, v, m, s)`    | Custom map implementation (e.g., TreeMap)               | Custom `Map<K, V>`             |
+| `groupingBy(f)`        | Group by a classifier, collect to list                  | `Map<K, List<T>>`              |
+| `groupingBy(f, c)`     | Group by classifier, apply collector (sum, count, etc.) | `Map<K, R>` (R is result type) |
+| `groupingBy(f, m, c)`  | Group with custom map and collector                     | Custom `Map<K, R>`             |
 
 ---
 

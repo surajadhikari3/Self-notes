@@ -707,7 +707,7 @@ SELECT * FROM (
     
 - **Partitioning:** Split data by time/user.
     
-- **Indexing:** Use B-tree or BRIN indexes.
+- **Indexing:** Use B-tree or BRIN indexes. (Run the Explain Analyze plan  and see if it is doing full table scan or idex based scan then apply. the indeexing........)
     
 - **Incremental aggregation:** Use streaming tools like Kafka + KTable or batch jobs.
     

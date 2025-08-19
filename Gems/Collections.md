@@ -11,6 +11,7 @@ Difference between ArrayList and LinkedList...
 | Insertion/Deletion | Slower O(n) due to shifting | Faster at ends 0(1)         |
 | Access (get)       | Fast 0(1)                   | Slow O(n)                   |
 | Memory             | Less memory overhead        | More (due to node pointers) |
+
 Use the Arraylist for the heavy read operation
 Use LinkedList for frequent inserts/removals....
 
@@ -105,7 +106,7 @@ System.out.println(multimap.get("fruit")); // [apple, banana]
 ```
 Interview Ques
 
-How can we implement two interface in the class having the default method?
+How can we implement two interface in the class having the default method?(Diamond problem..)
 
 In Java, **a class can implement multiple interfaces**, even if **both interfaces have `default` methods**—but **you must resolve any conflict** if the same method signature exists in more than one interface
 
@@ -128,7 +129,7 @@ In Java, **a class can implement multiple interfaces**, even if **both interface
    
    
    
-#   Remeber LinkedList implements Queue no the List interface
+#   Remember LinkedList implements Queue no the List interface
 
 
 ![[Pasted image 20250529153726.png]]

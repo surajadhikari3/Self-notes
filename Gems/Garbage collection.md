@@ -49,11 +49,11 @@ Second one can decrease the per thread stack size with the -Xss this way overall
   
 **Simple Mental Model:**
 
-|   |   |   |
-|---|---|---|
-|**Type**|**Behavior**|**Example Use Case**|
-|**Strong**|Never GC’ed while referenced|Normal code|
-|**Soft**|GC’ed only if memory is low|Image cache, object cache|
-|**Weak**|GC’ed in next GC cycle|WeakHashMap, listeners|
-|**Phantom**|After finalize, cleanup tracking|Resource cleanup|
+|             |                                  |                           |
+| ----------- | -------------------------------- | ------------------------- |
+| **Type**    | **Behavior**                     | **Example Use Case**      |
+| **Strong**  | Never GC’ed while referenced     | Normal code               |
+| **Soft**    | GC’ed only if memory is low      | Image cache, object cache |
+| **Weak**    | GC’ed in next GC cycle           | WeakHashMap, listeners    |
+| **Phantom** | After finalize, cleanup tracking | Resource cleanup          |
 ![[Pasted image 20250429160641.png]]

@@ -4,53 +4,24 @@
     "type": "split",
     "children": [
       {
-        "id": "0f8849eed18a1c41",
+        "id": "c2747ff98109023b",
         "type": "tabs",
         "children": [
           {
-            "id": "6ad18ab30a1635d6",
+            "id": "f9265a120b2a3903",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/DLT.......................md",
+                "file": "Project_prep/ADF.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "DLT......................"
-            }
-          },
-          {
-            "id": "aa54ec177449a60d",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "Project_prep/Comparison......................md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "Comparison....................."
-            }
-          },
-          {
-            "id": "f5c8351cfe2559cf",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "Gems/OAuth.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "OAuth"
+              "title": "ADF"
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "vertical"
@@ -107,7 +78,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 328.5026054382324
+    "width": 270.50271224975586
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -208,40 +179,41 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "aa54ec177449a60d",
+  "active": "f9265a120b2a3903",
   "lastOpenFiles": [
+    "Cloud/Kubernets.md",
+    "Project_prep/ADF.md",
+    "Cloud/AWS.md",
+    "Cloud/Architecture.md",
+    "Coding things/Java 8 hands-on notes.md",
+    "Gems/Kafka.md",
+    "Gems/Java basics.md",
+    "Gems/Java 8.md",
+    "Gems/Garbage collection.md",
+    "Gems/Design pattern(Bassed on gangs of 4).....md",
     "Gems/Collections.md",
+    "Interviews/Gurpreet.md",
+    "Interviews/On-class interview -Mohan.md",
+    "Interviews/Mohan TD interview.md",
+    "Interviews/Mohan.md",
+    "Gems/To Dos.md",
+    "Gems/SSL (Two way SSL ).md",
+    "Gems/OAuth.md",
+    "Gems/Microservice Architecture and Concepts.md",
+    "Rest-api/Open APi.md",
+    "Rest-api",
     "Project_prep/Comparison......................md",
     "cdc.md",
     "Project_prep/DLT.......................md",
     "Project_prep/Dremio.md",
-    "Gems/OAuth.md",
     "Project_prep/User.md",
     "PR-docs/Sec- Paragon.md",
-    "PR-docs/Vocabs.md",
-    "dz parse.md",
-    "Project_prep/Streaming pattern....md",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",
     "debezium-connector-mysql-3.2.0.Final-plugin.tar.gz",
     "mysql-connector-j-8.0.33.jar",
     "debezium-connector-mysql-2.6.1.tar.gz",
     "debezium-connector-mysql-2.6.1.Final-plugin.tar.gz",
-    "Gems/Microservice Architecture and Concepts.md",
-    "Gems/Kafka.md",
-    "Gems/SSL (Two way SSL ).md",
-    "Gems/Multi threading notes (Also check sir's note timely).md",
-    "Spring/Spring Security.md",
-    "Spring/Spring hibernate.md",
-    "Spring/Spring framework.md",
-    "Spring/Spring DAO(Spring JDBC).md",
-    "Gems/Design pattern(Bassed on gangs of 4).....md",
-    "Spring/Spring cloud.md",
-    "Spring/Spring Boot...md",
-    "Spring/Spring AOP( After this read sir notes too once).md",
-    "Coding things/SQL 50(Doing with mysql ).md",
-    "Coding things/Java 8 hands-on notes.md",
-    "Coding things/Coding concepts...md",
     "Pasted image 20250726182321.png",
     "Pasted image 20250721121945.png",
     "Pasted image 20250710130745.png",
@@ -257,7 +229,6 @@
     "Untitled 2.canvas",
     "Untitled 1.canvas",
     "Project_prep",
-    "Untitled.canvas",
-    "PR-docs"
+    "Untitled.canvas"
   ]
 }

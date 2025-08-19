@@ -28,14 +28,6 @@ class DataAccessException extends Exception {
         super(message, cause);
     }
 }
-
-
-class DataAccessException extends Exception {
-    public DataAccessException(String message, Throwable cause) {
-        super(message, cause);
-    }
-}
-
 ```
 
 ```
