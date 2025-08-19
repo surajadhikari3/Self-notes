@@ -136,3 +136,68 @@ EXEC sys.sp_cdc_disable_db;
     
 
 If you want, tell me your actual schema/table names and I’ll tweak the script exactly to match (and add the ADF mapping screenshot‑style fields).
+
+
+
+That error is just SQL syntax—your alias **`current_user`** clashes with the keyword `CURRENT_USER`.
+
+Use this instead:
+
+```sql
+-- Who am I and where am I?
+SELECT 
+  DB_NAME()      AS current_db,
+  USER_NAME()    AS db_user,        -- database user
+  SUSER_SNAME()  AS server_login;   -- login/identity
+```
+
+Next, check if you’re `db_owner`:
+
+```sql
+SELECT r.name AS db_role
+FROM sys.database_role_members drm
+JOIN sys.database_principals r ON r.principal_id = drm.role_principal_id
+JOIN sys.database_principals u ON u.principal_id = drm.member_principal_id
+WHERE u.name = USER_NAME();
+```
+
+If `db_owner` is **missing**, grant it (one of these):
+
+### If you’re Azure AD (and you have AAD admin rights on the server)
+
+```sql
+-- run in THIS database
+CREATE USER [your.upn@yourtenant.com] FROM EXTERNAL PROVIDER;
+ALTER ROLE db_owner ADD MEMBER [your.upn@yourtenant.com];
+```
+
+### If you’re using a SQL user that already exists in this DB
+
+```sql
+ALTER ROLE db_owner ADD MEMBER [your_sql_user];
+```
+
+Now enable CDC:
+
+```sql
+EXEC sys.sp_cdc_enable_db;
+GO
+
+-- Enable on Users table
+EXEC sys.sp_cdc_enable_table
+  @source_schema        = N'dbo',
+  @source_name          = N'Users',
+  @role_name            = N'cdc_admin',
+  @supports_net_changes = 1,
+  @captured_column_list = N'Id,Name,Email';
+GO
+```
+
+Verify:
+
+```sql
+SELECT name, is_cdc_enabled FROM sys.databases WHERE name = DB_NAME();
+SELECT name, is_tracked_by_cdc FROM sys.tables WHERE name='Users';
+```
+
+If you want, paste me the outputs of the first two queries (`current_db/db_user/login` and the role list), and I’ll give you the exact `ALTER ROLE` statement with your principal names filled in.
