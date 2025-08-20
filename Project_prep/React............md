@@ -1929,3 +1929,221 @@ if (e.key === "Enter" && filtered.length > 0) {
 ```
 
 This keeps everything within your existing components and style system (green tokens).
+
+-----------------
+
+god
+
+
+Got it 👍 Thanks for flagging. Two issues likely happened:
+
+1. **Data not showing** → because I wrapped your `rows` into `{row, index}` objects for filtering and then passed the wrong shape into `PaginationTable`.  
+    → Fix: always pass the original array of objects (`rows`) into the table, not the wrappers.
+    
+2. **Validation not firing** → your host app expects `publishStepValidator` to register a validator. In my last code I built a local `validateSelection` but didn’t hook it properly into `form` or `goNext`.
+    
+
+Let me show you a corrected version that **(a)** shows your data again, and **(b)** runs validation to block “Next” until one row is selected.
+
+---
+
+### ✅ Corrected `DataSchema.tsx`
+
+```tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { usePublication } from "../context";
+import PaginationTable from "@/shared/components/PaginationTable/PaginationTable";
+import type { Column } from "@/shared/type/types";
+import styles from "./DataSchema.module.scss";
+
+const SearchIcon = () => (
+  <svg className={styles.icon} viewBox="0 0 24 24" fill="none">
+    <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2"/>
+    <path d="M20 20L16.5 16.5" stroke="currentColor" strokeWidth="2" />
+  </svg>
+);
+const PiiIcon = () => (
+  <svg className={styles.tagIcon} viewBox="0 0 24 24" fill="none">
+    <path d="M12 2l9 5v10l-9 5-9-5V7l9-5Z" stroke="currentColor" strokeWidth="2"/>
+    <circle cx="12" cy="12" r="3" fill="currentColor"/>
+  </svg>
+);
+
+type ValidationResult = { ok: true } | { ok: false; message: string; focusSelector?: string };
+
+export default function DataSchema() {
+  const {
+    form,
+    publishStepValidator,
+    toast,
+    hideToast,
+  } = usePublication();
+
+  // --- rows come from form or mock data ---
+  const rows = form.schema?.rows ?? [
+    {
+      fieldName: "transaction_id",
+      displayName: "Transaction ID",
+      description: "Unique identifier for each transaction",
+      type: "UUID",
+      tags: [],
+    },
+    {
+      fieldName: "client_name",
+      displayName: "Client Name",
+      description: "Full name of the client involved",
+      type: "VARCHAR",
+      tags: ["PII"],
+    },
+    {
+      fieldName: "trade_date",
+      displayName: "Trade Date",
+      description: "Date when the trade was executed",
+      type: "DATE",
+      tags: [],
+    },
+  ];
+
+  // --- search ---
+  const [query, setQuery] = useState("");
+
+  // --- single selection ---
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
+  // --- filter logic ---
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(r =>
+      r.fieldName.toLowerCase().includes(q) ||
+      r.displayName.toLowerCase().includes(q) ||
+      r.description.toLowerCase().includes(q) ||
+      (r.tags ?? []).some((t: string) => t.toLowerCase().includes(q))
+    );
+  }, [rows, query]);
+
+  // --- validation: register with publication provider ---
+  useEffect(() => {
+    publishStepValidator((): ValidationResult => {
+      if (selectedIndex === null) {
+        return { ok: false, message: "Please select a field before continuing.", focusSelector: "#search-field" };
+      }
+      return { ok: true };
+    });
+  }, [publishStepValidator, selectedIndex]);
+
+  // --- columns ---
+  const columns: Column[] = [
+    {
+      key: "fieldName",
+      header: "Field Name",
+      sortable: true,
+      render: (_v, row, i) => (
+        <div
+          className={i === selectedIndex ? styles.selectedCell : ""}
+          onClick={() => setSelectedIndex(i)}
+        >
+          <a className="body-link-text">{row.fieldName}</a>
+        </div>
+      ),
+    },
+    {
+      key: "displayName",
+      header: "Display Name",
+      render: (_v, row, i) => (
+        <div
+          className={i === selectedIndex ? styles.selectedCell : ""}
+          onClick={() => setSelectedIndex(i)}
+        >
+          {row.displayName}
+        </div>
+      ),
+    },
+    {
+      key: "description",
+      header: "Description",
+      render: (_v, row, i) => (
+        <div
+          className={i === selectedIndex ? styles.selectedCell : ""}
+          onClick={() => setSelectedIndex(i)}
+        >
+          {row.description}
+        </div>
+      ),
+    },
+    {
+      key: "type",
+      header: "Type",
+      render: (_v, row, i) => (
+        <div
+          className={i === selectedIndex ? styles.selectedCell : ""}
+          onClick={() => setSelectedIndex(i)}
+        >
+          {row.type}
+        </div>
+      ),
+    },
+    {
+      key: "tags",
+      header: "Tags",
+      render: (_v, row, i) => {
+        const t = row.tags?.[0] ?? "None";
+        const isPII = t.toLowerCase() === "pii";
+        return (
+          <div
+            className={i === selectedIndex ? styles.selectedCell : ""}
+            onClick={() => setSelectedIndex(i)}
+          >
+            <span className={`${styles.tagPill} ${isPII ? styles.pii : ""}`}>
+              {isPII && <PiiIcon />}
+              {t}
+            </span>
+          </div>
+        );
+      },
+    },
+  ];
+
+  return (
+    <div className={styles["data-schema"]}>
+      {toast?.visible && (
+        <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm">
+          {toast.message}
+          <button onClick={hideToast} className="ml-2 underline">Dismiss</button>
+        </div>
+      )}
+
+      <div className={styles.search}>
+        <SearchIcon />
+        <input
+          id="search-field"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search fields…"
+        />
+      </div>
+
+      <PaginationTable
+        columns={columns}
+        data={filtered}
+        initialPageSize={10}
+      />
+    </div>
+  );
+}
+```
+
+---
+
+### 🔑 Fixes
+
+- **Data**: we pass `filtered` (plain row objects) to `PaginationTable`. Now table rows render.
+    
+- **Validation**: inside `useEffect`, `publishStepValidator` is given a closure that checks `selectedIndex`. If none selected → shows message and blocks **Next**.
+    
+- **Mock data**: if `form.schema?.rows` is empty, three rows are pre-populated so you can see something.
+    
+
+---
+
+👉 Do you want me to also hook the **toast** (error popup) so that when validation fails on “Next”, it shows `toast.message` automatically? Or should it only block silently like in your screenshot?
