@@ -723,3 +723,241 @@ export default function DataSchema() {
         
 
 If anything still complains, paste the exact export lines for `FormTextField`, `FormSelectField`, and `Button` (default vs named), and I’ll adjust the imports to match.
+
+
+
+---------------------------------
+
+
+
+Got it—let’s keep it **very simple**:
+
+- No CRUD in the table.
+    
+- No `FormSelectField`.
+    
+- A **search box** that filters from a small **seed list** (local `useState`).
+    
+- Clicking a result **adds** that field to the Data Schema (if not already added).
+    
+- Table is **read‑only** (plus an optional Remove button so users can undo a choice).
+    
+- **Validation**: if nothing is selected, the step’s validator fails and your wrapper will keep **Next** disabled.
+    
+
+Here’s a drop‑in `DataSchema.tsx` using only your shared pieces (`PaginationTable`, `Button`) and your context API (`patchDomain`, `publishStepValidator`). It also uses the **positional** selector/writer only for the _remove_ case; add is done via `patchDomain` (simpler and fewer moving parts).
+
+```tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { usePublication } from "../context"; // adjust relative path
+import PaginationTable from "@/shared/components/PaginationTable/PaginationTable";
+import type { Column } from "@/shared/type/types";
+import Button from "@/shared/components/Button/Button";
+import type { ColumnRow } from "../pageTypes";
+
+/** --- Seed catalog (local) ---------------------------------- */
+const SEED_CATALOG: ColumnRow[] = [
+  {
+    fieldName: "transaction_id",
+    displayName: "Transaction ID",
+    description: "Unique identifier for each transaction",
+    type: "UUID",
+    tags: null,
+  },
+  {
+    fieldName: "client_name",
+    displayName: "Client Name",
+    description: "Full name of the client investor",
+    type: "VARCHAR",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "client_ssn",
+    displayName: "SSN",
+    description: "Client's Social Security Number",
+    type: "CHAR(11)",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "security_ticker",
+    displayName: "Sec Ticker",
+    description: "Ticker symbol of the trade",
+    type: "VARCHAR",
+    tags: null,
+  },
+  {
+    fieldName: "trade_date",
+    displayName: "Trade Date",
+    description: "Date when the trade was executed",
+    type: "DATE",
+    tags: null,
+  },
+];
+
+export default function DataSchema() {
+  const {
+    form,
+    patchDomain,
+    publishStepValidator,
+    removeRowAt,
+  } = usePublication();
+
+  // Selected rows come from form state
+  const rows = form.dataSchema?.rows ?? [];
+
+  // local catalog + search query
+  const [catalog] = useState<ColumnRow[]>(SEED_CATALOG);
+  const [query, setQuery] = useState("");
+
+  /** --- Validation: require at least one selected row -------- */
+  useEffect(() => {
+    publishStepValidator(() => {
+      if (!rows.length) {
+        return {
+          ok: false,
+          message: "Select at least one field for the data schema.",
+          focusSelector: "#schema-search",
+        };
+      }
+      return { ok: true };
+    });
+  }, [rows, publishStepValidator]);
+
+  /** --- Derived: search results (exclude already selected) --- */
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const selected = new Set(rows.map(r => r.fieldName.toLowerCase()));
+    return catalog.filter((c) => {
+      if (selected.has(c.fieldName.toLowerCase())) return false;
+      if (!q) return true;
+      return (
+        c.fieldName.toLowerCase().includes(q) ||
+        c.displayName.toLowerCase().includes(q) ||
+        (c.description ?? "").toLowerCase().includes(q) ||
+        (c.tags ?? []).some(t => t.toLowerCase().includes(q))
+      );
+    });
+  }, [catalog, rows, query]);
+
+  /** --- Add from search selection ---------------------------- */
+  const addFromCatalog = (item: ColumnRow) => {
+    const exists = rows.some(
+      (r) => r.fieldName.toLowerCase() === item.fieldName.toLowerCase()
+    );
+    if (exists) return;
+    patchDomain("dataSchema", { rows: [...rows, item] });
+    setQuery(""); // clear after pick
+  };
+
+  /** --- Optional: remove selected (simple undo) -------------- */
+  const removeSelected = (rowIndex: number) => {
+    // use positional helpers for removal
+    const selectRows = (f: any): ColumnRow[] | undefined => f.dataSchema?.rows;
+    const writeRows = (f: any, next: ColumnRow[]) => {
+      f.dataSchema ??= { rows: [] };
+      f.dataSchema.rows = next;
+    };
+    removeRowAt<ColumnRow>(selectRows, writeRows, rowIndex);
+  };
+
+  /** --- Table columns: read-only display --------------------- */
+  const columns: Column[] = [
+    {
+      key: "fieldName",
+      header: "Field Name",
+      sortable: true,
+      sortAccessor: (r) => (r as ColumnRow).fieldName?.toLowerCase() ?? "",
+      render: (_v, row) => <span className="body-link-text">{(row as ColumnRow).fieldName}</span>,
+    },
+    {
+      key: "displayName",
+      header: "Display Name",
+      sortable: true,
+      sortAccessor: (r) => (r as ColumnRow).displayName?.toLowerCase() ?? "",
+      render: (_v, row) => <span>{(row as ColumnRow).displayName}</span>,
+    },
+    {
+      key: "description",
+      header: "Description",
+      sortable: true,
+      sortAccessor: (r) => (r as ColumnRow).description?.toLowerCase() ?? "",
+      render: (_v, row) => <span>{(row as ColumnRow).description}</span>,
+    },
+    {
+      key: "type",
+      header: "Type",
+      sortable: true,
+      sortAccessor: (r) => (r as ColumnRow).type?.toLowerCase() ?? "",
+      render: (_v, row) => <span>{(row as ColumnRow).type}</span>,
+    },
+    {
+      key: "tags",
+      header: "Tags",
+      sortable: true,
+      sortAccessor: (r) => ((r as ColumnRow).tags?.[0] ?? "None").toLowerCase(),
+      render: (_v, row) => <span>{(row as ColumnRow).tags?.[0] ?? "None"}</span>,
+    },
+    {
+      key: "actions",
+      header: "",
+      sortable: false,
+      render: (_v, _row, rowIndex) => (
+        <Button onClick={() => removeSelected(rowIndex)} variant="borderless" icon="">
+          Remove
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <div className="p-6">
+      <h2 className="text-xl" style={{ marginBottom: 8 }}>Data Schema</h2>
+
+      {/* Search box (no add button). Pick from results list to add. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+        <input
+          id="schema-search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search fields… then click a result to add"
+          aria-label="Search fields"
+          className="form-field-input"
+          style={{ width: 360 }}
+        />
+
+        {/* lightweight suggestion list */}
+        {query.trim() && results.length > 0 && (
+          <div
+            className="rounded border"
+            style={{ width: 360, maxHeight: 200, overflow: "auto", background: "white" }}
+          >
+            {results.map((r) => (
+              <div
+                key={r.fieldName}
+                onClick={() => addFromCatalog(r)}
+                className="p-2 hover:bg-gray-100 cursor-pointer"
+                title={`Add "${r.fieldName}"`}
+              >
+                <div style={{ fontWeight: 600 }}>{r.fieldName}</div>
+                <div style={{ fontSize: 12, color: "#616161" }}>{r.displayName} • {r.type} • {(r.tags?.[0] ?? "None")}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <PaginationTable columns={columns} data={rows} initialPageSize={10} />
+    </div>
+  );
+}
+```
+
+### Notes
+
+- **No `FormSelectField`**, no in‑table editing: the table shows what’s been chosen.
+    
+- Users **type**, **pick** from the suggestion list, and it’s **added** to `dataSchema.rows`.
+    
+- If the user picks nothing, the **validator** fails → your wrapper keeps **Next** disabled (as in your flow).
+    
+- Everything else uses your existing shared pieces and context. If you don’t want the **Remove** action, just delete the last “actions” column.
