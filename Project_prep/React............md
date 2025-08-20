@@ -1650,3 +1650,282 @@ export default function DataSchema() {
     
 
 If your import aliases differ, adjust the two `@/...` imports to the relative paths you use in this repo.
+
+------------
+
+makaaa
+
+
+Perfect—let’s switch the page to **single‑select** (no checkboxes), make the **search bar full‑width with an icon + proper padding**, show a **PII tag icon** in the Tags column, and gate **Next** on a selection.
+
+Below are drop‑in changes only in your page file + one small SCSS module. No change to the shared `PaginationTable`.
+
+---
+
+### 1) Styles – `DataSchema.module.scss`
+
+```scss
+/* src/features/publish/steps/DataSchema.module.scss */
+@import "@/styles/scss-vars";
+
+.data-schema {
+  padding: $spacing-6;
+
+  .search {
+    position: relative;
+    margin-bottom: $spacing-3;
+
+    /* not too oval: 8px radius, generous paddings */
+    input {
+      width: 100%;
+      height: $sizing-ctrl-1;        /* 40px */
+      padding: 0 $spacing-3 0 ($spacing-6);  /* space for icon */
+      border: 1px solid $input-stroke;
+      border-radius: 8px;
+      background: $white;
+      color: $black;
+      font-size: $font-body-regular-size;
+
+      &::placeholder { color: $hint-text; }
+      &:focus {
+        outline: 2px solid $primary-green-tint;
+        border-color: $primary-text-green;
+        box-shadow: 0 0 0 1px $primary-text-green inset;
+      }
+    }
+
+    .icon {
+      position: absolute; left: $spacing-2; top: 50%;
+      transform: translateY(-50%);
+      width: 18px; height: 18px;
+      pointer-events: none;
+      color: $dark-green;
+    }
+  }
+
+  /* selected row look: apply on every cell so whole row appears highlighted */
+  .selectedCell {
+    background: $primary-green-tint;     /* subtle green */
+  }
+
+  /* Tag pill shared look */
+  .tagPill {
+    display: inline-flex; align-items: center; gap: $spacing-1;
+    height: 24px; padding: 0 $spacing-2;
+    border-radius: 9999px;
+    border: 1px solid $input-stroke;
+    background: $white; color: $black; font-size: 12px;
+
+    &.pii {
+      border-color: $primary-text-green;
+      color: $primary-text-green;
+    }
+
+    .tagIcon {
+      width: 14px; height: 14px;
+      display: inline-block;
+    }
+  }
+}
+```
+
+---
+
+### 2) Page logic – **single select + icons + validation**
+
+```tsx
+// src/features/publish/steps/DataSchema.tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { usePublication } from "../context";
+import PaginationTable from "@/shared/components/PaginationTable/PaginationTable";
+import type { Column } from "@/shared/type/types";
+import styles from "./DataSchema.module.scss";
+
+// tiny inline icons (fallback if you don't have assets)
+const SearchIcon = () => (
+  <svg className={styles.icon} viewBox="0 0 24 24" fill="none">
+    <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2"/>
+    <path d="M20 20L16.5 16.5" stroke="currentColor" strokeWidth="2" />
+  </svg>
+);
+const PiiIcon = () => (
+  <svg className={styles.tagIcon} viewBox="0 0 24 24" fill="none">
+    <path d="M12 2l9 5v10l-9 5-9-5V7l9-5Z" stroke="currentColor" strokeWidth="2"/>
+    <circle cx="12" cy="12" r="3" fill="currentColor"/>
+  </svg>
+);
+
+// ---- validation helper (only selection matters) ----
+type ValidationResult = { ok: true } | { ok: false; message: string; focusSelector?: string };
+
+// (you can keep your previous validate function; just ensure it only checks selection)
+function validateSelection(selectedIndex: number | null): ValidationResult {
+  if (selectedIndex === null) {
+    return { ok: false, message: "Select a field to continue.", focusSelector: "#search-field" };
+  }
+  return { ok: true };
+}
+
+export default function DataSchema() {
+  const {
+    form,
+    publishStepValidator,
+    isNextBlocked,    // stays intact
+    goNext,
+    toast, hideToast,
+  } = usePublication();
+
+  // source rows (prepopulated somewhere earlier or by you)
+  const rows = form.schema?.rows ?? [];
+
+  // ---- search state ----
+  const [query, setQuery] = useState("");
+
+  // ---- single selection state (row index in *rows*) ----
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
+  // register validator (fires when host provider asks)
+  useEffect(() => publishStepValidator(() => validateSelection(selectedIndex)), [publishStepValidator, selectedIndex]);
+
+  // filter and carry original index to allow selection by Enter
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows.map((r, i) => ({ row: r, index: i }));
+    return rows
+      .map((r, i) => ({ row: r, index: i }))
+      .filter(({ row }) =>
+        row.fieldName?.toLowerCase().includes(q) ||
+        row.displayName?.toLowerCase().includes(q) ||
+        row.description?.toLowerCase().includes(q) ||
+        (row.tags ?? []).some((t: string) => t.toLowerCase().includes(q))
+      );
+  }, [rows, query]);
+
+  // Enter to select first result
+  const handleSearchKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.key === "Enter" && filtered.length > 0) {
+      setSelectedIndex(filtered[0].index);
+    }
+  };
+
+  // helper: cell class when selected
+  const cellClass = (rowIndex: number) =>
+    rowIndex === selectedIndex ? styles.selectedCell : undefined;
+
+  // ---- columns (read-only; click = select) ----
+  const columns: Column[] = [
+    {
+      key: "fieldName",
+      header: "Field Name",
+      sortable: true,
+      sortAccessor: (r) => (r.fieldName ?? "").toLowerCase(),
+      render: (_v, row, rowIndex) => (
+        <div className={cellClass(rowIndex)} onClick={() => setSelectedIndex(rowIndex)}>
+          <a className="body-link-text">{row.fieldName}</a>
+        </div>
+      ),
+    },
+    {
+      key: "displayName",
+      header: "Display Name",
+      sortable: true,
+      render: (_v, row, rowIndex) => (
+        <div className={cellClass(rowIndex)} onClick={() => setSelectedIndex(rowIndex)}>
+          {row.displayName}
+        </div>
+      ),
+    },
+    {
+      key: "description",
+      header: "Description",
+      sortable: true,
+      render: (_v, row, rowIndex) => (
+        <div className={cellClass(rowIndex)} onClick={() => setSelectedIndex(rowIndex)}>
+          {row.description}
+        </div>
+      ),
+    },
+    {
+      key: "type",
+      header: "Type",
+      sortable: true,
+      sortAccessor: (r) => r.type ?? "",
+      render: (_v, row, rowIndex) => (
+        <div className={cellClass(rowIndex)} onClick={() => setSelectedIndex(rowIndex)}>
+          {row.type}
+        </div>
+      ),
+    },
+    {
+      key: "tags",
+      header: "Tags",
+      sortable: true,
+      sortAccessor: (r) => (r.tags?.[0] ?? "None"),
+      render: (_v, row, rowIndex) => {
+        const t = row.tags?.[0] ?? "None";
+        const isPII = t.toLowerCase() === "pii";
+        return (
+          <div className={cellClass(rowIndex)} onClick={() => setSelectedIndex(rowIndex)}>
+            <span className={` ${styles.tagPill} ${isPII ? styles.pii : ""}`}>
+              {isPII && <PiiIcon />}
+              {t}
+            </span>
+          </div>
+        );
+      },
+    },
+  ];
+
+  return (
+    <div className={styles["data-schema"]}>
+      {toast?.visible && (
+        <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm">
+          {toast.message}
+          <button onClick={hideToast} className="ml-2 underline">Dismiss</button>
+        </div>
+      )}
+
+      <div className={styles.search}>
+        <SearchIcon />
+        <input
+          id="search-field"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleSearchKeyDown}
+          placeholder="Search fields…"
+          aria-label="Search fields"
+        />
+      </div>
+
+      <PaginationTable
+        columns={columns}
+        data={filtered.map(({ row }) => row) as Record<string, any>[]}
+        initialPageSize={10}
+      />
+    </div>
+  );
+}
+```
+
+**What changed**
+
+- **No checkboxes**; clicking any cell selects that row. The selected row is highlighted via `.selectedCell`.
+    
+- **Validation**: blocks “Next” until one row is selected (`selectedIndex !== null`). This plugs into your existing `publishStepValidator`.
+    
+- **Search bar**: full width, left search icon, sensible padding, 8px radius.
+    
+- **Tags**: pill with a **PII icon** when the first tag is `PII`. You can swap the inline SVGs for your own assets later.
+    
+
+If you want the Enter key to **confirm selection and auto‑advance** (call `goNext()` when valid), add:
+
+```ts
+if (e.key === "Enter" && filtered.length > 0) {
+  setSelectedIndex(filtered[0].index);
+  const res = validateSelection(filtered[0].index);
+  if (res.ok && !isNextBlocked) goNext();
+}
+```
+
+This keeps everything within your existing components and style system (green tokens).
