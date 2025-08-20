@@ -437,3 +437,289 @@ export default function DataSchema() {
     
 
 If you also want the **“Items per page / 1–13”** footer like in your mock, set `initialPageSize={10}` (already done) and let your `PaginationTable` render its pager; it matches the shared sample in your repo.
+
+
+---------------------------------------------
+
+
+You’ve got two separate issues:
+
+1. **`FormTextField` imported with `import type`**  
+    → Components must be regular imports (runtime values), not type-only.
+    
+2. **`updateRowAt / pushRow / removeRowAt` “Expected 4/3 args”**  
+    → Your context functions take **positional arguments**, not an options object.
+    
+
+Below is a **working DataSchema.tsx** that fixes both and uses only your shared components (`PaginationTable`, `Button`, `FormTextField`, `FormSelectField`) + your Context helpers.
+
+---
+
+### DataSchema.tsx (drop‑in)
+
+```tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { usePublication } from "../context";
+import type { ColumnRow } from "../pageTypes";
+
+// ✅ components must be regular imports (NOT "import type")
+import Button from "@/shared/components/Button/Button";
+import FormTextField from "@/shared/components/FormFields/FormTextField";
+import FormSelectField from "@/shared/components/FormFields/FormSelectField";
+import PaginationTable from "@/shared/components/PaginationTable/PaginationTable";
+import type { Column } from "@/shared/type/types";
+
+// ---- simple validator ----
+type ValidationResult =
+  | { ok: true }
+  | { ok: false; message?: string; focusSelector?: string };
+
+function validateDataSchema(rows?: ColumnRow[]): ValidationResult {
+  const list = rows ?? [];
+  if (!list.length) return { ok: false, message: "Add at least one field.", focusSelector: "#add-field" };
+  const badIdx = list.findIndex(r => !r.fieldName?.trim() || !r.displayName?.trim() || !r.type?.trim());
+  if (badIdx >= 0) {
+    return {
+      ok: false,
+      message: `Complete required columns in row ${badIdx + 1}.`,
+      focusSelector: `[data-row="${badIdx}"] [data-col="fieldName"]`,
+    };
+  }
+  const seen = new Set<string>();
+  for (const r of list) {
+    const k = r.fieldName.trim().toLowerCase();
+    if (seen.has(k)) return { ok: false, message: `Duplicate field name: ${r.fieldName}` };
+    seen.add(k);
+  }
+  return { ok: true };
+}
+
+const TYPE_OPTIONS = [
+  { label: "UUID", value: "UUID" },
+  { label: "VARCHAR", value: "VARCHAR" },
+  { label: "CHAR", value: "CHAR" },
+  { label: "DATE", value: "DATE" },
+  { label: "NUMBER", value: "NUMBER" },
+];
+
+export default function DataSchema() {
+  const {
+    form,
+    pushRow,
+    updateRowAt,
+    removeRowAt,
+    publishStepValidator,
+    isNextBlocked,
+    goNext,
+    toast,
+    hideToast,
+  } = usePublication();
+
+  // use the correct key: dataSchema
+  const rows = form.dataSchema?.rows ?? [];
+  const [query, setQuery] = useState("");
+
+  // register validator
+  useEffect(() => publishStepValidator(() => validateDataSchema(rows)), [rows, publishStepValidator]);
+
+  // --- Search (table doesn't include it) ---
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(r =>
+      r.fieldName.toLowerCase().includes(q) ||
+      r.displayName.toLowerCase().includes(q) ||
+      (r.description ?? "").toLowerCase().includes(q) ||
+      (r.tags ?? []).some(t => t.toLowerCase().includes(q))
+    );
+  }, [rows, query]);
+
+  // ---- shared selector/writer (positional args!) ----
+  const selectRows = (f: any): ColumnRow[] | undefined => f.dataSchema?.rows;
+  const writeRows = (f: any, next: ColumnRow[]) => {
+    f.dataSchema ??= { rows: [] };
+    f.dataSchema.rows = next;
+  };
+
+  // helpers using positional signatures from context
+  const patchRow = (index: number, patch: Partial<ColumnRow>) =>
+    updateRowAt<ColumnRow>(selectRows, writeRows, index, patch);
+
+  const addRow = () =>
+    pushRow<ColumnRow>(selectRows, writeRows, {
+      fieldName: "",
+      displayName: "",
+      description: "",
+      type: "VARCHAR",
+      tags: null,
+    });
+
+  const deleteRow = (index: number) =>
+    removeRowAt<ColumnRow>(selectRows, writeRows, index);
+
+  // ---- columns for PaginationTable ----
+  const columns: Column[] = [
+    {
+      key: "fieldName",
+      header: "Field Name",
+      sortable: true,
+      sortAccessor: (r: ColumnRow) => r.fieldName?.toLowerCase?.() ?? "",
+      render: (_v: any, row: ColumnRow, rowIndex: number) => (
+        <div data-row={rowIndex} data-col="fieldName">
+          <FormTextField
+            value={row.fieldName}
+            onChange={(v: string) => patchRow(rowIndex, { fieldName: v })}
+            placeholder="e.g., transaction_id"
+            disabled={false}
+            name="fieldName"
+            className=""
+            icon=""
+          />
+        </div>
+      ),
+    },
+    {
+      key: "displayName",
+      header: "Display Name",
+      sortable: true,
+      render: (_v: any, row: ColumnRow, rowIndex: number) => (
+        <FormTextField
+          value={row.displayName}
+          onChange={(v: string) => patchRow(rowIndex, { displayName: v })}
+          placeholder="e.g., Transaction ID"
+          disabled={false}
+          name="displayName"
+          className=""
+          icon=""
+        />
+      ),
+    },
+    {
+      key: "description",
+      header: "Description",
+      sortable: true,
+      render: (_v: any, row: ColumnRow, rowIndex: number) => (
+        <FormTextField
+          value={row.description}
+          onChange={(v: string) => patchRow(rowIndex, { description: v })}
+          placeholder="Field description"
+          disabled={false}
+          name="description"
+          className=""
+          icon=""
+        />
+      ),
+    },
+    {
+      key: "type",
+      header: "Type",
+      sortable: true,
+      sortAccessor: (r: ColumnRow) => r.type,
+      render: (_v: any, row: ColumnRow, rowIndex: number) => (
+        <FormSelectField
+          value={row.type}
+          onChange={(v: string) => patchRow(rowIndex, { type: v })}
+          options={TYPE_OPTIONS}
+          placeholder="Select type"
+          disabled={false}
+          name="type"
+          className=""
+        />
+      ),
+    },
+    {
+      key: "tags",
+      header: "Tags",
+      sortable: true,
+      sortAccessor: (r: ColumnRow) => (r.tags?.[0] ?? "None"),
+      render: (_v: any, row: ColumnRow, rowIndex: number) => (
+        <FormSelectField
+          value={(row.tags?.[0]) ?? "None"}
+          onChange={(v: string) =>
+            patchRow(rowIndex, { tags: v === "None" ? null : [v] })
+          }
+          options={[
+            { label: "None", value: "None" },
+            { label: "PII", value: "PII" },
+            { label: "Sensitive", value: "Sensitive" },
+          ]}
+          placeholder="Select tag"
+          disabled={false}
+          name="tags"
+          className=""
+        />
+      ),
+    },
+    {
+      key: "actions",
+      header: " ",
+      sortable: false,
+      render: (_v: any, _row: ColumnRow, rowIndex: number) => (
+        <Button onClick={() => deleteRow(rowIndex)} variant="borderless" icon="">
+          Remove
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <div className="p-6">
+      <h2 className="text-xl" style={{ marginBottom: 8 }}>Data Schema</h2>
+
+      {toast?.visible && (
+        <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm">
+          {toast.message}
+          <Button onClick={hideToast} variant="borderless" icon="">
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search fields…"
+          aria-label="Search fields"
+          className="form-field-input"
+          style={{ width: 320 }}
+        />
+        <Button id="add-field" onClick={addRow} variant="filled" icon="">
+          + Add field
+        </Button>
+        <span className="text-sm" style={{ color: "#676767" }}>{rows.length} total</span>
+      </div>
+
+      <PaginationTable
+        columns={columns}
+        data={filtered}
+        initialPageSize={10}
+      />
+
+      <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <Button onClick={() => history.back()} variant="standard" icon="">
+          Back
+        </Button>
+        <Button onClick={goNext} variant="filled" icon="" >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+```
+
+**Key changes to fix your errors:**
+
+- ✅ Use **regular imports** for components (no `import type`).
+    
+- ✅ Call context helpers with **positional args**:
+    
+    - `pushRow(selectRows, writeRows, row)`
+        
+    - `updateRowAt(selectRows, writeRows, index, patch)`
+        
+    - `removeRowAt(selectRows, writeRows, index)`
+        
+
+If anything still complains, paste the exact export lines for `FormTextField`, `FormSelectField`, and `Button` (default vs named), and I’ll adjust the imports to match.
