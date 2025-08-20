@@ -1283,3 +1283,370 @@ export default function DataSchema() {
     
 
 With those fixed, the table will render the prepopulated rows, filter live, and let you add new fields by pressing Enter in the search box.
+
+-------------------------
+
+gems
+
+Awesome — here’s the **complete, drop‑in update**: one React file and one SCSS module. It uses your existing `PaginationTable` + `Column` types, the green design tokens from your `scss-vars.scss`, **no add/remove/edit UI**, and validation only passes when at least one row is selected. The search bar spans the full width and there’s no add button.
+
+---
+
+### `src/features/publish/steps/DataSchema.module.scss`
+
+```scss
+@import "@/styles/scss-vars";
+
+/* PAGE */
+.data-schema {
+  padding: $spacing-6;
+
+  h2 {
+    margin-bottom: $spacing-2;
+    color: $dark-green;
+    font-size: $font-h3-size;
+    line-height: $font-h3-line-height;
+    letter-spacing: $font-h3-letter-spacing;
+  }
+
+  /* FULL‑WIDTH SEARCH (no button) */
+  .search {
+    margin-bottom: $spacing-3;
+
+    input {
+      width: 100%;
+      height: $sizing-ctrl-1;     /* 40px */
+      padding: 0 $spacing-2;
+      border: 1px solid $input-stroke;
+      border-radius: 8px;
+      background: $white;
+      color: $black;
+      font-size: $font-body-regular-size;
+      line-height: $font-body-regular-line-height;
+
+      &::placeholder { color: $hint-text; }
+
+      &:focus {
+        outline: 2px solid $primary-green-tint; /* focus halo */
+        border-color: $primary-text-green;
+        box-shadow: 0 0 0 1px $primary-text-green inset;
+      }
+    }
+  }
+
+  /* TABLE (scoped to existing PaginationTable class names) */
+  .multisort-table-container {
+    table { width: 100%; border-collapse: separate; border-spacing: 0; }
+
+    thead {
+      .header-cell {
+        padding: $spacing-2;
+        font-weight: 600;
+        color: $dark-green;
+        background: $primary-green-tint;
+        border-bottom: 1px solid $light-divider;
+      }
+
+      .sort-arrows {
+        margin-left: $spacing-1;
+
+        .arrow-up, .arrow-down {
+          display: inline-flex;
+          vertical-align: middle;
+
+          svg { width: 12px; height: 12px; }
+        }
+
+        .active {
+          color: $primary-text-green;
+          fill: currentColor;
+        }
+      }
+    }
+
+    tbody {
+      td {
+        padding: $spacing-2;
+        border-bottom: 1px solid $light-divider;
+      }
+      .cell-ellipsis { color: $black; }
+    }
+
+    .pagination-controls {
+      color: $black;
+
+      select {
+        height: $sizing-ctrl-1;
+        border: 1px solid $input-stroke;
+        border-radius: 8px;
+        padding: 0 $spacing-2;
+
+        &:focus {
+          outline: 2px solid $primary-green-tint;
+          border-color: $primary-text-green;
+        }
+      }
+
+      .next-button,
+      .pagination-center button {
+        border: 1px solid $primary-text-green;
+        color: $primary-text-green;
+        background: $white;
+        border-radius: 9999px;
+        padding: 0 $spacing-2;
+        height: 28px;
+
+        &.active { background: $primary-text-green; color: $white; }
+        &:disabled { opacity: .5; cursor: not-allowed; }
+      }
+    }
+  }
+
+  /* Checkbox selection in TD green (modern browsers) */
+  input[type="checkbox"] { accent-color: $primary-text-green; }
+}
+```
+
+---
+
+### `src/features/publish/steps/DataSchema.tsx`
+
+```tsx
+import React, { useEffect, useMemo, useState } from "react";
+import styles from "./DataSchema.module.scss";
+import { usePublication } from "../context";
+import { PaginationTable } from "@/shared/components/PaginationTable/PaginationTable";
+import type { Column } from "@/shared/type/types";
+
+/** Row model for this page only */
+type ColumnRow = {
+  fieldName: string;
+  displayName: string;
+  description: string;
+  type: "UUID" | "VARCHAR" | "CHAR(11)" | "DATE" | "NUMBER" | string;
+  tags: string[] | null;              // e.g., ["PII"] or null
+  selected?: boolean;                 // for selection-only behavior
+};
+
+/** Seed a few rows if the form is empty */
+const DEFAULT_ROWS: ColumnRow[] = [
+  {
+    fieldName: "transaction_id",
+    displayName: "Transaction ID",
+    description: "Unique identifier for each transaction.",
+    type: "UUID",
+    tags: null,
+    selected: false,
+  },
+  {
+    fieldName: "client_name",
+    displayName: "Client Name",
+    description: "Full name of the client involved.",
+    type: "VARCHAR",
+    tags: ["PII"],
+    selected: false,
+  },
+  {
+    fieldName: "client_ssn",
+    displayName: "SSN",
+    description: "Client's Social Security Number.",
+    type: "CHAR(11)",
+    tags: ["PII"],
+    selected: false,
+  },
+  {
+    fieldName: "security_ticker",
+    displayName: "Sec Ticker",
+    description: "Ticker symbol of the trade.",
+    type: "VARCHAR",
+    tags: null,
+    selected: false,
+  },
+  {
+    fieldName: "trade_date",
+    displayName: "Trade Date",
+    description: "Date when the trade was executed.",
+    type: "DATE",
+    tags: null,
+    selected: false,
+  },
+];
+
+export default function DataSchema() {
+  const {
+    form,
+    setDomain,
+    publishStepValidator,
+    toast,
+    hideToast,
+  } = usePublication();
+
+  // Ensure the domain exists with some seed rows
+  useEffect(() => {
+    const existing = form?.dataSchema?.rows as ColumnRow[] | undefined;
+    if (!existing || existing.length === 0) {
+      setDomain("dataSchema", { rows: DEFAULT_ROWS });
+    }
+  }, [form?.dataSchema?.rows, setDomain]);
+
+  const rows: ColumnRow[] = (form?.dataSchema?.rows as ColumnRow[]) ?? [];
+
+  // FULL‑WIDTH SEARCH
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((r) =>
+      [
+        r.fieldName,
+        r.displayName,
+        r.description,
+        r.type,
+        ...(r.tags ?? []),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [rows, query]);
+
+  // Toggle row selection (no add/remove/edit)
+  const toggleRow = (rowIndex: number) => {
+    const next = rows.map((r, i) =>
+      i === rowIndex ? { ...r, selected: !r.selected } : r
+    );
+    setDomain("dataSchema", { rows: next });
+  };
+
+  // Validation: at least one row must be selected to proceed
+  useEffect(() => {
+    publishStepValidator(() => {
+      const anySelected = rows.some((r) => r.selected);
+      return anySelected
+        ? { ok: true }
+        : {
+            ok: false,
+            message: "Select at least one field to continue.",
+            focusSelector: "#search-field",
+          };
+    });
+    // unregister handled by provider when step unmounts
+  }, [rows, publishStepValidator]);
+
+  // Columns for the shared PaginationTable
+  const columns: Column[] = [
+    {
+      key: "selected",
+      header: "",
+      sortable: false,
+      render: (_v: any, row: Record<string, any>, rowIndex: number) => (
+        <input
+          type="checkbox"
+          checked={Boolean((row as ColumnRow).selected)}
+          onChange={() => toggleRow(rowIndex)}
+          aria-label={`Select row ${rowIndex + 1}`}
+        />
+      ),
+    },
+    {
+      key: "fieldName",
+      header: "Field Name",
+      sortable: true,
+      sortAccessor: (r) => String((r as ColumnRow).fieldName || "").toLowerCase(),
+      render: (v: any) => <span className="body-link-text">{v}</span>,
+    },
+    {
+      key: "displayName",
+      header: "Display Name",
+      sortable: true,
+      sortAccessor: (r) =>
+        String((r as ColumnRow).displayName || "").toLowerCase(),
+      render: (v: any) => <span>{v}</span>,
+    },
+    {
+      key: "description",
+      header: "Description",
+      sortable: true,
+      sortAccessor: (r) =>
+        String((r as ColumnRow).description || "").toLowerCase(),
+      render: (v: any) => <span>{v}</span>,
+    },
+    {
+      key: "type",
+      header: "Type",
+      sortable: true,
+      sortAccessor: (r) => String((r as ColumnRow).type || "").toLowerCase(),
+      render: (v: any) => <span>{v}</span>,
+    },
+    {
+      key: "tags",
+      header: "Tags",
+      sortable: true,
+      sortAccessor: (r) =>
+        ((r as ColumnRow).tags?.[0] ?? "None").toString().toLowerCase(),
+      render: (_v: any, row: Record<string, any>) => {
+        const tag = ((row as ColumnRow).tags?.[0] ?? "None") as string;
+        return (
+          <span>
+            {tag === "PII" ? (
+              // Use your green toggle visual if desired; here plain text
+              <span>PII</span>
+            ) : (
+              "None"
+            )}
+          </span>
+        );
+      },
+    },
+  ];
+
+  return (
+    <div className={styles["data-schema"]}>
+      {toast?.visible && (
+        <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm">
+          {toast.message}
+          <button onClick={hideToast} className="ml-2 underline">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      <h2>Data Schema</h2>
+
+      <div className={styles.search}>
+        <input
+          id="search-field"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search fields…"
+          aria-label="Search fields"
+        />
+      </div>
+
+      <PaginationTable
+        columns={columns}
+        data={filtered as Record<string, any>[]}
+        initialPageSize={10}
+      />
+    </div>
+  );
+}
+```
+
+**What you get**
+
+- Green theme everywhere (from your tokens).
+    
+- Big full‑width search (no button).
+    
+- Table shows read‑only values.
+    
+- First column is a checkbox for **select** only.
+    
+- **Next** validation is wired via `publishStepValidator`: it only passes when at least one row is selected.
+    
+- If your form is empty, it auto‑seeds with the 5 sample rows so you can search immediately.
+    
+
+If your import aliases differ, adjust the two `@/...` imports to the relative paths you use in this repo.
