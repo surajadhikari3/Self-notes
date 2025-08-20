@@ -961,3 +961,325 @@ export default function DataSchema() {
 - If the user picks nothing, the **validator** fails → your wrapper keeps **Next** disabled (as in your flow).
     
 - Everything else uses your existing shared pieces and context. If you don’t want the **Remove** action, just delete the last “actions” column.
+
+-------------------
+
+
+takkkkkk
+
+
+Got it — your table renders nothing because of two things:
+
+1. **Wrong imports**: `PaginationTable`, `Button`, `FormTextField`, and `FormSelectField` are **named** exports in your repo. Importing them as defaults compiles (TS may not yell, depending on config) but at runtime you render `undefined`, so nothing shows.
+    
+2. **Columns shape**: must match your `types.ts` (`render(value, row, rowIndex)`, `sortAccessor(row)`), and the data objects must have keys that match `Column.key`.
+    
+
+Below is a **drop‑in `DataSchema.tsx`** that uses your shared components exactly as your `PaginationTable.tsx`/`types.ts` expect. It also seeds a few rows, filters as you type, and adds a row when you press **Enter** in the search box (no “Add field” button).
+
+```tsx
+import React, { useEffect, useMemo, useState } from "react";
+import { usePublication } from "../context";
+
+// 🔴 all named imports (match your codebase)
+import { PaginationTable } from "@/shared/components/PaginationTable/PaginationTable";
+import { Button } from "@/shared/components/Button/Button";
+import { FormTextField } from "@/shared/components/FormFields/FormTextField";
+import { FormSelectField } from "@/shared/components/FormFields/FormSelectField";
+import type { Column } from "@/shared/type/types";
+
+// Your row shape (fieldName, displayName, description, type, tags?)
+type ColumnRow = {
+  fieldName: string;
+  displayName: string;
+  description: string;
+  type: string;
+  tags: string[] | null;
+};
+
+// --- seed rows so the table shows immediately ---
+const SEED_ROWS: ColumnRow[] = [
+  {
+    fieldName: "transaction_id",
+    displayName: "Transaction ID",
+    description: "Unique identifier for each transaction",
+    type: "UUID",
+    tags: null,
+  },
+  {
+    fieldName: "client_name",
+    displayName: "Client Name",
+    description: "Full name of the client investor",
+    type: "VARCHAR",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "client_ssn",
+    displayName: "SSN",
+    description: "Client's Social Security Number",
+    type: "CHAR(11)",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "security_ticker",
+    displayName: "Sec Ticker",
+    description: "Ticker symbol of the trade",
+    type: "VARCHAR",
+    tags: null,
+  },
+  {
+    fieldName: "trade_date",
+    displayName: "Trade Date",
+    description: "Date when the trade was executed",
+    type: "DATE",
+    tags: null,
+  },
+];
+
+const TYPE_OPTIONS = [
+  { label: "UUID", value: "UUID" },
+  { label: "VARCHAR", value: "VARCHAR" },
+  { label: "CHAR(11)", value: "CHAR(11)" },
+  { label: "DATE", value: "DATE" },
+  { label: "NUMBER", value: "NUMBER" },
+];
+
+const TAG_OPTIONS = [
+  { label: "None", value: "None" },
+  { label: "PII", value: "PII" },
+  { label: "Sensitive", value: "Sensitive" },
+];
+
+export default function DataSchema() {
+  const {
+    form,
+    patchDomain,
+    pushRow,
+    updateRowAt,
+    removeRowAt,
+    publishStepValidator,
+    toast,
+    hideToast,
+  } = usePublication();
+
+  const rows: ColumnRow[] = (form.dataSchema?.rows as ColumnRow[]) ?? [];
+  const [query, setQuery] = useState("");
+
+  // seed once
+  useEffect(() => {
+    if (!rows.length) {
+      patchDomain("dataSchema", { rows: SEED_ROWS });
+    }
+  }, [rows.length, patchDomain]);
+
+  // filter
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.fieldName.toLowerCase().includes(q) ||
+        r.displayName.toLowerCase().includes(q) ||
+        r.description.toLowerCase().includes(q) ||
+        (r.tags ?? []).some((t) => t.toLowerCase().includes(q))
+    );
+  }, [rows, query]);
+
+  // context helpers (positional signatures)
+  const selectRows = (f: any): ColumnRow[] | undefined => f.dataSchema?.rows;
+  const writeRows = (f: any, next: ColumnRow[]) => {
+    f.dataSchema ??= { rows: [] };
+    f.dataSchema.rows = next;
+  };
+
+  const patchRow = (index: number, patch: Partial<ColumnRow>) =>
+    updateRowAt<ColumnRow>(selectRows, writeRows, index, patch);
+
+  const addRowFromSearch = () => {
+    const name = query.trim();
+    if (!name) return;
+    const exists = rows.some(
+      (r) => r.fieldName.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (exists) {
+      setQuery("");
+      return;
+    }
+    pushRow<ColumnRow>(selectRows, writeRows, {
+      fieldName: name,
+      displayName: name
+        .split("_")
+        .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+        .join(" "),
+      description: "",
+      type: "VARCHAR",
+      tags: null,
+    });
+    setQuery("");
+  };
+
+  const deleteRow = (index: number) =>
+    removeRowAt<ColumnRow>(selectRows, writeRows, index);
+
+  const onSearchKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.key === "Enter") addRowFromSearch();
+  };
+
+  // columns must match your shared `Column` type
+  const columns: Column[] = [
+    {
+      key: "fieldName",
+      header: "Field Name",
+      sortable: true,
+      sortAccessor: (row) => (row as ColumnRow).fieldName.toLowerCase(),
+      render: (_value, row, rowIndex) => (
+        <div data-row={rowIndex} data-col="fieldName">
+          <FormTextField
+            value={(row as ColumnRow).fieldName}
+            onChange={(v: string) => patchRow(rowIndex, { fieldName: v })}
+            placeholder="e.g., transaction_id"
+            disabled={false}
+            name="fieldName"
+            className=""
+            icon=""
+          />
+        </div>
+      ),
+    },
+    {
+      key: "displayName",
+      header: "Display Name",
+      sortable: true,
+      sortAccessor: (row) => (row as ColumnRow).displayName.toLowerCase(),
+      render: (_value, row, rowIndex) => (
+        <FormTextField
+          value={(row as ColumnRow).displayName}
+          onChange={(v: string) => patchRow(rowIndex, { displayName: v })}
+          placeholder="e.g., Transaction ID"
+          disabled={false}
+          name="displayName"
+          className=""
+          icon=""
+        />
+      ),
+    },
+    {
+      key: "description",
+      header: "Description",
+      sortable: true,
+      sortAccessor: (row) => (row as ColumnRow).description.toLowerCase(),
+      render: (_value, row, rowIndex) => (
+        <FormTextField
+          value={(row as ColumnRow).description}
+          onChange={(v: string) => patchRow(rowIndex, { description: v })}
+          placeholder="Field description"
+          disabled={false}
+          name="description"
+          className=""
+          icon=""
+        />
+      ),
+    },
+    {
+      key: "type",
+      header: "Type",
+      sortable: true,
+      sortAccessor: (row) => (row as ColumnRow).type.toLowerCase(),
+      render: (_value, row, rowIndex) => (
+        <FormSelectField
+          value={(row as ColumnRow).type}
+          onChange={(v: string) => patchRow(rowIndex, { type: v })}
+          options={TYPE_OPTIONS}
+          placeholder="Select type"
+          disabled={false}
+          name="type"
+          className=""
+        />
+      ),
+    },
+    {
+      key: "tags",
+      header: "Tags",
+      sortable: true,
+      sortAccessor: (row) =>
+        (((row as ColumnRow).tags ?? ["None"])[0] || "None").toLowerCase(),
+      render: (_value, row, rowIndex) => (
+        <FormSelectField
+          value={((row as ColumnRow).tags ?? ["None"])[0]}
+          onChange={(v: string) =>
+            patchRow(rowIndex, { tags: v === "None" ? null : [v] })
+          }
+          options={TAG_OPTIONS}
+          placeholder="Select tag"
+          disabled={false}
+          name="tags"
+          className=""
+        />
+      ),
+    },
+    {
+      key: "actions",
+      header: "",
+      sortable: false,
+      render: (_value, _row, rowIndex) => (
+        <Button onClick={() => deleteRow(rowIndex)} variant="borderless" icon="">
+          Remove
+        </Button>
+      ),
+    },
+  ];
+
+  return (
+    <div className="p-6">
+      {toast?.visible && (
+        <div className="mb-3 rounded border border-amber-300 bg-amber-50 p-2 text-sm">
+          {toast.message}
+          <Button onClick={hideToast} variant="borderless" icon="">
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      <h2 className="text-xl" style={{ marginBottom: 8 }}>
+        Data Schema
+      </h2>
+
+      {/* Search (press Enter to add) */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <input
+          id="search-field"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onSearchKeyDown}
+          placeholder="Search fields… (press Enter to add as a new field)"
+          aria-label="Search fields"
+          className="form-field-input"
+          style={{ width: 360 }}
+        />
+        <span className="text-sm" style={{ color: "#676767" }}>
+          {rows.length} total
+        </span>
+      </div>
+
+      <PaginationTable columns={columns} data={filtered as Record<string, any>[]} initialPageSize={10} />
+    </div>
+  );
+}
+```
+
+### Quick checklist
+
+- **Imports** must be:  
+    `import { PaginationTable } from '.../PaginationTable'`  
+    `import { Button } from '.../Button'`  
+    `import { FormTextField } from '.../FormTextField'`  
+    `import { FormSelectField } from '.../FormSelectField'`
+    
+- `Column.render` signature is `(value, row, rowIndex) => ReactNode`.
+    
+- `sortAccessor` signature is `(row) => string | number`.
+    
+- Data objects have keys: `fieldName`, `displayName`, `description`, `type`, `tags`.
+    
+
+With those fixed, the table will render the prepopulated rows, filter live, and let you add new fields by pressing Enter in the search box.
