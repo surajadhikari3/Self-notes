@@ -2147,3 +2147,139 @@ export default function DataSchema() {
 ---
 
 👉 Do you want me to also hook the **toast** (error popup) so that when validation fails on “Next”, it shows `toast.message` automatically? Or should it only block silently like in your screenshot?
+
+
+-----------------------------
+
+
+rows:
+
+
+Perfect 👍 I’ll give you **15+ mock rows** so that pagination kicks in and you can test scrolling/search properly.  
+Here’s just the `rows` array you can drop into the component:
+
+```ts
+const rows = form.schema?.rows ?? [
+  {
+    fieldName: "transaction_id",
+    displayName: "Transaction ID",
+    description: "Unique identifier for each transaction",
+    type: "UUID",
+    tags: [],
+  },
+  {
+    fieldName: "client_name",
+    displayName: "Client Name",
+    description: "Full name of the client",
+    type: "VARCHAR",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "client_ssn",
+    displayName: "SSN",
+    description: "Client's Social Security Number",
+    type: "CHAR(11)",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "security_ticker",
+    displayName: "Sec Ticker",
+    description: "Ticker symbol of the trade",
+    type: "VARCHAR",
+    tags: [],
+  },
+  {
+    fieldName: "trade_date",
+    displayName: "Trade Date",
+    description: "Date when the trade was executed",
+    type: "DATE",
+    tags: [],
+  },
+  {
+    fieldName: "trade_amount",
+    displayName: "Trade Amount",
+    description: "Value of the trade",
+    type: "DECIMAL(12,2)",
+    tags: [],
+  },
+  {
+    fieldName: "currency",
+    displayName: "Currency",
+    description: "Currency of the transaction",
+    type: "CHAR(3)",
+    tags: [],
+  },
+  {
+    fieldName: "broker_id",
+    displayName: "Broker ID",
+    description: "Identifier of executing broker",
+    type: "VARCHAR",
+    tags: [],
+  },
+  {
+    fieldName: "broker_name",
+    displayName: "Broker Name",
+    description: "Full name of broker",
+    type: "VARCHAR",
+    tags: [],
+  },
+  {
+    fieldName: "account_id",
+    displayName: "Account ID",
+    description: "Internal account identifier",
+    type: "UUID",
+    tags: [],
+  },
+  {
+    fieldName: "account_type",
+    displayName: "Account Type",
+    description: "Retail, Institutional, or Other",
+    type: "VARCHAR",
+    tags: [],
+  },
+  {
+    fieldName: "country",
+    displayName: "Country",
+    description: "Country of client residence",
+    type: "VARCHAR",
+    tags: [],
+  },
+  {
+    fieldName: "email",
+    displayName: "Email",
+    description: "Contact email of client",
+    type: "VARCHAR",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "phone_number",
+    displayName: "Phone Number",
+    description: "Client contact phone",
+    type: "VARCHAR",
+    tags: ["PII"],
+  },
+  {
+    fieldName: "created_at",
+    displayName: "Created At",
+    description: "Record creation timestamp",
+    type: "TIMESTAMP",
+    tags: [],
+  },
+  {
+    fieldName: "updated_at",
+    displayName: "Updated At",
+    description: "Record update timestamp",
+    type: "TIMESTAMP",
+    tags: [],
+  },
+];
+```
+
+---
+
+This will give you **16 fields total** so your table will paginate past page 1.  
+➡️ You’ll get a good spread of `UUID`, `VARCHAR`, `CHAR`, `DECIMAL`, `DATE`, and `TIMESTAMP` plus a few **PII tags** so you can see the icon render.
+
+---
+
+Do you also want me to **group PII fields visually** (like coloring the whole row or column differently), or keep it just as the pill + icon?
