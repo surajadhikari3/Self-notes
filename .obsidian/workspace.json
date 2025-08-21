@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/React............md",
+                "file": "Project_prep/dashhh....md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "React..........."
+              "title": "dashhh..."
             }
           }
         ]
@@ -181,8 +181,9 @@
   },
   "active": "f9265a120b2a3903",
   "lastOpenFiles": [
-    "Coding things/Java 8 hands-on notes.md",
     "Project_prep/React............md",
+    "Project_prep/dashhh....md",
+    "Coding things/Java 8 hands-on notes.md",
     "Project_prep/ADF.md",
     "Cloud/Kubernets.md",
     "Cloud/AWS.md",
@@ -207,7 +208,6 @@
     "cdc.md",
     "Project_prep/DLT.......................md",
     "Project_prep/Dremio.md",
-    "Project_prep/User.md",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",
     "debezium-connector-mysql-3.2.0.Final-plugin.tar.gz",
