@@ -153,3 +153,93 @@ query = (
     
 
 This keeps the logic simple: classify → clean → parse (per type) → write to two Delta tables, all within a single streaming job.
+
+
+----------------------
+
+Great — your `application-dev.yml` is already set up to send **objects** as JSON:
+
+- `key.serializer = StringSerializer` ✅
+    
+- `value.serializer` is a JSON serializer (via your delegate `TdSecuredKafkaJsonSerializer`) ✅
+    
+
+So the only thing that causes the ugly `\"`/`\\` in Databricks is **double‑serializing in your producer code**.
+
+## What to change (code)
+
+1. Use `KafkaTemplate<String, Object>` (not `<String, String>`).
+    
+2. **Do not** call `writeValueAsString(...)` on payloads that are already objects/Maps/JsonNodes.
+    
+3. Send `Map`/`POJO`/`JsonNode` directly; your JSON serializer will turn it into bytes exactly once.
+    
+
+```java
+@Service
+public class KafkaProducerSvc {
+
+  private final KafkaTemplate<String, Object> kafkaTemplate;
+  private final ObjectMapper om = new ObjectMapper();
+
+  @Value("${spring.kafka.producer.topic}")   // or your ${topic:poc_only}
+  private String topic;
+
+  public KafkaProducerSvc(KafkaTemplate<String, Object> kafkaTemplate) {
+    this.kafkaTemplate = kafkaTemplate;
+  }
+
+  // File contains an array of JSON objects: [ { ... }, { ... } ]
+  public void produceFromFile(String filepath) throws IOException {
+    List<Map<String, Object>> records =
+        om.readValue(new File(filepath), new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>(){});
+
+    for (Map<String, Object> rec : records) {
+      String key = String.valueOf(rec.getOrDefault("source", "unknown"));
+      // ✅ send the object; your Json serializer handles serialization once
+      kafkaTemplate.send(topic, key, rec);
+    }
+  }
+
+  // If your file has newline-delimited JSON, read as JsonNode and send:
+  public void produceLineByLine(Path path) throws IOException {
+    try (var lines = java.nio.file.Files.lines(path)) {
+      lines.filter(l -> !l.isBlank()).forEach(l -> {
+        try {
+          com.fasterxml.jackson.databind.JsonNode node = om.readTree(l); // parse to object
+          String key = node.path("source").asText("unknown");
+          kafkaTemplate.send(topic, key, node); // ✅ send node, not String
+        } catch (Exception e) { /* handle */ }
+      });
+    }
+  }
+}
+```
+
+## If you must keep `<String, String>`
+
+Only serialize **once**:
+
+```java
+KafkaTemplate<String, String> template; // value.serializer = StringSerializer
+
+String json = om.writeValueAsString(rec); // ONE time
+template.send(topic, key, json);          // do NOT wrap json in quotes or serialize again
+```
+
+## Minor YAML tweaks (optional but nice)
+
+If you ever switch to Spring’s `JsonSerializer`, add:
+
+```yaml
+spring:
+  kafka:
+    producer:
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+```
+
+Your TLS/truststore bits look fine; keeping them under the shared `spring.kafka.properties` block (as you have) is good.
+
+With the code change above, the payload will land in Databricks as clean JSON (`{"a":"b"}`), so your `from_json(value, schema)` will parse without any unescaping step.
