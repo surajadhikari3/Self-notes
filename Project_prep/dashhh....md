@@ -691,3 +691,179 @@ def silver_position_data_product():
         
 
 If you also want **historical-as‑of** queries later, you already have them in `silver_position7_scd2` with `__START_AT`/`__END_AT`. You can build time-travel views on top if needed.
+
+
+---------------------------
+
+dashboord
+
+
+Perfect—since your DLT “silver” table now has the 7 fields
+
+```
+allotment, instrumentCode, positionId, pnl, mtm, isin, cusip
+```
+
+here’s a clean, **copy‑paste** set of SQL (plus quick UI steps) to build the Databricks dashboard with a 1‑minute refresh.
+
+---
+
+# 0) (Optional but recommended) Create lightweight views for the dashboard
+
+Replace `catalog.schema` and the table name with yours (e.g., `silver_position_data_product` or your SCD2 “current” table).
+
+```sql
+USE CATALOG <catalog>;
+USE SCHEMA <schema>;
+
+-- Base view the widgets will read from
+CREATE OR REPLACE VIEW v_positions AS
+SELECT allotment, instrumentCode, positionId, pnl, mtm, isin, cusip
+FROM <catalog>.<schema>.<your_silver_table>;   -- e.g., silver_position_data_product
+```
+
+---
+
+# 1) Grid showing position data overall (top N)
+
+```sql
+SELECT *
+FROM v_positions
+ORDER BY positionId, instrumentCode
+LIMIT 1000;
+```
+
+**Viz:** Table  
+**Tips:**
+
+- Turn on column search; set numeric formatting for `pnl`, `mtm`.
+    
+- If you want the **top 10 by |PnL|** instead of all rows:
+    
+
+```sql
+SELECT *
+FROM v_positions
+ORDER BY ABS(pnl) DESC
+LIMIT 10;
+```
+
+---
+
+# 2) The position with the highest PnL (by absolute value)
+
+```sql
+SELECT instrumentCode, positionId, cusip, pnl, mtm, allotment, isin
+FROM v_positions
+ORDER BY ABS(pnl) DESC
+LIMIT 1;
+```
+
+**Viz:** “Single Value” (show `pnl`) or a 1‑row Table.  
+**Tip:** In “Single Value” options, set **Title** to “Highest PnL (abs)”.
+
+---
+
+# 3) Sum of PnL by allotment
+
+```sql
+SELECT allotment, SUM(pnl) AS total_pnl
+FROM v_positions
+GROUP BY allotment
+ORDER BY total_pnl DESC;
+```
+
+**Viz:** Bar chart
+
+- X: `allotment`
+    
+- Y: `total_pnl`
+    
+- Sort: Descending on `total_pnl`
+    
+- Value format: number with thousands separator
+    
+
+---
+
+# 4) (Optional) A quick “Top N by PnL” and a filter
+
+**Query – Top 10 by positive PnL**
+
+```sql
+SELECT instrumentCode, positionId, cusip, pnl, allotment
+FROM v_positions
+WHERE pnl > 0
+ORDER BY pnl DESC
+LIMIT 10;
+```
+
+**Dashboard filter (parameter):**
+
+- Add a **Query Parameter** named `allotment_filter` (multi‑select), default `All`.
+    
+- Change queries to:
+    
+
+```sql
+SELECT *
+FROM v_positions
+WHERE (${allotment_filter} = 'All' OR allotment IN (${allotment_filter}))
+ORDER BY ABS(pnl) DESC
+LIMIT 10;
+```
+
+---
+
+# 5) Hook it up in Databricks SQL (click‑path)
+
+1. **SQL Editor** → paste each query → **Run** → **Save** each as:
+    
+    - “Grid – All Positions”
+        
+    - “Card – Highest PnL”
+        
+    - “Chart – PnL by Allotment”
+        
+2. Click **Create Dashboard** → **Add** each saved query.
+    
+3. For the chart, configure axes/titles as above.
+    
+4. **Schedule / Auto‑refresh:** in the dashboard’s top‑right, set **Refresh = every 1 minute** and pick your SQL warehouse.
+    
+5. (Optional) Add the **`allotment_filter`** dashboard parameter and wire it to each query.
+    
+
+---
+
+# 6) (Optional) Materialize Gold tables (faster dashboards)
+
+If you prefer pre‑aggregated tables for snappier dashboards:
+
+```sql
+CREATE OR REPLACE TABLE gold_pnl_by_allotment AS
+SELECT allotment, SUM(pnl) AS total_pnl
+FROM v_positions
+GROUP BY allotment;
+
+CREATE OR REPLACE VIEW gold_top_position_by_pnl AS
+SELECT *
+FROM v_positions
+ORDER BY ABS(pnl) DESC
+LIMIT 1;
+```
+
+Point the widgets at these `gold_*` objects.
+
+---
+
+## Troubleshooting tips
+
+- If you used an SCD2 table for instruments, make sure your “silver” table is already **joined to current instruments** (i.e., you see `cusip` populated).
+    
+- Permissions: you need **SELECT** on the schema and tables; for views/tables creation, **CREATE VIEW/TABLE** on the schema.
+    
+- If you see stale data, check that your DLT pipeline is running (continuous) or being triggered on your schedule, and that the dashboard auto‑refresh is on 1 minute.
+    
+
+If you tell me your exact table path (catalog.schema.table), I can return these queries pre‑filled with your names.
