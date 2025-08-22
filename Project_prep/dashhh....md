@@ -243,3 +243,194 @@ spring:
 Your TLS/truststore bits look fine; keeping them under the shared `spring.kafka.properties` block (as you have) is good.
 
 With the code change above, the payload will land in Databricks as clean JSON (`{"a":"b"}`), so your `from_json(value, schema)` will parse without any unescaping step.
+
+--------------------------------------------------------
+
+
+Awesome—here are two ready‑to‑use snippets. They build one **Silver “Position Data Product”** table with exactly the **7 fields**. All fields come from **position**, except **`cusip`**, which comes from **instrument** after the join.
+
+---
+
+# Option A — Plain Spark (batch/stream‑compatible)
+
+```python
+# ASSUMPTIONS: you already have these 6 Bronze (or early Silver) tables/views:
+#   bronze_ged_position, bronze_ged_instrument
+#   bronze_fi_position,  bronze_fi_instrument
+#   bronze_cmdty_position, bronze_cmdty_instrument
+
+from pyspark.sql.functions import col
+
+# --- 1) Conform per source (rename to canonical 7 names) ---
+
+ged_pos = (
+  spark.table("bronze_ged_position")
+       .select(
+         col("allotment").alias("allotment"),
+         col("instrumentCode").alias("instrumentCode"),
+         col("id").alias("positionId"),
+         col("P&L").alias("pnl"),
+         col("mtm").alias("mtm"),
+         col("isin").alias("isin")
+       )
+)
+
+fi_pos = (
+  spark.table("bronze_fi_position")
+       .select(
+         col("allotment").alias("allotment"),
+         col("instrCode").alias("instrumentCode"),
+         col("posId").alias("positionId"),
+         col("pnl").alias("pnl"),
+         col("mtm").alias("mtm"),
+         col("isin").alias("isin")
+       )
+)
+
+cmdty_pos = (
+  spark.table("bronze_cmdty_position")
+       .select(
+         col("allotment").alias("allotment"),
+         col("instrumentCode").alias("instrumentCode"),
+         col("positionId").alias("positionId"),
+         col("pnl").alias("pnl"),
+         col("markToMarket").alias("mtm"),
+         col("ISIN").alias("isin")
+       )
+)
+
+# Instruments (note: GED has nested identifier.cusip, others differ only by case)
+ged_instr   = spark.table("bronze_ged_instrument") \
+                   .select(col("code").alias("instrumentCode"),
+                           col("identifier.cusip").alias("cusip"),
+                           col("isin").alias("isin_instr"))  # optional
+fi_instr    = spark.table("bronze_fi_instrument") \
+                   .select(col("code").alias("instrumentCode"),
+                           col("cusip").alias("cusip"))
+cmdty_instr = spark.table("bronze_cmdty_instrument") \
+                   .select(col("code").alias("instrumentCode"),
+                           col("CUSIP").alias("cusip"))
+
+# --- 2) Union positions by name ---
+all_pos = ged_pos.unionByName(fi_pos).unionByName(cmdty_pos)
+
+# --- 3) Union instruments by name (dedupe if needed) ---
+from pyspark.sql.functions import row_number
+from pyspark.sql.window import Window
+
+all_instr = ged_instr.unionByName(fi_instr, allowMissingColumns=True)\
+                     .unionByName(cmdty_instr, allowMissingColumns=True)\
+                     .dropDuplicates(["instrumentCode"]) # keep latest if you have a timestamp
+
+# --- 4) Join to enrich positions with CUSIP (ONLY field taken from instrument) ---
+position_data_product = (
+  all_pos.alias("p")
+        .join(all_instr.alias("i"), on="instrumentCode", how="left")
+        .select(
+            col("p.allotment").alias("allotment"),
+            col("p.instrumentCode").alias("instrumentCode"),
+            col("p.positionId").alias("positionId"),
+            col("p.pnl").alias("pnl"),
+            col("p.mtm").alias("mtm"),
+            col("p.isin").alias("isin"),
+            col("i.cusip").alias("cusip")     # <-- only from instrument
+        )
+)
+
+# --- 5) Save Silver table ---
+position_data_product.write.mode("overwrite").format("delta") \
+  .saveAsTable("catalog.schema.silver_position_data_product")
+```
+
+---
+
+# Option B — Delta Live Tables (streaming pipeline)
+
+```python
+import dlt
+from pyspark.sql.functions import col
+
+# === Conform per source ===
+
+@dlt.table
+def silver_ged_position_conform():
+    s = dlt.read_stream("bronze_ged_position")
+    return s.select(
+        col("allotment").alias("allotment"),
+        col("instrumentCode").alias("instrumentCode"),
+        col("id").alias("positionId"),
+        col("P&L").alias("pnl"),
+        col("mtm").alias("mtm"),
+        col("isin").alias("isin")
+    )
+
+@dlt.table
+def silver_fi_position_conform():
+    s = dlt.read_stream("bronze_fi_position")
+    return s.select(
+        col("allotment").alias("allotment"),
+        col("instrCode").alias("instrumentCode"),
+        col("posId").alias("positionId"),
+        col("pnl").alias("pnl"),
+        col("mtm").alias("mtm"),
+        col("isin").alias("isin")
+    )
+
+@dlt.table
+def silver_cmdty_position_conform():
+    s = dlt.read_stream("bronze_cmdty_position")
+    return s.select(
+        col("allotment").alias("allotment"),
+        col("instrumentCode").alias("instrumentCode"),
+        col("positionId").alias("positionId"),
+        col("pnl").alias("pnl"),
+        col("markToMarket").alias("mtm"),
+        col("ISIN").alias("isin")
+    )
+
+@dlt.view
+def silver_all_positions_conform():
+    return (dlt.read_stream("silver_ged_position_conform")
+            .unionByName(dlt.read_stream("silver_fi_position_conform"))
+            .unionByName(dlt.read_stream("silver_cmdty_position_conform")))
+
+# Instruments (flatten GED.identifier.cusip)
+@dlt.view
+def silver_all_instruments_conform():
+    ged = dlt.read_stream("bronze_ged_instrument") \
+             .select(col("code").alias("instrumentCode"),
+                     col("identifier.cusip").alias("cusip"))
+    fi = dlt.read_stream("bronze_fi_instrument") \
+            .select(col("code").alias("instrumentCode"),
+                    col("cusip").alias("cusip"))
+    cmdty = dlt.read_stream("bronze_cmdty_instrument") \
+              .select(col("code").alias("instrumentCode"),
+                      col("CUSIP").alias("cusip"))
+    return ged.unionByName(fi, allowMissingColumns=True) \
+              .unionByName(cmdty, allowMissingColumns=True)
+
+# FINAL Silver data product (7 fields; cusip only from instrument)
+@dlt.table(
+  name="silver_position_data_product",
+  comment="Position Data Product joined with instrument to fetch CUSIP"
+)
+def silver_position_data_product():
+    p = dlt.read_stream("silver_all_positions_conform").alias("p")
+    i = dlt.read_stream("silver_all_instruments_conform").alias("i")
+    return (p.join(i, on="instrumentCode", how="left")
+             .select(
+               col("p.allotment").alias("allotment"),
+               col("p.instrumentCode").alias("instrumentCode"),
+               col("p.positionId").alias("positionId"),
+               col("p.pnl").alias("pnl"),
+               col("p.mtm").alias("mtm"),
+               col("p.isin").alias("isin"),
+               col("i.cusip").alias("cusip")
+             ))
+```
+
+> This produces a single **Silver** table with the canonical schema:  
+> `allotment, instrumentCode, positionId, pnl, mtm, isin, cusip`.  
+> Every column is from **position**, **except `cusip`**, which is taken from **instrument** after the join.
+
+If you want, I can add a small SCD‑2 layer for instruments and point the join to `is_current=true` records, plus show how to add Unity Catalog tags (`system_of_origin` on Bronze; `data_product=true`, `cdo_approved=true` on Silver).
