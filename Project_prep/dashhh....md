@@ -541,3 +541,153 @@ def silver_position_data_product():
     
 
 If you want, I can also wire in `validFrom/validTo` from your JSON into the SCD2 table for auditing (kept as additional history columns).
+
+-------------------------------
+gd
+
+Love this simplification. Here’s a **DLT pipeline** that:
+
+1. For **each source**, joins **Position ↔ Instrument** right away → emits the **final 7 fields** (6 from Position + `cusip` from Instrument).
+    
+2. **Unions** those three per‑source 7‑field streams.
+    
+3. Applies **SCD Type‑2 on the union** (keys = `(_source_system, positionId)`, sequence = business time `timeContext.infoSetTime.$date` with fallback).
+    
+4. Exposes a **current** 7‑field table perfect for your dashboard.
+    
+
+---
+
+```python
+import dlt
+from pyspark.sql.functions import col, to_timestamp, coalesce, current_timestamp, lit
+
+# Helper: business event time (fallbacks to _ingest_ts or now)
+def event_ts(expr):
+    return coalesce(
+        to_timestamp(expr),          # timeContext.infoSetTime.$date if present
+        col("_ingest_ts"),
+        current_timestamp()
+    ).alias("_event_ts")
+
+# ========== 1) Per‑source: JOIN now → emit final 7 fields (+ lineage + event time) ==========
+
+@dlt.table(comment="GED: 7 fields, cusip from instrument")
+def silver_ged_positions7():
+    p = dlt.read_stream("bronze_ged_position").alias("p")
+    i = dlt.read_stream("bronze_ged_instrument").alias("i")
+    joined = (
+        p.join(i, col("p.instrumentCode") == col("i.code"), "left")
+         .select(
+            col("p.allotment").alias("allotment"),
+            col("p.instrumentCode").alias("instrumentCode"),
+            col("p.id").alias("positionId"),
+            col("p.P&L").alias("pnl"),
+            col("p.mtm").alias("mtm"),
+            col("p.isin").alias("isin"),
+            col("i.identifier.cusip").alias("cusip"),  # ONLY from instrument
+            event_ts(col("p.timeContext.infoSetTime.`$date`")),
+            lit("GED").alias("_source_system")
+         )
+    )
+    return joined
+
+@dlt.table(comment="FixedIncome: 7 fields, cusip from instrument")
+def silver_fi_positions7():
+    p = dlt.read_stream("bronze_fi_position").alias("p")
+    i = dlt.read_stream("bronze_fi_instrument").alias("i")
+    joined = (
+        p.join(i, col("p.instrCode") == col("i.code"), "left")
+         .select(
+            col("p.allotment").alias("allotment"),
+            col("p.instrCode").alias("instrumentCode"),
+            col("p.posId").alias("positionId"),
+            col("p.pnl").alias("pnl"),
+            col("p.mtm").alias("mtm"),
+            col("p.isin").alias("isin"),
+            col("i.cusip").alias("cusip"),
+            event_ts(col("p.timeContext.infoSetTime.`$date`")),
+            lit("FI").alias("_source_system")
+         )
+    )
+    return joined
+
+@dlt.table(comment="Commodities: 7 fields, cusip from instrument")
+def silver_cmdty_positions7():
+    p = dlt.read_stream("bronze_cmdty_position").alias("p")
+    i = dlt.read_stream("bronze_cmdty_instrument").alias("i")
+    joined = (
+        p.join(i, col("p.instrumentCode") == col("i.code"), "left")
+         .select(
+            col("p.allotment").alias("allotment"),
+            col("p.instrumentCode").alias("instrumentCode"),
+            col("p.positionId").alias("positionId"),
+            col("p.pnl").alias("pnl"),
+            col("p.markToMarket").alias("mtm"),
+            col("p.ISIN").alias("isin"),
+            col("i.CUSIP").alias("cusip"),
+            event_ts(col("p.timeContext.infoSetTime.`$date`")),
+            lit("CMDTY").alias("_source_system")
+         )
+    )
+    return joined
+
+# ========== 2) Union the three 7‑field streams (+ _event_ts, _source_system) ==========
+
+@dlt.view
+def silver_all_positions7_union():
+    return (
+        dlt.read_stream("silver_ged_positions7")
+          .unionByName(dlt.read_stream("silver_fi_positions7"))
+          .unionByName(dlt.read_stream("silver_cmdty_positions7"))
+    )
+
+# ========== 3) SCD Type‑2 on the UNION (history across all sources) ==========
+
+dlt.create_target_table(
+    name="silver_position7_scd2",
+    comment="SCD2 history of unified 7-field positions keyed by (_source_system, positionId)"
+)
+
+dlt.apply_changes(
+    target="silver_position7_scd2",
+    source="silver_all_positions7_union",
+    keys=["_source_system", "positionId"],      # avoid cross-system ID collisions
+    sequence_by=col("_event_ts"),               # business time; falls back to ingest/now
+    stored_as_scd_type=2,
+    track_history_columns=[
+        "allotment", "instrumentCode", "pnl", "mtm", "isin", "cusip"
+    ]
+)
+
+# ========== 4) CURRENT 7‑field table for dashboard (no re-join needed) ==========
+
+@dlt.table(
+    name="silver_position_data_product",
+    comment="Current 7-field position data product (ready for dashboards)"
+)
+def silver_position_data_product():
+    cur = (spark.table("LIVE.silver_position7_scd2")
+                .where("__END_AT IS NULL")
+                .select("allotment","instrumentCode","positionId","pnl","mtm","isin","cusip"))
+    return cur
+```
+
+### Why this fits your ask
+
+- **Per‑source join first** → each emits the **final 7 fields** (6 from Position + `cusip` from Instrument).
+    
+- **Union once** → single stream of standardized 7‑field rows.
+    
+- **SCD2 on the union** → complete temporality across all sources with one table (`silver_position7_scd2`).
+    
+- **Current snapshot** (`silver_position_data_product`) → plug directly into your **1‑min refresh** dashboard:
+    
+    - Grid: `SELECT * FROM … ORDER BY positionId`
+        
+    - Top PnL: `SELECT * FROM … ORDER BY pnl DESC LIMIT 1`
+        
+    - Sum by allotment: `SELECT allotment, SUM(pnl) … GROUP BY allotment ORDER BY 2 DESC`
+        
+
+If you also want **historical-as‑of** queries later, you already have them in `silver_position7_scd2` with `__START_AT`/`__END_AT`. You can build time-travel views on top if needed.
