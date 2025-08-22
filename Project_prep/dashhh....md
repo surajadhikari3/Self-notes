@@ -434,3 +434,110 @@ def silver_position_data_product():
 > Every column is from **position**, **except `cusip`**, which is taken from **instrument** after the join.
 
 If you want, I can add a small SCD‑2 layer for instruments and point the join to `is_current=true` records, plus show how to add Unity Catalog tags (`system_of_origin` on Bronze; `data_product=true`, `cdo_approved=true` on Silver).
+
+-----------------------------
+
+iiiii
+
+
+Great—use the **business event time** from your JSON (`timeContext.infoSetTime.$date`) as the SCD2 sequence column.
+
+Below is a **drop‑in replacement** for the _instruments conform + SCD2_ part of your DLT. It extracts that nested field (note the backticks around `$date`) and uses it as `_event_ts`. If it’s missing, we fall back to `current_timestamp()` so the pipeline never stalls.
+
+```python
+import dlt
+from pyspark.sql.functions import col, coalesce, current_timestamp, to_timestamp
+
+# ---------- Instruments → conform & UNION (event time from timeContext.infoSetTime.$date) ----------
+
+@dlt.view
+def silver_all_instruments_conform():
+    # GED: nested JSON path timeContext.infoSetTime.$date
+    ged = dlt.read_stream("bronze_ged_instrument").select(
+        col("code").alias("instrumentCode"),
+        col("identifier.cusip").alias("cusip"),
+        col("isin").alias("isin"),
+        # IMPORTANT: backticks around `$date`, then cast to timestamp (UTC string like 2025-08-20T23:59:59.999Z)
+        coalesce(
+            to_timestamp(col("timeContext.infoSetTime.`$date`")),
+            current_timestamp()
+        ).alias("_event_ts"),
+        col("_source_system") if "_source_system" in dlt.read("bronze_ged_instrument").columns else current_timestamp().alias("_source_system")
+    )
+
+    # Fixed Income (adjust if you also get timeContext there; otherwise keep fallback)
+    fi = dlt.read_stream("bronze_fi_instrument").select(
+        col("code").alias("instrumentCode"),
+        col("cusip").alias("cusip"),
+        col("isin").alias("isin"),
+        coalesce(
+            to_timestamp(col("timeContext.infoSetTime.`$date`")),  # keep if present, else fallback
+            current_timestamp()
+        ).alias("_event_ts"),
+        col("_source_system") if "_source_system" in dlt.read("bronze_fi_instrument").columns else current_timestamp().alias("_source_system")
+    )
+
+    # Commodities (same idea)
+    cmdty = dlt.read_stream("bronze_cmdty_instrument").select(
+        col("code").alias("instrumentCode"),
+        col("CUSIP").alias("cusip"),
+        col("isin").alias("isin"),
+        coalesce(
+            to_timestamp(col("timeContext.infoSetTime.`$date`")),
+            current_timestamp()
+        ).alias("_event_ts"),
+        col("_source_system") if "_source_system" in dlt.read("bronze_cmdty_instrument").columns else current_timestamp().alias("_source_system")
+    )
+
+    return ged.unionByName(fi, allowMissingColumns=True) \
+              .unionByName(cmdty, allowMissingColumns=True)
+
+# ---------- SCD2 using the business event time ----------
+
+dlt.create_target_table(
+    name="silver_instrument_scd2",
+    comment="SCD2 history of instruments (keyed by instrumentCode, sequenced by infoSetTime)"
+)
+
+dlt.apply_changes(
+    target="silver_instrument_scd2",
+    source="silver_all_instruments_conform",
+    keys=["instrumentCode"],
+    sequence_by=col("_event_ts"),                 # << uses infoSetTime.$date
+    stored_as_scd_type=2,
+    track_history_columns=["cusip", "isin", "_source_system"]
+)
+
+# ---------- Final join stays the same (joins positions to CURRENT instrument) ----------
+@dlt.table(
+  name="silver_position_data_product",
+  comment="Position Data Product (7 fields) joined to current instrument to fetch CUSIP"
+)
+def silver_position_data_product():
+    p = dlt.read_stream("silver_all_positions_conform").alias("p")
+    i = (spark.table("LIVE.silver_instrument_scd2")
+           .where("__END_AT IS NULL")
+           .select(col("instrumentCode"), col("cusip")))
+    return (p.join(i, on="instrumentCode", how="left")
+             .select(
+               col("p.allotment").alias("allotment"),
+               col("p.instrumentCode").alias("instrumentCode"),
+               col("p.positionId").alias("positionId"),
+               col("p.pnl").alias("pnl"),
+               col("p.mtm").alias("mtm"),
+               col("p.isin").alias("isin"),
+               col("i.cusip").alias("cusip")
+             ))
+```
+
+### Notes
+
+- The key trick is referencing the unusual field name: `col("timeContext.infoSetTime.`$date`")`.
+    
+- `to_timestamp(...)` will parse the ISO‑8601 string ending with `Z` (UTC). If you prefer, you can be explicit:  
+    `to_timestamp(col("timeContext.infoSetTime.`$date`"), "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")`.
+    
+- If other sources don’t have `timeContext.infoSetTime.$date`, they’ll fall back to `current_timestamp()`—feel free to replace with their own event-time field if available.
+    
+
+If you want, I can also wire in `validFrom/validTo` from your JSON into the SCD2 table for auditing (kept as additional history columns).
