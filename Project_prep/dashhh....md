@@ -1035,4 +1035,147 @@ This covers: _overall result → distribution → what’s driving it → risk l
 
 ---
 
-If you paste those queries and map the widget settings exactly as above, your “Position Data – Overall” page will be clear, executive‑friendly, and analytically useful. Want me to tailor the SQL to your exact catalog/schema path (I can drop in your `d4001-centralus...silver_position_data_product_scd2` full name)?
+ddddddd
+
+
+Perfect 👌 thanks for clarifying — I’ll take what I see from your screenshots and translate them into **Gold views** with your catalog/schema and with **Databricks SQL parameter syntax** (`:parameter` instead of `{{ }}`).
+
+From the screenshot your Silver table path looks like:
+
+```
+d4001-centralus-tdvip-tdsbi-catalog.silver.silver_position_data_product_scd2
+```
+
+So I’ll build Gold views under a new schema (let’s call it `gold`) inside the same catalog (`d4001-centralus-tdvip-tdsbi-catalog`).
+
+---
+
+# ✅ Exact Gold Views with `:source_system` parameter
+
+```sql
+-- 0) Base view: current snapshot from Silver SCD2
+CREATE OR REPLACE VIEW `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_current` AS
+SELECT *
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`silver`.`silver_position_data_product_scd2`
+WHERE is_current = true OR valid_to IS NULL;
+```
+
+---
+
+### 1) Position Data overall
+
+```sql
+CREATE OR REPLACE VIEW `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_overall` AS
+SELECT positionId,
+       instrumentCode,
+       allotment,
+       pnl,
+       mtm,
+       isin,
+       cusip,
+       source_system,
+       trade_date
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_current`;
+```
+
+Usage in dashboard query:
+
+```sql
+SELECT *
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_overall`
+WHERE source_system = :source_system;
+```
+
+---
+
+### 2) Position with the highest pnl
+
+```sql
+CREATE OR REPLACE VIEW `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_position_highest_pnl` AS
+WITH ranked AS (
+  SELECT *,
+         ROW_NUMBER() OVER (PARTITION BY source_system ORDER BY pnl DESC) AS rn
+  FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_current`
+)
+SELECT *
+FROM ranked
+WHERE rn = 1;
+```
+
+Usage:
+
+```sql
+SELECT *
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_position_highest_pnl`
+WHERE source_system = :source_system;
+```
+
+---
+
+### 3) Sum of pnl by allotment
+
+```sql
+CREATE OR REPLACE VIEW `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_sum_pnl_by_allotment` AS
+SELECT allotment,
+       source_system,
+       SUM(pnl) AS total_pnl
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_current`
+GROUP BY allotment, source_system;
+```
+
+Usage:
+
+```sql
+SELECT allotment, total_pnl
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_sum_pnl_by_allotment`
+WHERE source_system = :source_system
+ORDER BY total_pnl DESC;
+```
+
+---
+
+### 4) Top 10 instruments by total pnl
+
+```sql
+CREATE OR REPLACE VIEW `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_top10_instruments` AS
+WITH agg AS (
+  SELECT instrumentCode,
+         source_system,
+         SUM(pnl) AS total_pnl
+  FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_positions_current`
+  GROUP BY instrumentCode, source_system
+),
+ranked AS (
+  SELECT *,
+         ROW_NUMBER() OVER (PARTITION BY source_system ORDER BY total_pnl DESC) AS rn
+  FROM agg
+)
+SELECT instrumentCode, source_system, total_pnl
+FROM ranked
+WHERE rn <= 10;
+```
+
+Usage:
+
+```sql
+SELECT instrumentCode, total_pnl
+FROM `d4001-centralus-tdvip-tdsbi-catalog`.`gold`.`v_top10_instruments`
+WHERE source_system = :source_system
+ORDER BY total_pnl DESC;
+```
+
+---
+
+# 🔑 Key points
+
+- **Catalog/Schema**: I’ve put them under  
+    `d4001-centralus-tdvip-tdsbi-catalog.gold`
+    
+- **Parameter syntax**: all queries use `:source_system`.
+    
+- **Dashboard flow**: you don’t edit the view definition for parameters — you just filter in the dashboard query when pointing to the view.
+    
+
+---
+
+👉 Do you want me to also give you the **Job/DLT “materialized” table version** of these 4 queries (so dashboards don’t recompute every time), or are you planning to stick with **views first**?
