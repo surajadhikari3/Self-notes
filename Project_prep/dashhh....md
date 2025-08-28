@@ -1032,10 +1032,7 @@ This covers: _overall result → distribution → what’s driving it → risk l
     
 - **Refresh:** In Lakeview, set schedules **on the saved queries** (e.g., 5–15 min), then the dashboard auto‑updates.
     
-
----
-
-ddddddd
+---------------
 
 
 Perfect 👌 thanks for clarifying — I’ll take what I see from your screenshots and translate them into **Gold views** with your catalog/schema and with **Databricks SQL parameter syntax** (`:parameter` instead of `{{ }}`).
@@ -1177,5 +1174,72 @@ ORDER BY total_pnl DESC;
     
 
 ---
+oooo
 
-👉 Do you want me to also give you the **Job/DLT “materialized” table version** of these 4 queries (so dashboards don’t recompute every time), or are you planning to stick with **views first**?
+
+
+You’re drawing the wrong SVG 😊. The “hexagon” you’re seeing is from an octagon/stop-sign style path, not a shield.  
+Drop in this shield-with-check (same one used by lucide/heroicons) and it will match your first screenshot.
+
+### React SVG (drop-in)
+
+```tsx
+export const PiiIcon = ({ className }: { className?: string }) => (
+  <svg
+    viewBox="0 0 24 24"
+    width="14"
+    height="14"
+    className={className}
+    aria-hidden="true"
+  >
+    {/* Shield */}
+    <path
+      d="M12 2 5 5v5c0 5 3.5 9 7 11 3.5-2 7-6 7-11V5l-7-3z"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinejoin="round"
+    />
+    {/* Checkmark */}
+    <path
+      d="m9 12 2 2 4-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+```
+
+### Use in your pill
+
+```tsx
+<span className={`${styles.tagPill} ${styles.pii}`}>
+  <PiiIcon className={styles.tagIcon} />
+  PII
+</span>
+```
+
+### SCSS (what you already have is fine)
+
+```scss
+.tagPill {
+  display:inline-flex; align-items:center; gap:8px;
+  height:24px; padding:0 8px; border-radius:20px;
+  border:2px solid $input-stroke; background:$white; color:$black; font-size:12px;
+
+  &.pii { border-color:$primary-text-green; color:$primary-text-green; }
+  .tagIcon { width:14px; height:14px; display:inline-block; }
+}
+```
+
+> Tip: if you prefer a package, `lucide-react`’s icon is identical:
+
+```tsx
+import { ShieldCheck } from "lucide-react";
+// <ShieldCheck className={styles.tagIcon} size={14} strokeWidth={2} />
+```
+
+Replace your current `<path>` with the one above and the icon will render as the exact shield-with-check instead of the hexagon.
