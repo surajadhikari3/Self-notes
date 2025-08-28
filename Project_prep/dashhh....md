@@ -1243,3 +1243,64 @@ import { ShieldCheck } from "lucide-react";
 ```
 
 Replace your current `<path>` with the one above and the icon will render as the exact shield-with-check instead of the hexagon.
+
+
+---------------------------------------------------------
+
+Got it 👍 — you want the **shield background filled in green** and the **check mark in white** (instead of just strokes).
+
+That means we should:
+
+- Use `fill="currentColor"` on the shield path.
+    
+- Render the checkmark as a `path` with `stroke="white"` so it stays visible against the green fill.
+    
+
+Here’s the fixed version:
+
+```tsx
+export const PiiIcon = ({ className }: { className?: string }) => (
+  <svg
+    viewBox="0 0 24 24"
+    width="14"
+    height="14"
+    className={className}
+    aria-hidden="true"
+  >
+    {/* Shield filled green */}
+    <path
+      d="M12 2 5 5v5c0 5 3.5 9 7 11 3.5-2 7-6 7-11V5l-7-3z"
+      fill="currentColor"
+    />
+    {/* Check mark in white */}
+    <path
+      d="m9 12 2 2 4-4"
+      stroke="white"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    />
+  </svg>
+);
+```
+
+### SCSS (so `currentColor` = green)
+
+```scss
+.pii {
+  border-color: $primary-text-green;
+  color: $primary-text-green; // this becomes the fill of the shield
+}
+```
+
+That way:
+
+- `.pii` sets the icon’s **green fill** (from `currentColor`).
+    
+- The checkmark is hard-coded `white`, so it stays white regardless.
+    
+
+✅ This will give you exactly what your first screenshot shows: a solid green shield with a white checkmark.
+
+Do you also want me to tweak it so hover/focus can invert (white shield, green check) or should it always stay green background + white check?
