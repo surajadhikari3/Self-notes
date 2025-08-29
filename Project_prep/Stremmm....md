@@ -376,4 +376,330 @@ df_top10   = safe_query("Query: top 10 instruments", q_top10, (source_system,))
 5. **Firewall / Proxy** — on corporate networks Git Bash sometimes uses different proxies. If connection fails only in Git Bash, try in **PowerShell** or set `HTTPS_PROXY` env var if your org requires it.
     
 
-Once you see rows coming back, re-enable your charts below as before. If a query still doesn’t return, paste the error message that appears in the Streamlit page and I’ll pinpoint it.
+------------------------------------------------------------------
+
+
+Awesome—here’s a **one-shot** update that matches your schema:
+
+- `event_time` ➜ **`_event_ts`**
+    
+- add **`_start_at`** = current time (UTC)
+    
+- add **`_end_at`** = `null`
+    
+- **remove** `qty` and `price`
+    
+
+It’s two files: a CSV generator and the Streamlit dashboard. Copy/paste both as-is.
+
+---
+
+## 0) Install once
+
+```bash
+pip install streamlit pandas altair streamlit-autorefresh numpy
+```
+
+---
+
+## 1) CSV generator — `generate_csv.py`
+
+```python
+from __future__ import annotations
+import os
+import time
+import uuid
+import random
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+import numpy as np
+import pandas as pd
+
+# ---------------- Config ----------------
+HISTORY_MIN = 120          # keep last N minutes of data
+TICK_INTERVAL_SEC = 1.0    # how often to add new rows
+ROWS_PER_TICK = (30, 60)   # random rows per tick (min, max)
+
+SOURCES = ["GED", "FIXED INCOME", "COMMODITIES"]
+ALLOTMENTS = [
+    "GovernmentBond", "CorporateBond", "Futures", "Options",
+    "CryptoFund", "CommodityFund", "Equity", "RealEstateInvestmentUnit"
+]
+
+DATA_DIR = Path(__file__).with_name("data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+CSV_PATH = DATA_DIR / "positions.csv"
+TMP_PATH = DATA_DIR / "positions.tmp.csv"
+
+INSTRUMENTS = {
+    s: [f"{s.split()[0][:3].upper()}{i:05d}" for i in range(1, 101)]
+    for s in SOURCES
+}
+
+def rand_isin() -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return "".join(random.choices(alphabet, k=12))
+
+def rand_cusip() -> str:
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return "".join(random.choices(alphabet, k=9))
+
+def new_rows(now_utc: datetime) -> pd.DataFrame:
+    rows = []
+    n_rows = random.randint(*ROWS_PER_TICK)
+    for _ in range(n_rows):
+        src = random.choice(SOURCES)
+        instr = random.choice(INSTRUMENTS[src])
+        allot = random.choice(ALLOTMENTS)
+
+        # pnl centered near 0 with volatility
+        pnl = round(float(np.random.normal(loc=0.0, scale=300.0)), 2)
+        # mtm here is just pnl for demo (since qty/price were removed)
+        mtm = pnl
+
+        rows.append({
+            "_event_ts": now_utc.isoformat(),   # <- was event_time
+            "source_system": src,
+            "allotment": allot,
+            "instrumentCode": instr,
+            "positionId": str(uuid.uuid4()),
+            "pnl": pnl,
+            "mtm": mtm,
+            "isin": rand_isin(),
+            "cusip": rand_cusip(),
+            "_start_at": now_utc.isoformat(),   # <- new
+            "_end_at": None,                    # <- new, stays null
+        })
+    return pd.DataFrame(rows)
+
+def main():
+    print(f"Writing live CSV to: {CSV_PATH}")
+    df = pd.DataFrame()
+
+    # If file exists, start from it
+    if CSV_PATH.exists():
+        try:
+            df = pd.read_csv(CSV_PATH)
+            for col in ["_event_ts", "_start_at", "_end_at"]:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], utc=True, errors="coerce")
+        except Exception:
+            df = pd.DataFrame()
+
+    while True:
+        now = datetime.now(timezone.utc)
+        add = new_rows(now)
+
+        # types
+        for col in ["_event_ts", "_start_at", "_end_at"]:
+            add[col] = pd.to_datetime(add[col], utc=True, errors="coerce")
+
+        # append + keep time window
+        df = pd.concat([df, add], ignore_index=True)
+        cutoff = now - timedelta(minutes=HISTORY_MIN)
+        df = df[df["_event_ts"] >= cutoff].reset_index(drop=True)
+
+        # atomic replace so readers never see half-written file
+        df.to_csv(TMP_PATH, index=False)
+        os.replace(TMP_PATH, CSV_PATH)
+
+        # heartbeat
+        print(f"{now:%H:%M:%S} • rows: {len(df):6d} • last src: {add['source_system'].iloc[-1]}", end="\r")
+        time.sleep(TICK_INTERVAL_SEC)
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## 2) Streamlit dashboard — `app.py`
+
+```python
+import time
+from pathlib import Path
+
+import pandas as pd
+import altair as alt
+import streamlit as st
+
+# use helper if available (older Streamlit lacks st.autorefresh)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AUTO = True
+except Exception:
+    _HAS_AUTO = False
+
+st.set_page_config(page_title="DLT-like Parameterized Dashboard (CSV → Streamlit)", layout="wide")
+
+DATA_PATH = Path(__file__).with_name("data") / "positions.csv"
+SOURCE_CHOICES = ["GED", "FIXED INCOME", "COMMODITIES"]
+
+# ---------- Sidebar ----------
+with st.sidebar:
+    st.header("Controls")
+    refresh_ms = st.slider("Auto-refresh (ms)", 1000, 30000, 3000, step=1000)
+    lookback_min = st.slider("Lookback minutes", 1, 240, 30)
+    source_system = st.selectbox("source_system", SOURCE_CHOICES, index=0)
+
+# trigger rerun on a timer
+if _HAS_AUTO:
+    st_autorefresh(interval=refresh_ms, key="auto")
+else:
+    if "last_refresh" not in st.session_state:
+        st.session_state.last_refresh = 0.0
+    now = time.time()
+    if now - st.session_state.last_refresh >= (refresh_ms / 1000.0):
+        st.session_state.last_refresh = now
+        st.experimental_rerun()
+
+st.title("📊 DLT Parameterized Dashboard (Streamlit, near real-time)")
+st.caption("Local CSV generator → Streamlit. Choose a source system and watch it update.")
+
+# ---------- Data loader ----------
+@st.cache_data(ttl=2, show_spinner=False)
+def load_data(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(path)
+    if df.empty:
+        return df
+    # parse timestamps
+    for col in ["_event_ts", "_start_at", "_end_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    # numerics
+    for col in ("pnl", "mtm"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["_event_ts"])
+
+df_all = load_data(DATA_PATH)
+
+if df_all.empty:
+    st.warning(f"Waiting for data… ({DATA_PATH})")
+    st.stop()
+
+# filter by lookback + source_system (use _event_ts)
+cutoff = pd.Timestamp.utcnow() - pd.Timedelta(minutes=lookback_min)
+df = df_all[(df_all["_event_ts"] >= cutoff) & (df_all["source_system"] == source_system)].copy()
+
+if df.empty:
+    st.info("No rows in the selected window yet. Increase lookback or wait a moment.")
+    st.stop()
+
+# ---------- KPIs ----------
+last_ingest = df["_event_ts"].max().tz_convert("UTC")
+total_pnl = float(df["pnl"].sum())
+instruments = int(df["instrumentCode"].nunique())
+
+c1, c2, c3 = st.columns(3)
+c1.metric("Total P&L (window)", f"${total_pnl:,.2f}")
+c2.metric("Instruments", f"{instruments}")
+c3.metric("Last ingest (UTC)", last_ingest.strftime("%H:%M:%S"))
+
+# ---------- Tile 1: Position Data overall (table) ----------
+st.subheader("Position Data (overall)")
+cols = ["_event_ts","_start_at","_end_at","allotment","instrumentCode","positionId","pnl","mtm","isin","cusip"]
+present_cols = [c for c in cols if c in df.columns]
+st.dataframe(
+    df.sort_values("pnl", ascending=False)[present_cols],
+    use_container_width=True, height=340
+)
+
+# ---------- Tile 2: Highest P&L (KPI) ----------
+row_max = df.loc[df["pnl"].idxmax()]
+st.subheader("Highest P&L position")
+st.metric(
+    label=f"Max P&L • {row_max['instrumentCode']}",
+    value=f"${float(row_max['pnl']):,.2f}",
+    help=f"Allotment: {row_max['allotment']} • Position: {row_max['positionId']}"
+)
+
+# ---------- Tile 3: Sum of P&L by allotment (bar) ----------
+st.subheader("Sum of P&L by Allotment")
+by_allot = (
+    df.groupby("allotment", as_index=False)["pnl"]
+      .sum()
+      .rename(columns={"pnl": "total_pnl"})
+      .sort_values("total_pnl", ascending=False)
+)
+by_allot["sign"] = by_allot["total_pnl"].apply(lambda x: "Gain" if x >= 0 else "Loss")
+chart_allot = (
+    alt.Chart(by_allot)
+       .mark_bar()
+       .encode(
+           x=alt.X("total_pnl:Q", title="Total P&L"),
+           y=alt.Y("allotment:N", sort="-x", title=""),
+           color=alt.Color("sign:N",
+                           scale=alt.Scale(domain=["Gain","Loss"], range=["#22c55e","#ef4444"]),
+                           legend=None),
+           tooltip=[alt.Tooltip("total_pnl:Q", format=",.2f"), "allotment:N"]
+       )
+       .interactive()
+)
+st.altair_chart(chart_allot, use_container_width=True)
+
+# ---------- Tile 4: Top 10 instruments by P&L (bar) ----------
+st.subheader("Top 10 Instruments by P&L")
+by_instr = (
+    df.groupby("instrumentCode", as_index=False)["pnl"]
+      .sum()
+      .rename(columns={"pnl": "total_pnl"})
+      .sort_values("total_pnl", ascending=False)
+      .head(10)
+)
+by_instr["sign"] = by_instr["total_pnl"].apply(lambda x: "Gain" if x >= 0 else "Loss")
+chart_instr = (
+    alt.Chart(by_instr)
+       .mark_bar()
+       .encode(
+           x=alt.X("total_pnl:Q", title="Total P&L"),
+           y=alt.Y("instrumentCode:N", sort="-x", title=""),
+           color=alt.Color("sign:N",
+                           scale=alt.Scale(domain=["Gain","Loss"], range=["#22c55e","#ef4444"]),
+                           legend=None),
+           tooltip=[alt.Tooltip("total_pnl:Q", format=",.2f"), "instrumentCode:N"]
+       )
+       .interactive()
+)
+st.altair_chart(chart_instr, use_container_width=True)
+
+# -------- Optional: equity curve by minute --------
+st.subheader("Equity Curve (Cumulative P&L by minute)")
+df_min = df.copy()
+df_min["minute"] = df_min["_event_ts"].dt.floor("min")
+curve = df_min.groupby("minute", as_index=False)["pnl"].sum().sort_values("minute")
+curve["equity"] = curve["pnl"].cumsum()
+chart_curve = (
+    alt.Chart(curve)
+       .mark_line(point=True)
+       .encode(
+           x=alt.X("minute:T", title="Time (UTC)"),
+           y=alt.Y("equity:Q", title="Cumulative P&L"),
+           tooltip=["minute:T", alt.Tooltip("equity:Q", format=",.2f")]
+       )
+       .interactive()
+)
+st.altair_chart(chart_curve, use_container_width=True)
+```
+
+---
+
+## 3) Run it (two terminals)
+
+**Terminal A — generator**
+
+```bash
+python generate_csv.py
+```
+
+**Terminal B — dashboard**
+
+```bash
+python -m streamlit run app.py
+```
+
+Open the URL (usually `http://localhost:8501`).  
+Pick a **source_system** and you’ll see all 4 widgets updating in real time, with `_start_at` now and `_end_at` null, and `_event_ts` used for freshness and filtering.
