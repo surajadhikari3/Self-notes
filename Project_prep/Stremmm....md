@@ -706,8 +706,44 @@ Pick a **source_system** and you’ll see all 4 widgets updating in real time, w
 
 -----------------------------
 
-go...
+Awesome—since your SQL is returning rows now, here’s a **clean, drop-in Streamlit app** that builds the **exact four widgets** you asked for and uses **`_source_system`** (note the underscore) everywhere.
 
+It assumes these view names (from your screenshots). Change only if your names differ:
+
+- `v_position_overall`
+    
+- `v_position_with_highest_pnl`
+    
+- `v_sum_pnl_by_allotment`
+    
+- `v_top_ten_instruments`
+    
+
+---
+
+## Install (once)
+
+```bash
+pip install -U streamlit databricks-sql-connector pandas altair python-dotenv streamlit-autorefresh
+```
+
+---
+
+## `.env` (put beside `app.py`)
+
+```env
+DATABRICKS_SERVER_HOSTNAME=adb-xxxxxxxxxx.azuredatabricks.net
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/xxxxxxxxxxxx
+DATABRICKS_TOKEN=dapiex_********************************
+CATALOG=db001-centralus-tdvip-tdsbi_catalog
+SCHEMA=gold
+```
+
+---
+
+## `app.py` (copy–paste)
+
+```python
 import os
 import re
 import time
@@ -916,3 +952,27 @@ if not df_top10.empty:
     st.altair_chart(chart_top, use_container_width=True)
 else:
     st.info("No instrument data.")
+```
+
+---
+
+### Run
+
+```bash
+python -m streamlit run app.py
+```
+
+You’ll get:
+
+1. **Position Data (overall)** table
+    
+2. **Position with the highest P&L** detail
+    
+3. **Sum of P&L by allotment** (green/red)
+    
+4. **Top 10 instruments by P&L** (green/red)
+    
+
+…and a `_source_system` selector at the top. The page **auto-refreshes** on the interval you set.
+
+If your view names/columns differ slightly, tell me the exact names and I’ll tweak the SQL strings for you.
