@@ -703,3 +703,216 @@ python -m streamlit run app.py
 
 Open the URL (usually `http://localhost:8501`).  
 Pick a **source_system** and you’ll see all 4 widgets updating in real time, with `_start_at` now and `_end_at` null, and `_event_ts` used for freshness and filtering.
+
+-----------------------------
+
+go...
+
+import os
+import re
+import time
+from pathlib import Path
+
+import altair as alt
+import pandas as pd
+import streamlit as st
+from databricks import sql
+from dotenv import load_dotenv
+
+# ---------- load env ----------
+load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
+
+def _clean(name: str) -> str:
+    v = os.getenv(name, "") or ""
+    return v.strip().strip('"').strip("'")
+
+HOST   = _clean("DATABRICKS_SERVER_HOSTNAME")
+HPATH  = _clean("DATABRICKS_HTTP_PATH")
+TOKEN  = _clean("DATABRICKS_TOKEN")
+CATALOG = _clean("CATALOG")
+SCHEMA  = _clean("SCHEMA")
+
+# fail fast on a bad HTTP path
+if not re.fullmatch(r"/sql/1\.0/(endpoints|warehouses)/[A-Za-z0-9]+", HPATH or ""):
+    raise ValueError(
+        f"Bad DATABRICKS_HTTP_PATH: {repr(HPATH)}\n"
+        "Expected /sql/1.0/warehouses/<id> or /sql/1.0/endpoints/<id>"
+    )
+
+st.set_page_config(page_title="DLT Parameterized Dashboard (Streamlit)", layout="wide")
+
+# ---------- Databricks helpers ----------
+@st.cache_resource
+def get_conn():
+    return sql.connect(server_hostname=HOST, http_path=HPATH, access_token=TOKEN)
+
+@st.cache_data(ttl=5, show_spinner=False)
+def run_query(q: str, params: tuple = ()):
+    with get_conn().cursor() as c:
+        c.execute(q, params)
+        cols = [d[0] for d in c.description]
+        rows = c.fetchall()
+    return pd.DataFrame(rows, columns=cols)
+
+# ---------- Sidebar ----------
+with st.sidebar:
+    st.header("Controls")
+    refresh_ms = st.slider("Auto-refresh (ms)", 1000, 30000, 3000, step=1000)
+
+    with st.expander("Connection"):
+        st.write("Host:", HOST[:32] + "…")
+        st.write("HTTP path:", HPATH)
+        st.write("Catalog/Schema:", f"{CATALOG}.{SCHEMA}")
+        if st.button("Test connection"):
+            try:
+                st.success(f"OK → {run_query('SELECT 1 AS ok').iloc[0,0]}")
+            except Exception as e:
+                st.exception(e)
+
+# auto-refresh (works even on older Streamlit via helper)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=refresh_ms, key="auto")
+except Exception:
+    if "last_refresh" not in st.session_state:
+        st.session_state.last_refresh = 0.0
+    now = time.time()
+    if now - st.session_state.last_refresh >= (refresh_ms / 1000.0):
+        st.session_state.last_refresh = now
+        st.experimental_rerun()
+
+st.title("📊 DLT Parameterized Dashboard (Streamlit, near real-time)")
+st.caption(f"Catalog: {CATALOG} • Schema: {SCHEMA} • Polling every {refresh_ms/1000:.0f}s")
+
+# ---------- Load _source_system list ----------
+try:
+    ss_df = run_query(
+        f"SELECT DISTINCT _source_system FROM {CATALOG}.{SCHEMA}.v_position_overall ORDER BY 1"
+    )
+    if ss_df.empty:
+        st.warning("No _source_system values found in v_position_overall.")
+        st.stop()
+    SOURCE_CHOICES = ss_df["_source_system"].tolist()
+except Exception as e:
+    st.exception(e)
+    st.stop()
+
+source_system = st.selectbox("_source_system", SOURCE_CHOICES, index=0)
+
+# ---------- SQL text (uses _source_system) ----------
+q_overall = f"""
+SELECT allotment, instrumentCode, positionId, pnl, mtm, isin, cusip, _source_system
+FROM {CATALOG}.{SCHEMA}.v_position_overall
+WHERE _source_system = ?
+"""
+
+q_highest = f"""
+SELECT allotment, instrumentCode, positionId, pnl, mtm, isin, cusip, _source_system
+FROM {CATALOG}.{SCHEMA}.v_position_with_highest_pnl
+WHERE _source_system = ?
+ORDER BY pnl DESC
+LIMIT 1
+"""
+
+q_allot = f"""
+SELECT allotment, total_pnl
+FROM {CATALOG}.{SCHEMA}.v_sum_pnl_by_allotment
+WHERE _source_system = ?
+ORDER BY total_pnl DESC
+"""
+
+q_top10 = f"""
+SELECT instrumentCode, total_pnl
+FROM {CATALOG}.{SCHEMA}.v_top_ten_instruments
+WHERE _source_system = ?
+ORDER BY total_pnl DESC
+"""
+
+# ---------- Run queries ----------
+def safe(label, q, p):
+    try:
+        df = run_query(q, p)
+        st.success(f"{label}: {len(df)} rows")
+        return df
+    except Exception as e:
+        st.error(f"{label}: error")
+        st.exception(e)
+        st.stop()
+
+df_overall = safe("Query overall", q_overall, (source_system,))
+df_highest = safe("Query highest pnl", q_highest, (source_system,))
+df_allot   = safe("Sum pnl by allotment", q_allot, (source_system,))
+df_top10   = safe("Top 10 instruments", q_top10, (source_system,))
+
+# ---------- KPIs ----------
+total_pnl = float(df_overall["pnl"].sum()) if not df_overall.empty else 0.0
+inst_count = int(df_overall["instrumentCode"].nunique()) if not df_overall.empty else 0
+max_pnl = float(df_highest["pnl"].iloc[0]) if not df_highest.empty else 0.0
+max_inst = df_highest["instrumentCode"].iloc[0] if not df_highest.empty else "—"
+
+k1, k2, k3 = st.columns(3)
+k1.metric("Total P&L (filtered)", f"${total_pnl:,.2f}")
+k2.metric("Instruments", f"{inst_count}")
+k3.metric("Highest P&L", f"${max_pnl:,.2f}", help=f"Instrument: {max_inst}")
+
+# ---------- Widget 1: Position Data overall (table) ----------
+st.subheader("Position Data (overall)")
+cols = ["allotment","instrumentCode","positionId","pnl","mtm","isin","cusip"]
+show = df_overall.loc[:, cols].sort_values("pnl", ascending=False)
+st.dataframe(show, use_container_width=True, height=360)
+
+# ---------- Widget 2: Highest P&L (detail line) ----------
+st.subheader("Position with the highest P&L")
+if not df_highest.empty:
+    r = df_highest.iloc[0]
+    st.write(
+        f"**{r['instrumentCode']}** • Allotment: `{r['allotment']}` • "
+        f"Position: `{r['positionId']}` • P&L: **${float(r['pnl']):,.2f}** • "
+        f"MTM: ${float(r['mtm']):,.2f}"
+    )
+else:
+    st.info("No rows.")
+
+# ---------- Widget 3: Sum of P&L by allotment (bar) ----------
+st.subheader("Sum of P&L by allotment")
+if not df_allot.empty:
+    a = df_allot.copy()
+    a["sign"] = a["total_pnl"].apply(lambda x: "Gain" if x >= 0 else "Loss")
+    chart_allot = (
+        alt.Chart(a)
+        .mark_bar()
+        .encode(
+            x=alt.X("total_pnl:Q", title="Total P&L"),
+            y=alt.Y("allotment:N", sort="-x", title=""),
+            color=alt.Color("sign:N",
+                            scale=alt.Scale(domain=["Gain","Loss"], range=["#22c55e","#ef4444"]),
+                            legend=None),
+            tooltip=[alt.Tooltip("total_pnl:Q", format=",.2f"), "allotment:N"],
+        )
+        .interactive()
+    )
+    st.altair_chart(chart_allot, use_container_width=True)
+else:
+    st.info("No allotment data.")
+
+# ---------- Widget 4: Top 10 instruments by P&L (bar) ----------
+st.subheader("Top 10 instruments by P&L")
+if not df_top10.empty:
+    t = df_top10.copy().head(10)
+    t["sign"] = t["total_pnl"].apply(lambda x: "Gain" if x >= 0 else "Loss")
+    chart_top = (
+        alt.Chart(t)
+        .mark_bar()
+        .encode(
+            x=alt.X("total_pnl:Q", title="Total P&L"),
+            y=alt.Y("instrumentCode:N", sort="-x", title=""),
+            color=alt.Color("sign:N",
+                            scale=alt.Scale(domain=["Gain","Loss"], range=["#22c55e","#ef4444"]),
+                            legend=None),
+            tooltip=[alt.Tooltip("total_pnl:Q", format=",.2f"), "instrumentCode:N"],
+        )
+        .interactive()
+    )
+    st.altair_chart(chart_top, use_container_width=True)
+else:
+    st.info("No instrument data.")
