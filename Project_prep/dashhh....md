@@ -1304,3 +1304,33 @@ That way:
 ✅ This will give you exactly what your first screenshot shows: a solid green shield with a white checkmark.
 
 Do you also want me to tweak it so hover/focus can invert (white shield, green check) or should it always stay green background + white check?
+
+-------
+dash................
+
+
+Got it 👍 — you want **only CUSIP**, and if that’s `NULL` (or empty), then fall back to **ISIN**. No `instrumentCode` fallback.  
+Here’s the updated view definition:
+
+```sql
+CREATE OR REPLACE VIEW <catalog>.<schema>.gold.v_pnl_by_identifier AS
+SELECT
+  CASE
+    WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN cusip
+    ELSE isin
+  END                           AS identifier,
+  _source_system                AS source_system,
+  SUM(pnl)                      AS total_pnl
+FROM <catalog>.<schema>.silver_cdo_position_data_product_scd2
+GROUP BY
+  CASE
+    WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN cusip
+    ELSE isin
+  END,
+  _source_system;
+```
+
+✅ This will always pick **CUSIP first**, and if that’s missing/blank, it uses **ISIN**.  
+No instrument code included.
+
+Do you also want me to keep the **“Top 10” logic** (like in your original query with `ROW_NUMBER`), or just show **all rows grouped by CUSIP/ISIN**?
