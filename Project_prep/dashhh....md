@@ -1334,3 +1334,49 @@ GROUP BY
 No instrument code included.
 
 Do you also want me to keep the **“Top 10” logic** (like in your original query with `ROW_NUMBER`), or just show **all rows grouped by CUSIP/ISIN**?
+
+
+--------------------------------
+
+Perfect—here’s a “CUSIP else ISIN” **Top-10 by total PnL (per `_source_system`)** view.  
+It treats empty strings as nulls, excludes null identifiers, ranks by total PnL, and returns the top 10 per source system.
+
+```sql
+-- replace catalog/schema/table to match yours
+CREATE OR REPLACE VIEW <catalog>.<schema>.gold.v_top10_security_pnl AS
+WITH agg AS (
+  SELECT
+    /* Prefer CUSIP; if it's null/blank, use ISIN. No instrumentCode fallback. */
+    CASE
+      WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN TRIM(cusip)
+      ELSE NULLIF(TRIM(isin), '')
+    END AS identifier,
+    _source_system AS source_system,
+    SUM(pnl)       AS total_pnl
+  FROM <catalog>.<schema>.silver_cdo_position_data_product_scd2
+  GROUP BY
+    CASE
+      WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN TRIM(cusip)
+      ELSE NULLIF(TRIM(isin), '')
+    END,
+    _source_system
+),
+ranked AS (
+  SELECT
+    identifier,
+    source_system,
+    total_pnl,
+    ROW_NUMBER() OVER (PARTITION BY source_system ORDER BY total_pnl DESC) AS rn
+  FROM agg
+  WHERE identifier IS NOT NULL
+)
+SELECT identifier, source_system, total_pnl
+FROM ranked
+WHERE rn <= 10;
+```
+
+Notes:
+
+- Swap `ROW_NUMBER()` → `RANK()` if you want to include ties at the cutoff.
+    
+- If you want a **global** top-10 (not per `_source_system`), remove the `PARTITION BY source_system` and drop `source_system` from the `SELECT/GROUP BY`.
