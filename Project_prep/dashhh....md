@@ -1380,3 +1380,146 @@ Notes:
 - Swap `ROW_NUMBER()` → `RANK()` if you want to include ties at the cutoff.
     
 - If you want a **global** top-10 (not per `_source_system`), remove the `PARTITION BY source_system` and drop `source_system` from the `SELECT/GROUP BY`.
+
+---------------------------
+
+
+Sweet—let’s wire your dashboard to the new **CUSIP→ISIN** logic.
+
+# 1) Gold view(s)
+
+If you haven’t already, create a view that groups by “identifier = CUSIP else ISIN”:
+
+```sql
+-- v_pnl_by_identifier (all rows)
+CREATE OR REPLACE VIEW {CATALOG}.{SCHEMA}.gold.v_pnl_by_identifier AS
+SELECT
+  CASE
+    WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN cusip
+    ELSE isin
+  END                             AS identifier,          -- CUSIP first, else ISIN
+  _source_system                  AS _source_system,
+  SUM(pnl)                        AS total_pnl
+FROM {CATALOG}.{SCHEMA}.silver_cdo_position_data_product_scd2
+GROUP BY
+  CASE
+    WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN cusip
+    ELSE isin
+  END,
+  _source_system;
+```
+
+If you prefer a “top-10” view (so Python only selects+filters), add:
+
+```sql
+-- v_top10_identifiers (per source_system)
+CREATE OR REPLACE VIEW {CATALOG}.{SCHEMA}.gold.v_top10_identifiers AS
+WITH agg AS (
+  SELECT
+    CASE WHEN cusip IS NOT NULL AND TRIM(cusip) <> '' THEN cusip ELSE isin END AS identifier,
+    _source_system,
+    SUM(pnl) AS total_pnl
+  FROM {CATALOG}.{SCHEMA}.silver_cdo_position_data_product_scd2
+  GROUP BY 1, 2
+)
+SELECT identifier, _source_system, total_pnl
+FROM (
+  SELECT
+    identifier, _source_system, total_pnl,
+    ROW_NUMBER() OVER (PARTITION BY _source_system ORDER BY total_pnl DESC) AS rn
+  FROM agg
+)
+WHERE rn <= 10;
+```
+
+Either route works; below I show Python for the **generic view (v_pnl_by_identifier)** so you keep control of “top 10” in the app.
+
+---
+
+# 2) Streamlit – update the query and chart
+
+### A) Replace the old query block that referenced `v_top_ten_instruments` and `instrumentCode`
+
+```python
+# was: query_top10_instrumentCode
+query_top10_identifier = f"""
+SELECT identifier, total_pnl
+FROM {CATALOG}.{SCHEMA}.gold.v_pnl_by_identifier
+WHERE _source_system = ?
+ORDER BY total_pnl DESC
+LIMIT 10
+"""
+```
+
+_(If you decided to use the SQL “top-10” view instead, just change the FROM to  
+`{CATALOG}.{SCHEMA}.gold.v_top10_identifiers` and drop LIMIT 10 — the rest stays the same.)_
+
+### B) Where you run queries, fetch the new df
+
+```python
+df_top10 = query_with_label_and_rowcount(
+    "Top 10 instruments by P&L (CUSIP→ISIN)", 
+    query_top10_identifier, 
+    (source_system,)
+)
+```
+
+### C) Update the KPI helper variables (optional)
+
+If you display counts or names elsewhere that previously used `instrumentCode`, switch to `identifier`:
+
+```python
+top_identifier = df_top10["identifier"].iloc[0] if not df_top10.empty else ""
+```
+
+### D) Update the Altair chart render
+
+Replace the widget section that encoded `instrumentCode` with `identifier`:
+
+```python
+import altair as alt
+import pandas as pd
+import streamlit as st
+
+if not df_top10.empty:
+    # Add a sign label for color
+    df_top10 = df_top10.copy()
+    df_top10["pnl_sign"] = df_top10["total_pnl"].apply(lambda v: "Gain" if v >= 0 else "Loss")
+
+    st.subheader("🔟 Top 10 identifiers by P&L (CUSIP→ISIN)")
+
+    chart_top = (
+        alt.Chart(df_top10)
+        .mark_bar()
+        .encode(
+            x=alt.X("identifier:N", sort="-y", title="CUSIP / ISIN"),
+            y=alt.Y("total_pnl:Q", title="Total P&L"),
+            tooltip=[
+                alt.Tooltip("identifier:N", title="Identifier (CUSIP→ISIN)"),
+                alt.Tooltip("total_pnl:Q", title="Total P&L", format=",.2f")
+            ],
+            color=alt.Color("pnl_sign:N", legend=None, scale=alt.Scale(domain=["Gain","Loss"], range=["#22C55E","#EF4444"]))
+        )
+        .properties(height=360)
+        .interactive()
+    )
+
+    st.altair_chart(chart_top, use_container_width=True)
+else:
+    st.info("No identifier data.")
+```
+
+---
+
+## What changed (quick checklist)
+
+- SQL: **No `instrumentCode`**; identifier = `CUSIP` else `ISIN`.
+    
+- Python query: `SELECT identifier, total_pnl FROM ... v_pnl_by_identifier`.
+    
+- Chart axes/tooltips: **`identifier`** instead of `instrumentCode`.
+    
+- Optional: if you had KPIs using instrument count/name → switch to `identifier`.
+    
+
+Plug these in and your “Top 10” bar will now show **CUSIP** (or **ISIN** when CUSIP is null) against **Total P&L**.
