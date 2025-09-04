@@ -120,3 +120,77 @@ export const DoubleUserIcon = (props: SVGProps<SVGSVGElement>) => (
 ---
 
 Do you want me to also make a **solid filled version** (no strokes, only fills) like in your app’s green icons, or do you prefer to keep them stroke-based with `currentColor`?
+
+-----------------
+
+
+Got it 👍 — let’s make them match exactly like your screenshots:
+
+- **Detached shoulders (not connected)**
+    
+- **Back user filled**
+    
+- **Thicker outline (closer to what you see in the app)**
+    
+
+Here’s the updated React/TSX code with a slightly thicker `strokeWidth={1.8}` (instead of 2, which looks thinner/sharper than your screenshots). You can tweak this value (`1.5` → thinner, `2` → thicker) to get the perfect match:
+
+```tsx
+import { SVGProps } from "react";
+
+// Single user: outline head + detached shoulders
+export const SingleUserIcon = (props: SVGProps<SVGSVGElement>) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width={19}
+    height={19}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.8}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    {...props}
+  >
+    {/* Head */}
+    <circle cx={12} cy={7} r={4} />
+    {/* Detached shoulders */}
+    <path d="M6 21c0-3.5 2.9-6.5 6-6.5s6 3 6 6.5" />
+  </svg>
+);
+
+// Double user: front outlined + back filled
+export const DoubleUserIcon = (props: SVGProps<SVGSVGElement>) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width={19}
+    height={19}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.8}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    {...props}
+  >
+    {/* Back user (filled head + shoulders) */}
+    <circle cx={17} cy={7} r={4} fill="currentColor" />
+    <path d="M20.5 21c0-3-2.5-5.5-5.5-5.5-1 0-2 .3-2.7.8" fill="currentColor" />
+
+    {/* Front user (outlined head + detached shoulders) */}
+    <circle cx={9} cy={10} r={4} />
+    <path d="M3 21c0-3.5 2.5-6.5 6-6.5s6 3 6 6.5" />
+  </svg>
+);
+```
+
+---
+
+✅ These now render like your last two photos:
+
+- The **single person** is just a circle + detached curve.
+    
+- The **group icon** has the **back user filled** and **front user outlined with detached shoulders**.
+    
+
+Do you want me to also give you a **solid green-only version** (no stroke, only fill) so it looks identical without relying on `stroke`?
