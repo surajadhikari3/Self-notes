@@ -6,7 +6,7 @@ Contradictions: However, Nonetheless, Nevertheless, Although,  instead of, in sp
 Conclusions: thereby, overall, consequently, Conclusively, hence, therefore,  to sum up, summing up
 
 --------------------------
-Writing Task 1:
+Writing Task 1: (Informal....)
 
 Dear .........(write name for the informal)....
 
@@ -24,6 +24,14 @@ Dear .........(write name for the informal)....
 
 Best Regards, 
 Charlie (No full name in the informal letter.........)
+
+
+-------------------------------
+
+Formal.....................
+
+
+
 
 
 
