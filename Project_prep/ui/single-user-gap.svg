@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 24 24" fill="none" stroke="#167A3A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Head (outline, detached) -->
+  <circle cx="12" cy="7" r="4"/>
+  <!-- Shoulders/body (detached, gap below head) -->
+  <path d="M4 21h16v-2c0-4-4-7-8-7s-8 3-8 7v2z"/>
+</svg>

@@ -208,8 +208,9 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "2c21ca8d70617dda",
+  "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
+    "Project_prep/ui/single-user-gap.svg",
     "----------.md",
     "Project_prep/ui/ui....md",
     "Celpip/Vocabs and basics.md",
@@ -237,7 +238,6 @@
     "Interviews/Mohan TD interview.md",
     "Interviews/Mohan.md",
     "Gems/To Dos.md",
-    "Gems/SSL (Two way SSL ).md",
     "Rest-api",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",
