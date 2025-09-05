@@ -41,12 +41,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/ui/ui....md",
+                "file": "Project_prep/fill............md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "ui..."
+              "title": "fill..........."
             }
           }
         ],
@@ -208,11 +208,13 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "21a7aecd5be464f6",
+  "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
+    "Project_prep/User.md",
+    "Project_prep/fill............md",
+    "Project_prep/ui/ui....md",
     "Project_prep/ui/single-user-gap.svg",
     "----------.md",
-    "Project_prep/ui/ui....md",
     "Celpip/Vocabs and basics.md",
     "Project_prep/ui",
     "Project_prep/dashhh....md",
@@ -237,7 +239,6 @@
     "Interviews/On-class interview -Mohan.md",
     "Interviews/Mohan TD interview.md",
     "Interviews/Mohan.md",
-    "Gems/To Dos.md",
     "Rest-api",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",
@@ -255,7 +256,6 @@
     "Pasted image 20250708171659.png",
     "Coding things/linux_command_cheatsheet.pdf",
     "Pasted image 20250702131227.png",
-    "Pasted image 20250702125723.png",
     "Untitled 2.canvas",
     "Untitled 1.canvas",
     "Untitled.canvas"
