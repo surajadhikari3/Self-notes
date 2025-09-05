@@ -279,3 +279,195 @@ ORDER BY slot_ts;
     
 
 This version stays simple, avoids cross-day logic, and focuses exactly on your requirement: **same snapshots per day per ticker/tenor, fill only where null.**
+
+
+----------------------------
+
+    
+
+> Replace the catalog/table names and checkpoint path to match your workspace.  
+> If your symbol/tenor/timestamp columns are named differently, edit `KEY_TICKER`, `KEY_TENOR`, `TIME_COL`.
+
+```python
+# Databricks / PySpark
+
+from pyspark.sql import functions as F, Window as W
+
+# ============================
+# CONFIG — edit these
+# ============================
+CATALOG   = "d4001-centralus-tdvip-tdsbi_catalog"
+SILVER_TB = f"`{CATALOG}`.silver.optionsfo_silver"
+GOLD_TB   = f"`{CATALOG}`.gold.optionsfo_filled"
+
+KEY_TICKER = "ticker_tk"    # change if your symbol column is named differently
+KEY_TENOR  = "days"         # tenor column (integer “days” visible in your screenshots)
+TIME_COL   = "date"         # your event time column (contains date+time)
+
+# 🔒 Hard-code exactly the volatility fields to backfill
+VOL_COLS = [
+    "volD10", "volD20", "volD30", "volD40", "volD50", "volD60",
+    "volATM", "vWidth",
+    # add/remove any you need — only these will be filled
+]
+
+CHECKPOINT_PATH = "/Volumes/your_volume/_chk/optionsfo_filled"  # <-- change
+
+# ============================
+# HELPERS
+# ============================
+def _floor_to_30min(colname: str):
+    secs = 30 * 60
+    return F.from_unixtime(F.floor(F.col(colname).cast("long") / secs) * secs).cast("timestamp")
+
+def _require_columns(df, cols):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise Exception(f"Missing required column(s): {missing}")
+
+# ============================
+# foreachBatch
+# ============================
+def backfill_microbatch(mb_df, batch_id: int):
+    # 0) Normalize time & filter current micro-batch to RegularMkt
+    df = (
+        mb_df
+        .filter(F.col("tradingSession") == "RegularMkt")
+        .withColumn("event_ts", F.col(TIME_COL).cast("timestamp"))
+        .withColumn("tradingDate", F.to_date("event_ts"))
+        .withColumn("slot_ts", _floor_to_30min("event_ts"))
+    )
+
+    # Identify affected trading dates to keep recompute small & idempotent
+    dates = [r["tradingDate"] for r in df.select("tradingDate").distinct().collect()]
+    if not dates:
+        return
+
+    # 1) Re-read Silver for ONLY those dates (so late/replayed data recomputes cleanly)
+    base = (
+        spark.read.table(SILVER_TB)
+        .filter(F.col("tradingSession") == "RegularMkt")
+        .withColumn("event_ts", F.col(TIME_COL).cast("timestamp"))
+        .withColumn("tradingDate", F.to_date("event_ts"))
+        .withColumn("slot_ts", _floor_to_30min("event_ts"))
+        .filter(F.col("tradingDate").isin(dates))
+    )
+
+    if base.head(1) == []:
+        return
+
+    # 2) Guardrails: required columns must exist
+    _require_columns(base, ["tradingDate", "slot_ts", KEY_TICKER, KEY_TENOR, "event_ts"])
+    # Only keep the columns we actually need
+    keep_cols = ["tradingDate", KEY_TICKER, KEY_TENOR, "event_ts", "slot_ts"] + VOL_COLS
+    base = base.select(*[c for c in keep_cols if c in base.columns])
+
+    # 3) Deduplicate rows within the same 30-min slot (keep latest by event_ts)
+    w_slot = W.partitionBy("tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts").orderBy(F.col("event_ts").desc())
+    latest_in_slot = (
+        base.withColumn("_rn", F.row_number().over(w_slot))
+            .filter(F.col("_rn") == 1)
+            .drop("_rn")
+    )
+
+    if latest_in_slot.head(1) == []:
+        return
+
+    # 4) Build a uniform 30-min grid per day from min→max (no hardcoded market hours)
+    bounds = (
+        latest_in_slot.groupBy("tradingDate")
+        .agg(F.min("slot_ts").alias("min_ts"), F.max("slot_ts").alias("max_ts"))
+    )
+    grid = (
+        bounds
+        .withColumn("slot_ts", F.explode(F.expr("sequence(min_ts, max_ts, interval 30 minutes)")))
+        .select("tradingDate", "slot_ts")
+    )
+    if grid.head(1) == []:
+        return
+
+    keys = latest_in_slot.select("tradingDate", KEY_TICKER, KEY_TENOR).distinct()
+
+    full_grid = (
+        keys.join(grid, "tradingDate", "inner")
+            .select("tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts")
+    )
+
+    # 5) Join grid ⟵ latest snapshots (produces NULLs for missing slots)
+    joined = full_grid.join(
+        latest_in_slot.select("tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts", *VOL_COLS),
+        ["tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts"],
+        "left"
+    )
+
+    # 6) Forward-fill only when NULL (stay within the day; no cross-day seeding)
+    w_ff = (
+        W.partitionBy("tradingDate", KEY_TICKER, KEY_TENOR)
+         .orderBy("slot_ts")
+         .rowsBetween(W.unboundedPreceding, 0)
+    )
+
+    filled = joined
+    for c in VOL_COLS:
+        # last non-null so far; coalesce keeps true (non-null) values, fills only the nulls
+        last_non_null = F.last(F.when(F.col(c).isNotNull, F.col(c)), ignorenulls=True).over(w_ff)
+        filled = filled.withColumn(f"{c}_bf", F.coalesce(F.col(c), last_non_null))
+
+    # 7) Write Gold — overwrite only changed (tradingDate, ticker, days) partitions
+    spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+    (
+        filled
+        .repartition("tradingDate", KEY_TICKER, KEY_TENOR)  # good shuffle partitioning for targeted overwrite
+        .write
+        .format("delta")
+        .mode("overwrite")
+        .partitionBy("tradingDate", KEY_TICKER, KEY_TENOR)
+        .saveAsTable(GOLD_TB)
+    )
+
+# ============================
+# Start the stream
+# ============================
+(
+    spark.readStream.table(SILVER_TB)
+    .writeStream
+    .foreachBatch(backfill_microbatch)
+    .outputMode("update")  # the batch writer controls final writes
+    .option("checkpointLocation", CHECKPOINT_PATH)
+    .start()
+)
+```
+
+## Why this meets your exact requirement
+
+- **Same number of snapshots/day per key**: we build a **30-min grid** from `min(slot_ts)`→`max(slot_ts)` for each **tradingDate** and **cross it** with all `(ticker_tk, days)` keys seen that day. That forces a uniform row count across keys.
+    
+- **Only fill when null**: for every hard-coded vol field in `VOL_COLS`, we compute the **last non-null so far** and `COALESCE(original, last_non_null)`. Real non-nulls stay untouched; gaps get filled.
+    
+- **Duplicates per slot**: handled by keeping the **latest** row in that slot (`row_number` over `event_ts desc`).
+    
+- **No cross-day carry**: the window partitions by `tradingDate`, so filling never reads the previous day.
+    
+- **Idempotent daily recompute**: each micro-batch recomputes **only the affected trading dates** from Silver and **overwrites those partitions** in Gold (dynamic partition overwrite). Late data or replays won’t corrupt results.
+    
+
+## Quick validations
+
+```sql
+-- 1) Uniform slot counts per key for a day
+SELECT tradingDate, ticker_tk, days, COUNT(*) AS slots
+FROM   d4001-centralus-tdvip-tdsbi_catalog.gold.optionsfo_filled
+WHERE  tradingDate = DATE '2025-08-23'
+GROUP BY 1,2,3
+ORDER BY 1,2,3;
+
+-- 2) “fill only when null” check
+SELECT slot_ts, volD40, volD40_bf
+FROM   d4001-centralus-tdvip-tdsbi_catalog.gold.optionsfo_filled
+WHERE  tradingDate = DATE '2025-08-23'
+  AND  ticker_tk = 'SPY'
+  AND  days = 10
+ORDER BY slot_ts;
+```
+
+If you want me to pre-populate `VOL_COLS` with **your exact names** (from your table schema), paste them and I’ll drop them in so you can run it verbatim.
