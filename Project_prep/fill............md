@@ -471,3 +471,196 @@ ORDER BY slot_ts;
 ```
 
 If you want me to pre-populate `VOL_COLS` with **your exact names** (from your table schema), paste them and I’ll drop them in so you can run it verbatim.
+
+
+----------------------------------------------
+
+
+Gotcha — you just want each 30-minute row to also show an `event_ts` value (even when the slot was missing and got filled). Easiest/safest way: **add one extra column** that forward-fills the raw `event_ts` the same way we fill the vol fields. I’ll keep everything else the same and make it super simple.
+
+Below is the lean `foreachBatch` that:
+
+- fills your volatility columns **in place** (no `_bf`),
+    
+- **adds** `event_ts_filled` which is present on **every 30-min row**,
+    
+- keeps the original `event_ts` untouched (so you can still see where data actually arrived).
+    
+
+```python
+# Databricks / PySpark — in-place backfill + add event_ts_filled per 30-min slot
+
+from pyspark.sql import functions as F, Window as W
+
+# ======== CONFIG (edit to your env) ========
+CATALOG   = "d4001-centralus-tdvip-tdsbi_catalog"
+SILVER_TB = f"`{CATALOG}`.silver.optionsfo_silver"
+GOLD_TB   = f"`{CATALOG}`.gold.optionsfo_filled"
+
+KEY_TICKER = "ticker_tk"   # symbol column
+KEY_TENOR  = "days"        # tenor column
+TIME_COL   = "date"        # contains date+time (your raw event time)
+
+# Vol columns to fill in place
+VOL_COLS = [
+    "volD10","volD20","volD30","volD40","volD50","volD60",
+    "volATM","vWidth"
+]
+
+CHECKPOINT_PATH = "/Volumes/your_volume/_chk/optionsfo_filled"
+STRICT_VOL_SCHEMA = False   # True -> fail if any VOL_COLS missing
+
+# ======== HELPERS ========
+def _floor_to_30min(colname: str):
+    secs = 30 * 60
+    return F.from_unixtime(F.floor(F.col(colname).cast("long")/secs)*secs).cast("timestamp")
+
+def _assert_columns(df, cols, ctx=""):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise Exception(f"[{ctx}] Missing column(s): {missing}. Present: {df.columns}")
+
+def _present_vols(df, wanted):
+    present = [c for c in wanted if c in df.columns]
+    missing = [c for c in wanted if c not in df.columns]
+    return present, missing
+
+# ======== foreachBatch ========
+def backfill_microbatch(mb_df, batch_id: int):
+    # Normalize & filter micro-batch
+    df = (
+        mb_df
+        .filter(F.col("tradingSession") == "RegularMkt")
+        .withColumn("event_ts", F.col(TIME_COL).cast("timestamp"))
+        .withColumn("tradingDate", F.to_date("event_ts"))
+        .withColumn("slot_ts", _floor_to_30min("event_ts"))
+    )
+
+    # Affected days only
+    dates = [r["tradingDate"] for r in df.select("tradingDate").distinct().collect()]
+    if not dates:
+        return
+
+    # Re-read Silver for those days (idempotent recompute)
+    base = (
+        spark.read.table(SILVER_TB)
+        .filter(F.col("tradingSession") == "RegularMkt")
+        .withColumn("event_ts", F.col(TIME_COL).cast("timestamp"))
+        .withColumn("tradingDate", F.to_date("event_ts"))
+        .withColumn("slot_ts", _floor_to_30min("event_ts"))
+        .filter(F.col("tradingDate").isin(dates))
+    )
+    if base.head(1) == []:
+        return
+
+    _assert_columns(base, [TIME_COL,"tradingDate","slot_ts",KEY_TICKER,KEY_TENOR,"event_ts"], "base")
+
+    vol_present, vol_missing = _present_vols(base, VOL_COLS)
+    if vol_missing:
+        if STRICT_VOL_SCHEMA:
+            raise Exception(f"[vol schema] Missing volatility columns: {vol_missing}")
+        else:
+            print(f"[vol schema] Missing vol columns (skipped): {vol_missing}")
+    if not vol_present:
+        print("[vol schema] No requested vol columns present; nothing to fill for these dates.")
+        return
+
+    keep_cols = ["tradingDate", KEY_TICKER, KEY_TENOR, "event_ts", "slot_ts"] + vol_present
+    base = base.select(*keep_cols)
+
+    # Deduplicate inside each 30-min slot (keep latest by event_ts)
+    w_slot = W.partitionBy("tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts").orderBy(F.col("event_ts").desc())
+    latest_in_slot = (
+        base.withColumn("_rn", F.row_number().over(w_slot))
+            .filter(F.col("_rn")==1)
+            .drop("_rn")
+    )
+    if latest_in_slot.head(1) == []:
+        return
+
+    # Build min→max grid of 30-min slots per day
+    bounds = (
+        latest_in_slot.groupBy("tradingDate")
+        .agg(F.min("slot_ts").alias("min_ts"), F.max("slot_ts").alias("max_ts"))
+    )
+    grid = (
+        bounds
+        .withColumn("slot_ts", F.explode(F.expr("sequence(min_ts, max_ts, interval 30 minutes)")))
+        .select("tradingDate","slot_ts")
+    )
+    if grid.head(1) == []:
+        return
+
+    # keys × grid → full scaffold for every (day, ticker, tenor, slot)
+    keys = latest_in_slot.select("tradingDate", KEY_TICKER, KEY_TENOR).distinct()
+    full_grid = keys.join(grid, "tradingDate", "inner").select("tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts")
+
+    # Left-join real snapshots (carry event_ts so we can fill it too)
+    joined = full_grid.join(
+        latest_in_slot.select("tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts", "event_ts", *vol_present),
+        ["tradingDate", KEY_TICKER, KEY_TENOR, "slot_ts"],
+        "left"
+    )
+
+    # Forward-fill window (within a day/ticker/tenor, earliest→latest)
+    w_ff = (
+        W.partitionBy("tradingDate", KEY_TICKER, KEY_TENOR)
+         .orderBy("slot_ts")
+         .rowsBetween(W.unboundedPreceding, 0)
+    )
+
+    filled = joined
+
+    # 1) Add event_ts_filled: last non-null event_ts up to this slot
+    event_ts_ff = F.last(F.when(F.col("event_ts").isNotNull(), F.col("event_ts")), ignorenulls=True).over(w_ff)
+    filled = filled.withColumn("event_ts_filled", event_ts_ff)
+
+    # 2) Fill each vol column only when NULL (in place)
+    for c in vol_present:
+        last_non_null = F.last(F.when(F.col(c).isNotNull(), F.col(c)), ignorenulls=True).over(w_ff)
+        filled = filled.withColumn(c, F.coalesce(F.col(c), last_non_null))
+
+    # Write: overwrite only the affected (tradingDate, ticker, days) partitions
+    spark.conf.set("spark.sql.sources.partitionOverwriteMode","dynamic")
+    (
+        filled
+        .repartition("tradingDate", KEY_TICKER, KEY_TENOR)
+        .write
+        .format("delta")
+        .mode("overwrite")
+        .partitionBy("tradingDate", KEY_TICKER, KEY_TENOR)
+        .saveAsTable(GOLD_TB)
+    )
+
+# ======== start / restart the stream ========
+(
+    spark.readStream.table(SILVER_TB)
+    .writeStream
+    .foreachBatch(backfill_microbatch)
+    .outputMode("update")
+    .option("checkpointLocation", CHECKPOINT_PATH)
+    .start()
+)
+```
+
+### How to use it
+
+- `event_ts` = original snapshot time (null for missing slots).
+    
+- `event_ts_filled` = **always populated** per 30-min slot, showing the most recent real snapshot time **earlier that day**.  
+    That’s the “time frame” you wanted to display for each slot, even when we had to fill.
+    
+
+If you’d rather **replace** `event_ts` instead of adding `event_ts_filled`, change the line:
+
+```python
+filled = filled.withColumn("event_ts_filled", event_ts_ff)
+```
+
+to
+
+```python
+filled = filled.withColumn("event_ts", F.coalesce(F.col("event_ts"), event_ts_ff))
+```
+
+(then skip adding a new column).
