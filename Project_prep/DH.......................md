@@ -368,3 +368,97 @@ If Java 17+ is installed, you should now see it come up cleanly. Open **[http://
 ---
 
 If you want, paste the very first 10–15 lines of output after you run the command above. If there’s still an error, I’ll diagnose it from the exact message and tweak the property names/paths accordingly.
+
+
+----------------------
+
+
+Thanks for the screenshot—this tells us exactly what’s going on.
+
+### What the error means
+
+Deephaven is trying to use a **layouts directory at `/layouts`** and it can’t find it:
+
+```
+Invalid ARGUMENT: Invalid path: /layouts
+...
+FilesystemStorageServiceGrpcImpl.Factory
+```
+
+On Windows, a path like `/layouts` resolves to `C:\layouts`. Since that folder doesn’t exist, the server fails during startup.
+
+### Fastest fix (2 commands)
+
+Create the two folders Deephaven expects and start again:
+
+```bash
+# in Git Bash
+mkdir -p /c/layouts
+mkdir -p /c/Users/TAP3507/.dh_py
+```
+
+Then run your start script again with your venv’s Python:
+
+```bash
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  /c/Users/TAP3507/dh-local/start_dh.py
+```
+
+Open: [http://localhost:10000/ide/](http://localhost:10000/ide/)
+
+---
+
+## Why this happens
+
+- Deephaven loads default config from  
+    `C:\Users\TAP3507\AppData\Roaming\Deephaven Data Labs\deephaven\config`  
+    and in that config, the **layouts path** defaults to `/layouts`.
+    
+- Because that folder doesn’t exist, the server aborts.
+    
+- Creating `C:\layouts` (i.e., `/layouts` from Git Bash) satisfies the config and the server will start.
+    
+
+---
+
+## Optional: avoid using `C:\layouts`
+
+If you prefer to keep everything under your user directory, create your own start script that **overrides** the default paths (this avoids `/layouts` entirely):
+
+```python
+# start_dh.py  (place in C:\Users\TAP3507\dh-local)
+import os
+from deephaven_server import Server
+
+WORKSPACE = r"C:\Users\TAP3507\dh-local\workspace"
+LAYOUTS   = r"C:\Users\TAP3507\dh-local\layouts"
+
+os.makedirs(WORKSPACE, exist_ok=True)
+os.makedirs(LAYOUTS,   exist_ok=True)
+
+jvm_args = [
+    "-Xmx2g",
+    f"-Ddeephaven.workspace={WORKSPACE}",
+    f"-Ddeephaven.layouts.dir={LAYOUTS}",
+]
+
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven IDE → http://localhost:10000/ide/  (Ctrl+C to stop)")
+import time; time.sleep(10**9)
+```
+
+Run it:
+
+```bash
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  /c/Users/TAP3507/dh-local/start_dh.py
+```
+
+> If this still falls back to `/layouts`, it means your local default config is overriding the properties. The quick workaround is the **first method** (just create `C:\layouts`). We can later adjust the config file in `AppData\Roaming\Deephaven Data Labs\deephaven\config` to point layouts elsewhere.
+
+---
+
+## If anything still fails
+
+Send me the **first 10–15 lines** after you start the script (just the header + the first exception line). But in most cases, creating `C:\layouts` (and `C:\Users\TAP3507\.dh_py`) makes the server boot immediately.
