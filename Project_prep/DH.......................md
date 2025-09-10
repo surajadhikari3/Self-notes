@@ -1457,3 +1457,72 @@ ldd "$JAVA_HOME/lib/server/libjvm.so" | head -20
 ```
 
 This setup addresses exactly what your screenshots show: `deephaven_server` calling into `start_jvm` → failing because `JAVA_HOME`/`LD_LIBRARY_PATH` weren’t exposing `libjvm.so`/`libjli.so`.
+
+----------------------------------
+
+Got it 👍 since your PowerShell isn’t working, you can run this from **Git Bash** or **WSL bash**.
+
+The key is to **unset** the environment variables that are injecting the bad `/layout` path.
+
+---
+
+### 🔹 Step 1: Check what’s set
+
+```bash
+echo $_JAVA_OPTIONS
+echo $JAVA_TOOL_OPTIONS
+echo $DH_LAYOUT_DIR
+echo $DEEPHAVEN_LAYOUT_DIR
+echo $DEEPHAVEN_CONFIG_DIR
+echo $DEEPHAVEN_CACHE_DIR
+echo $DEEPHAVEN_DATA_DIR
+```
+
+If you see `/layout` in any of them → that’s the culprit.
+
+---
+
+### 🔹 Step 2: Unset them (for this shell session)
+
+```bash
+unset _JAVA_OPTIONS
+unset JAVA_TOOL_OPTIONS
+unset DH_LAYOUT_DIR
+unset DEEPHAVEN_LAYOUT_DIR
+unset DEEPHAVEN_CONFIG_DIR
+unset DEEPHAVEN_CACHE_DIR
+unset DEEPHAVEN_DATA_DIR
+```
+
+---
+
+### 🔹 Step 3: Start Deephaven clean
+
+If you’re in **WSL**:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip wheel setuptools
+pip install deephaven-server
+python start.py
+```
+
+If you’re in **Git Bash on Windows** (not WSL):
+
+```bash
+python -m venv venv
+source venv/Scripts/activate
+pip install --upgrade pip wheel setuptools
+pip install deephaven-server
+python start.py
+```
+
+---
+
+⚠️ **Important:**  
+If you had set `_JAVA_OPTIONS` or `JAVA_TOOL_OPTIONS` permanently (via Windows System Environment Variables), they will keep coming back in every shell. In that case you’ll need to **remove them from Windows env variables** (Control Panel → System → Advanced → Environment Variables).
+
+---
+
+👉 Do you want me to also give you the **one-liner bash command** to nuke those env vars permanently from Windows (via `setx`), so they never override Deephaven again?
