@@ -1138,3 +1138,129 @@ echo "   pip install \"deephaven-server==0.34.*\" \"deephaven==0.34.*\""
 After this, you’ll have **no stale venv, no old jars, no bad caches**. Then recreate the venv and reinstall Deephaven fresh.
 
 👉 Do you also want me to extend this script so it **auto-rebuilds the venv and installs Deephaven** right after cleaning (so it’s a one-command reset + setup)?
+
+----------------------
+
+You’re hitting this because `python3 -m venv venv` is failing with:
+
+```
+ensurepip ... returned non-zero
+```
+
+In WSL/Ubuntu that means the **venv/ensurepip bits for your exact Python version aren’t installed (or got corrupted)**. Fix it by reinstalling the right packages, then recreate the venv—no sudo inside the venv.
+
+### 0) Be in Linux home, not `/mnt/c/...`
+
+```bash
+cd ~
+pwd   # should be /home/<you>
+```
+
+### 1) Repair Python + venv + ensurepip for your version
+
+Check your Python minor version first:
+
+```bash
+python3 -V
+# e.g. "Python 3.11.6"
+```
+
+Then install the matching venv packages (adjust `3.11` if your minor differs):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  python3-venv \
+  python3-pip \
+  python3.11-venv \
+  python3.11-distutils \
+  libpython3.11-stdlib
+
+# If ensurepip files were damaged, force reinstall:
+sudo apt-get install -y --reinstall python3.11-venv libpython3.11-stdlib
+```
+
+Sanity check ensurepip works:
+
+```bash
+python3 -m ensurepip --upgrade
+```
+
+If that prints help/OK (no traceback), you’re good.
+
+### 2) Clean any root-owned leftovers and caches (optional but safe)
+
+```bash
+# In your project dir:
+cd ~/source/dp-haven   # <— change to your real folder
+
+# If an old venv exists, ensure you own it and remove it
+deactivate 2>/dev/null || true
+sudo chown -R "$USER":"$USER" ./venv 2>/dev/null || true
+sudo rm -rf ./venv
+
+# Clean ivy/deephaven caches to avoid stale deps
+rm -rf ~/.ivy2/cache/io.deephaven ~/.ivy2/cache/javax.inject ~/.deephaven ~/.cache/deephaven 2>/dev/null || true
+```
+
+### 3) Create a fresh venv (no sudo)
+
+```bash
+python3 -m venv --clear --upgrade-deps venv
+source venv/bin/activate
+
+python -V
+pip -V
+```
+
+### 4) Install Deephaven (pin versions so they match)
+
+```bash
+pip install --upgrade pip wheel setuptools
+pip install "deephaven-server==0.34.*" "deephaven==0.34.*"
+```
+
+### 5) Start Deephaven (use Linux paths; let `/layouts` map automatically)
+
+```bash
+mkdir -p ~/deephaven/data/{layouts,cache,config}
+
+python - <<'PY'
+from deephaven_server import Server
+import os
+data_dir = os.path.expanduser("~/deephaven/data")
+jvm_args = [
+    f"-Ddeephaven.data.dir={data_dir}",
+    f"-Ddeephaven.cache.dir={data_dir}/cache",
+    f"-Ddeephaven.config.dir={data_dir}/config",
+]
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven running: http://localhost:10000")
+s.await_shutdown()
+PY
+```
+
+---
+
+### If `venv` still errors
+
+Run these and share the outputs; they pinpoint the missing piece:
+
+```bash
+python3 -V
+which python3
+dpkg -l | egrep 'python3(\.11)?-venv|libpython3\.11-stdlib|python3-venv|python3-pip'
+python3 -m ensurepip -v
+```
+
+> Common causes:
+> 
+> - `python3.11-venv` missing for your exact minor version → install it.
+>     
+> - venv created previously with `sudo` → root-owned files → remove and recreate without sudo.
+>     
+> - Project under `/mnt/c/...` → weird perms → keep it under `/home/<you>` as above.
+>     
+
+Follow the sequence above and the `ensurepip`/venv creation error will clear, then Deephaven will start normally.
