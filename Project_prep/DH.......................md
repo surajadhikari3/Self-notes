@@ -1520,9 +1520,100 @@ python start.py
 
 ---
 
-⚠️ **Important:**  
-If you had set `_JAVA_OPTIONS` or `JAVA_TOOL_OPTIONS` permanently (via Windows System Environment Variables), they will keep coming back in every shell. In that case you’ll need to **remove them from Windows env variables** (Control Panel → System → Advanced → Environment Variables).
+---------------------------------------
+
+Totally—your own layout dir is in the code, but something else is still **overriding it to `/layout`**. On the JVM, **the last value wins**, but a global option like `JAVA_TOOL_OPTIONS` (or a config file) can still inject `/layout`.
+
+Let’s (a) prove what the JVM really sees, and (b) force-set everything clean from bash.
+
+# A. Run from bash with a clean env
+
+```bash
+# in Git Bash or WSL bash
+unset _JAVA_OPTIONS JAVA_TOOL_OPTIONS DH_LAYOUT_DIR DEEPHAVEN_LAYOUT_DIR \
+      DEEPHAVEN_DATA_DIR DEEPHAVEN_CACHE_DIR DEEPHAVEN_CONFIG_DIR
+
+# create dirs
+mkdir -p /c/dhdata/{layouts,cache,config}   # Git Bash on Windows
+# (WSL would be: mkdir -p /mnt/c/dhdata/{layouts,cache,config})
+
+python -m venv venv
+source venv/Scripts/activate  # WSL: source venv/bin/activate
+pip install --upgrade pip wheel setuptools
+pip install deephaven-server
+python start.py
+```
+
+# B. Use a minimal start.py that also prints the **effective** JVM props
+
+Add the two debug flags below so the JVM prints **what it finally uses**:
+
+```python
+# start.py
+import os
+from pathlib import Path
+from deephaven_server import Server
+
+base = Path(r"C:\dhdata")  # WSL: Path("/mnt/c/dhdata")
+data_dir   = base
+cache_dir  = base / "cache"
+config_dir = base / "config"
+layout_dir = base / "layouts"
+
+for p in (data_dir, cache_dir, config_dir, layout_dir):
+    p.mkdir(parents=True, exist_ok=True)
+
+to_jvm = lambda p: str(p).replace("\\", "/")
+
+jvm_args = [
+    # DEBUG: print all JVM args + system properties on startup
+    "-Xlog:arguments=trace",
+    "-XshowSettings:properties",
+
+    f"-Ddeephaven.data.dir={to_jvm(data_dir)}",
+    f"-Ddeephaven.cache.dir={to_jvm(cache_dir)}",
+    f"-Ddeephaven.config.dir={to_jvm(config_dir)}",
+    f"-Ddeephaven.console.layout.dir={to_jvm(layout_dir)}",
+]
+
+print("Using JVM args:", jvm_args)
+
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven running at http://localhost:10000")
+s.await_shutdown()
+```
+
+When this runs, look for **`deephaven.console.layout.dir`** in the “system properties” dump.  
+If it still shows `/layout`, then a global injector is winning. Find it with:
+
+```bash
+env | grep -i -E 'java|deephaven|layout'
+```
+
+If you see anything suspicious (especially `JAVA_TOOL_OPTIONS`), remove it **permanently** from Windows environment variables, then open a _new_ bash and retry. (As a temporary workaround you can also hard-override by setting both the **env var** and the **JVM arg** to your path.)
+
+# C. If you prefer env-only (no code changes)
+
+From bash:
+
+```bash
+export DEEPHAVEN_DATA_DIR="C:/dhdata"
+export DEEPHAVEN_CACHE_DIR="C:/dhdata/cache"
+export DEEPHAVEN_CONFIG_DIR="C:/dhdata/config"
+export DEEPHAVEN_LAYOUT_DIR="C:/dhdata/layouts"
+python -m deephaven_server
+```
 
 ---
 
-👉 Do you want me to also give you the **one-liner bash command** to nuke those env vars permanently from Windows (via `setx`), so they never override Deephaven again?
+### Why this fixes it
+
+- Your code is correct, but a hidden option is still injecting `-Ddeephaven.console.layout.dir=/layout`.
+    
+- `-XshowSettings:properties` and `-Xlog:arguments=trace` make the JVM print the **final** value, so we can confirm the override is gone.
+    
+- Unsetting the env vars in bash + using forward-slash Windows paths removes the typical Windows path pitfalls.
+    
+
+Ping me with the few lines around `deephaven.console.layout.dir` from the JVM output if it still shows `/layout`—we’ll zero in on the exact injector next.
