@@ -1054,3 +1054,87 @@ python -c "import sys; print(sys.version)"
 pip show deephaven deephaven-server
 ls -la ~/.ivy2/cache/javax.inject/javax.inject/jars || true
 ```
+
+-------------------------------------
+
+
+Perfect 👍 — here’s a **safe cleanup script** you can drop into your WSL (Red Hat/Fedora/RHEL) shell. It will remove all Deephaven + Python build/caches, fix permissions, and leave you with a clean slate.
+
+---
+
+## 🧹 `clean_deephaven_env.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "🧹 Cleaning Deephaven + Python caches ..."
+
+# 1. Remove project venv if it exists
+if [ -d "./venv" ]; then
+  echo " - Removing local venv ..."
+  rm -rf ./venv
+fi
+
+# 2. Python cache dirs
+echo " - Removing pip / Python caches ..."
+rm -rf ~/.cache/pip ~/.cache/deephaven ~/.cache/pypoetry 2>/dev/null || true
+find ~/ -type d -name "__pycache__" -exec rm -rf {} +
+
+# 3. Deephaven config/data
+echo " - Removing Deephaven config/data dirs ..."
+rm -rf ~/.deephaven ~/deephaven/data
+
+# 4. Ivy cache (Java jars)
+echo " - Removing Ivy cache ..."
+rm -rf ~/.ivy2
+
+# 5. Maven repo entries (just Deephaven + javax.inject, not your whole Maven repo)
+if [ -d ~/.m2/repository ]; then
+  echo " - Removing Maven Deephaven + javax.inject jars ..."
+  rm -rf ~/.m2/repository/io/deephaven
+  rm -rf ~/.m2/repository/javax/inject
+fi
+
+# 6. Ownership sanity (sometimes venv was created with sudo by mistake)
+echo " - Resetting ownership on caches ..."
+sudo chown -R "$USER:$USER" ~/.cache ~/.ivy2 ~/.m2 ~/.deephaven ~/deephaven 2>/dev/null || true
+
+echo "✅ Cleanup complete."
+echo "👉 Next steps:"
+echo "   python3 -m venv venv"
+echo "   source venv/bin/activate"
+echo "   python -m pip install --upgrade pip wheel setuptools"
+echo "   pip install \"deephaven-server==0.34.*\" \"deephaven==0.34.*\""
+```
+
+---
+
+## 🚀 How to use it
+
+1. Save the file:
+    
+    ```bash
+    nano clean_deephaven_env.sh
+    ```
+    
+    (paste the script, save, exit)
+    
+2. Make it executable:
+    
+    ```bash
+    chmod +x clean_deephaven_env.sh
+    ```
+    
+3. Run it:
+    
+    ```bash
+    ./clean_deephaven_env.sh
+    ```
+    
+
+---
+
+After this, you’ll have **no stale venv, no old jars, no bad caches**. Then recreate the venv and reinstall Deephaven fresh.
+
+👉 Do you also want me to extend this script so it **auto-rebuilds the venv and installs Deephaven** right after cleaning (so it’s a one-command reset + setup)?
