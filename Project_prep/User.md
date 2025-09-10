@@ -1,4 +1,5 @@
 Absolutely. Here's a **documentation-ready explanation** of **group-level `GRANT`** and **user-level `REVOKE`** in **Databricks Unity Catalog**, including **who can perform the actions**, **how to do it**, and **important behavior notes** under the **additive access control model**.
+Absolutely. Here's a **documentation-ready explanation** of **group-level `GRANT`** and **user-level `REVOKE`** in **Databricks Unity Catalog**, including **who can perform the actions**, **how to do it**, and **important behavior notes** under the **additive access control model**.
 
 ---
 
