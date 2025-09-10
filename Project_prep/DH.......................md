@@ -1264,3 +1264,72 @@ python3 -m ensurepip -v
 >     
 
 Follow the sequence above and the `ensurepip`/venv creation error will clear, then Deephaven will start normally.
+
+---------------
+
+Gotcha—you’re on a **yum/dnf**-based distro (RHEL/CentOS/Fedora/Amazon Linux). Run this **exact sequence** in WSL. It’s safe to paste as-is.
+
+```bash
+# ---------- 0) Be in Linux HOME (not /mnt/c/...) ----------
+cd ~
+mkdir -p ~/source/dp-haven && cd ~/source/dp-haven
+
+# ---------- 1) Prereqs (Java 17 + Python 3.11 + certs) ----------
+# On RHEL/CentOS/Fedora/Amazon Linux, yum is usually a symlink to dnf; both work.
+sudo yum -y install \
+  java-17-openjdk \
+  python3.11 python3.11-pip python3.11-devel \
+  ca-certificates || true
+
+# Some distros split venv into a separate pkg; install if available (no-fail if not).
+sudo yum -y install python3.11-venv 2>/dev/null || true
+
+# Make sure ensurepip exists and is up to date
+python3.11 -m ensurepip --upgrade
+
+# ---------- 2) Clean any old venv/caches (safe if absent) ----------
+deactivate 2>/dev/null || true
+sudo chown -R "$USER":"$USER" ./venv 2>/dev/null || true
+sudo rm -rf ./venv
+rm -rf ~/.ivy2/cache/io.deephaven ~/.ivy2/cache/javax.inject \
+       ~/.ivy2/cache/com.google.inject ~/.ivy2/cache/org.checkerframework \
+       ~/.deephaven ~/.cache/deephaven 2>/dev/null || true
+
+# ---------- 3) Create fresh venv (NO sudo) ----------
+python3.11 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip wheel setuptools
+
+# ---------- 4) Install Deephaven (pin matching versions) ----------
+pip install "deephaven-server==0.34.*" "deephaven==0.34.*"
+
+# ---------- 5) Data dirs (let /layouts map automatically) ----------
+mkdir -p ~/deephaven/data/{layouts,cache,config}
+
+# ---------- 6) Start Deephaven (Linux paths; forward slashes) ----------
+python - <<'PY'
+from deephaven_server import Server
+import os
+data_dir = os.path.expanduser("~/deephaven/data")
+jvm_args = [
+    f"-Ddeephaven.data.dir={data_dir}",
+    f"-Ddeephaven.cache.dir={data_dir}/cache",
+    f"-Ddeephaven.config.dir={data_dir}/config",
+]
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven running at http://localhost:10000")
+s.await_shutdown()
+PY
+```
+
+### Notes (so it “just works”)
+
+- **Don’t** set `DH_LAYOUT_DIR` or `-Ddeephaven.console.layout.dir`. Deephaven maps the virtual `/layouts` to `~/deephaven/data/layouts` automatically when `deephaven.data.dir` is set.
+    
+- Keep the project under `/home/<you>` (not `/mnt/c/...`) to avoid permission oddities.
+    
+- If your distro uses **dnf** only, replace `yum` with `dnf`—the commands are identical.
+    
+
+If any step errors, paste the one-liner output and I’ll adjust, but this sequence resolves the venv/ensurepip issue and the `/layouts` error on yum/dnf systems.
