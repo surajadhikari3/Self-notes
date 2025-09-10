@@ -703,3 +703,101 @@ That’s `C:\layouts` in Windows terms and will satisfy any leftover default. Yo
 ---
 
 If you still hit an error, please grab just the **first 10–15 lines** of startup (where it prints the config values) and the **first line** of the exception (the “Invalid path: …” line). With that, I can pinpoint the remaining override.
+
+
+------------------------------------
+
+jj
+
+I can see clearly in your screenshot what’s happening now:
+
+👉 The error at the bottom says:
+
+```
+RuntimeError: The Deephaven Enterprise/Community Python Package (deephaven-core on pypi)
+is installed for the current Python environment. If continuing issues, please uninstall 
+the deephaven packages and re-install.
+```
+
+That means `deephaven-core` **did install**, but when you run `python -m deephaven_server` it’s not finding a proper embedded server because of **conflicting or partial installs**.
+
+---
+
+## 🔑 Key points
+
+- You have both `deephaven-core` and `deephaven-plugin` installed.
+    
+- The package that provides the actual **embedded server** entrypoint is **`deephaven-server`**.
+    
+- If you only install `deephaven-core`, you’ll get client + API but not the launcher.
+    
+
+---
+
+## ✅ Clean fix steps (bash)
+
+Let’s nuke the broken venv and reinstall with the **server package included**.
+
+```bash
+# 1) remove old venv
+deactivate 2>/dev/null || true
+rm -rf dh-venv
+
+# 2) create fresh venv
+python3 -m venv dh-venv
+source dh-venv/bin/activate
+
+# 3) upgrade local pip tools
+python -m pip install --upgrade pip setuptools wheel
+
+# 4) install Deephaven pinned versions (server + core + plugin)
+pip install "deephaven-core==0.39.8" "deephaven-server==0.39.8" "deephaven-plugin==0.6.9" "pyarrow==14.0.2" "jpy==1.1.0" "numpy==1.26.4" "pandas==2.2.2"
+```
+
+---
+
+## 🚀 Starting the server
+
+Option A: Use the CLI
+
+```bash
+deephaven server --port 10000
+```
+
+Option B: Use Python API
+
+```bash
+python - <<'PY'
+from deephaven_server import Server
+s = Server(port=10000)
+s.start()
+print("Deephaven started at http://localhost:10000")
+s.await_shutdown()
+PY
+```
+
+Now open [http://localhost:10000](http://localhost:10000/).
+
+---
+
+## 📝 Notes
+
+- Make sure Java 11 or 17 is installed, and `JAVA_HOME` points to it:
+    
+    ```bash
+    export JAVA_HOME="/c/Program Files/Java/jdk-17"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    ```
+    
+- If you still see “deephaven_server not found”, check:
+    
+    ```bash
+    pip show deephaven-server
+    ```
+    
+    If missing, the install failed (try again inside the venv).
+    
+
+---
+
+⚡ Question for you: do you want me to give you a **single bash script** that does the venv creation + correct installs + starts the server**, so you can just run it once instead of step-by-step?
