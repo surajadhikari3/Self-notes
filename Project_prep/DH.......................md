@@ -178,3 +178,94 @@ kpis = pos.agg_by([sum_("total_pnl = pnl")], by=[])
 ---
 
 That’s it—you’re reading Kafka in Deephaven locally and rendering the same four widgets, with **true push-based updates**.
+
+
+---------------------------------
+
+
+You’re in **Git Bash / MINGW64** and your venv isn’t actually being used. Don’t try to “activate” it (your bash doesn’t have the usual helpers). Just call the **venv’s python.exe directly** for everything—creating, installing, and running. That avoids PowerShell/CMD entirely.
+
+Here’s the exact sequence to fix the “No module named deephaven(_server)” error and start Deephaven from **Git Bash**:
+
+---
+
+## 1) Create the venv (using the system Python once)
+
+> If your Python is elsewhere, adjust the first path accordingly.
+
+```bash
+/c/Users/TAP3507/AppData/Local/Programs/Python/Python310/python.exe \
+  -m venv /c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env
+```
+
+## 2) Install packages **into the venv** (no activation)
+
+```bash
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  -m pip install --upgrade pip
+
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  -m pip install deephaven-server
+```
+
+> If you previously saw “Defaulting to user installation…”, this will fix it—the install now goes into `dh-env\Lib\site-packages`.
+
+## 3) Verify the install
+
+```bash
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  -c "import sys, deephaven_server; print('OK', deephaven_server.__version__, sys.executable)"
+```
+
+You should see `OK <version> C:\Users\TAP3507\...\dh-env\Scripts\python.exe`.
+
+## 4) Start Deephaven (no activation needed)
+
+Create `start_dh.py` in `C:\Users\TAP3507\source\test_folder\dh-dashboard\`:
+
+```python
+from deephaven_server import Server
+s = Server(port=10000, jvm_args=["-Xmx2g"])  # needs JDK 17+
+s.start()
+print("Deephaven IDE → http://localhost:10000/ide/  (Ctrl+C to stop)")
+import time;  time.sleep(999999)
+```
+
+Run it with the venv’s Python:
+
+```bash
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  start_dh.py
+```
+
+Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)**.
+
+---
+
+### Why your earlier attempts failed
+
+- You ran `pip install` without the venv active → it installed to **user site** (`AppData\Roaming\Python\Python310\site-packages`) not your venv.
+    
+- Git Bash on your machine doesn’t have `sed`/`which`, so `source dh-env/Scripts/activate` breaks. We avoid activation entirely by calling the venv’s **full path** `python.exe`.
+    
+- Using `python test.py` in Git Bash ran the **system** Python (no DH module), not the venv.
+    
+
+---
+
+### Quick sanity checks (optional)
+
+```bash
+# Show where that Python will import from (should be ...\dh-env\Lib\site-packages)
+"/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe" -c "import sys; print(sys.path[0]); print(sys.executable)"
+
+# Show that deephaven-server is in that interpreter's site-packages
+"/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe" -m pip show deephaven-server
+```
+
+> If you get any Java errors starting the server, make sure **JDK 17+** is installed and `JAVA_HOME` points to it. You can run (in Git Bash):  
+> `"/c/Program Files/Java/jdk-17/bin/java.exe" -version`
+
+---
+
+If you want, paste back the output of step 3 (the `OK ...` line). If it still says “ModuleNotFoundError”, I’ll adjust the paths to match your exact directory layout.
