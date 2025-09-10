@@ -1704,3 +1704,80 @@ If it **still prints `/layout`**, something outside your script (global `_JAVA_O
 ---
 
 👉 Do you want me to also give you the **one-time `setx` commands** to permanently delete `_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` from Windows so you don’t need to `unset` them every time?
+
+----------------------------
+
+
+Got it 👍 You’re using **Wenix (RHEL/Fedora-like distro)** and want a **minimal, clean Docker install using `yum`**, without extra headaches. Here’s the simplest, reliable way:
+
+---
+
+## 🐳 Install Docker on Wenix (YUM-based distros)
+
+### 1. Remove old versions (if any)
+
+```bash
+sudo yum remove docker \
+                docker-client \
+                docker-client-latest \
+                docker-common \
+                docker-latest \
+                docker-latest-logrotate \
+                docker-logrotate \
+                docker-engine
+```
+
+---
+
+### 2. Set up the Docker repo
+
+```bash
+sudo yum install -y yum-utils device-mapper-persistent-data lvm2
+sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+```
+
+_(This works for CentOS/RHEL/Wenix — it points to Docker’s official repo.)_
+
+---
+
+### 3. Install Docker Engine
+
+```bash
+sudo yum install -y docker-ce docker-ce-cli containerd.io
+```
+
+---
+
+### 4. Enable & start Docker
+
+```bash
+sudo systemctl enable docker
+sudo systemctl start docker
+```
+
+---
+
+### 5. Verify installation
+
+```bash
+docker --version
+sudo docker run hello-world
+```
+
+---
+
+### 6. (Optional) Run Docker without `sudo`
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+---
+
+✅ After this, you’ll have Docker running cleanly on Wenix with `yum`.  
+No extra configs needed unless you want Compose (then just `sudo yum install docker-compose-plugin`).
+
+---
+
+Do you also want me to give you the **minimal one-liner script** (just copy-paste and done) so you don’t have to run each step manually?
