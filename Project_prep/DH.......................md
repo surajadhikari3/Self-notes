@@ -800,4 +800,108 @@ Now open [http://localhost:10000](http://localhost:10000/).
 
 ---
 
-⚡ Question for you: do you want me to give you a **single bash script** that does the venv creation + correct installs + starts the server**, so you can just run it once instead of step-by-step?
+checkk
+
+
+Thanks—this is the same **“/layouts”** problem on Windows. The fix is to point Deephaven to a **real folder** for layouts and start the server with that path.
+
+Below are two reliable ways. Pick one.
+
+---
+
+## A) Start via Python (works everywhere)
+
+```bash
+# 1) choose a Windows-native folder for Deephaven data & layouts
+mkdir -p /c/dhdata/layouts
+
+# 2) activate your venv (adjust path)
+source dh-venv/bin/activate
+
+# 3) launch the embedded server with an explicit layout dir
+python - <<'PY'
+import os
+from deephaven_server import Server
+
+data_dir   = r"C:\dhdata"
+layout_dir = r"C:\dhdata\layouts"
+
+os.makedirs(layout_dir, exist_ok=True)
+
+# Important: give JVM Windows paths with forward slashes
+jvm_args = [
+    f"-Ddeephaven.console.layout.dir={layout_dir.replace('\\','/')}",
+    f"-Ddeephaven.data.dir={data_dir.replace('\\','/')}",
+    f"-Ddeephaven.cache.dir={data_dir.replace('\\','/')}/cache",
+    f"-Ddeephaven.config.dir={data_dir.replace('\\','/')}/config",
+]
+
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven running at http://localhost:10000")
+s.await_shutdown()
+PY
+```
+
+**Why this works:** the JVM was trying to use an invalid path `"/layouts"`; we override it with a valid Windows path (e.g., `C:/dhdata/layouts`) using system properties.
+
+---
+
+## B) Start via CLI with JVM args
+
+```bash
+# create folders
+mkdir -p /c/dhdata/layouts /c/dhdata/cache /c/dhdata/config
+
+# activate venv
+source dh-venv/bin/activate
+
+# launch with explicit dirs
+deephaven server \
+  --jvm-arg "-Ddeephaven.console.layout.dir=C:/dhdata/layouts" \
+  --jvm-arg "-Ddeephaven.data.dir=C:/dhdata" \
+  --jvm-arg "-Ddeephaven.cache.dir=C:/dhdata/cache" \
+  --jvm-arg "-Ddeephaven.config.dir=C:/dhdata/config" \
+  --port 10000
+```
+
+---
+
+## If you still see the error
+
+- Make sure **Java** is available in this shell:
+    
+    ```bash
+    export JAVA_HOME="/c/Program Files/Java/jdk-17"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    java -version
+    ```
+    
+- Confirm the **paths exist** and are writable (`/c/dhdata/layouts` etc.).
+    
+- Prefer **forward slashes** in JVM args (`C:/dhdata/...`).
+    
+- If running in **Git Bash**, you can also set env vars before starting:
+    
+    ```bash
+    export DEEPHAVEN_DATA_DIR="C:/dhdata"
+    export DEEPHAVEN_CACHE_DIR="C:/dhdata/cache"
+    export DEEPHAVEN_CONFIG_DIR="C:/dhdata/config"
+    ```
+    
+    (and still pass `-Ddeephaven.console.layout.dir=...` to be explicit).
+    
+
+---
+
+### Quick fallback (no Windows path quirks)
+
+If you just need it up quickly, run the Docker image:
+
+```bash
+docker run --rm --name deephaven -p 10000:10000 ghcr.io/deephaven/server:latest
+```
+
+---
+
+If you paste the **first 10 lines** of the stack trace after trying A or B, I’ll tune the exact property names/paths for your setup.
