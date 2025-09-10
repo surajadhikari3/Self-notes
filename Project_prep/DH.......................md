@@ -1617,3 +1617,90 @@ python -m deephaven_server
     
 
 Ping me with the few lines around `deephaven.console.layout.dir` from the JVM output if it still shows `/layout`—we’ll zero in on the exact injector next.
+
+iiiiiiiiiiii-----------
+
+Perfect, thanks for clarifying 👍  
+Since you’re running **on Windows**, but launching via **Git Bash** (not WSL), here’s how to cleanly run Deephaven and ensure your own `C:\dhdata\layouts` gets picked up.
+
+---
+
+## 🔹 1. Fix paths for Git Bash on Windows
+
+In Git Bash, Windows drives are mounted under `/c/...`, so:
+
+- `C:\dhdata` → `/c/dhdata`
+    
+- `C:\dhdata\layouts` → `/c/dhdata/layouts`
+    
+
+Your Python code should still use `Path(r"C:\dhdata")` (Python on Windows understands it).  
+But for JVM args, always convert to forward slashes (`C:/dhdata/...`).
+
+---
+
+## 🔹 2. Clean the environment in Bash
+
+Before running, nuke the variables that are forcing `/layout`:
+
+```bash
+unset _JAVA_OPTIONS
+unset JAVA_TOOL_OPTIONS
+unset DH_LAYOUT_DIR
+unset DEEPHAVEN_LAYOUT_DIR
+unset DEEPHAVEN_CONFIG_DIR
+unset DEEPHAVEN_CACHE_DIR
+unset DEEPHAVEN_DATA_DIR
+```
+
+Double-check nothing remains:
+
+```bash
+env | grep -i deephaven
+env | grep -i java
+```
+
+---
+
+## 🔹 3. Start Deephaven clean
+
+```bash
+python -m venv venv
+source venv/Scripts/activate   # note: Scripts, since it’s Windows Python
+pip install --upgrade pip wheel setuptools
+pip install deephaven-server
+python start.py
+```
+
+---
+
+## 🔹 4. Debug if it still fails
+
+If you _still_ get `Invalid path: /layout`, add these JVM debug flags to your script:
+
+```python
+jvm_args = [
+    "-Xlog:arguments=trace",
+    "-XshowSettings:properties",
+    f"-Ddeephaven.data.dir={data_dir_jvm}",
+    f"-Ddeephaven.cache.dir={data_dir_jvm}/cache",
+    f"-Ddeephaven.config.dir={data_dir_jvm}/config",
+    f"-Ddeephaven.console.layout.dir={layout_dir_jvm}",
+]
+```
+
+That way, Deephaven will print exactly what system property it’s using.  
+If it **still prints `/layout`**, something outside your script (global `_JAVA_OPTIONS` or `JAVA_TOOL_OPTIONS`) is overriding.
+
+---
+
+✅ So yes, you _can_ run Deephaven from **Windows via Git Bash**, but you must:
+
+1. Use forward-slash paths (`C:/dhdata/layouts`)
+    
+2. Kill global JVM options (`unset _JAVA_OPTIONS JAVA_TOOL_OPTIONS`)
+    
+
+---
+
+👉 Do you want me to also give you the **one-time `setx` commands** to permanently delete `_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` from Windows so you don’t need to `unset` them every time?
