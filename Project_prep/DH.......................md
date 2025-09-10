@@ -904,4 +904,153 @@ docker run --rm --name deephaven -p 10000:10000 ghcr.io/deephaven/server:latest
 
 ---
 
-If you paste the **first 10 lines** of the stack trace after trying A or B, I’ll tune the exact property names/paths for your setup.
+;;;;;;;;;;;;;;;;;
+
+Thanks for the screenshots — they help. You’re now in **WSL Ubuntu** and the crash is different:
+
+- The red stacktrace ends with **`RuntimeError: java.lang.NoClassDefFoundError: javax/inject/Provider`** (plus some “couldn’t load class” lines).
+    
+- That means the Java server didn’t get all of its Maven/Ivy **runtime jars**. `javax.inject` is a tiny jar that Deephaven expects the launcher to download into `~/.ivy2/cache` (and sometimes `~/.deephaven`).
+    
+
+This usually happens when one of the following is true in WSL:
+
+1. First-run dependency download failed (no CA certs / proxy / blocked HTTPS).
+    
+2. Corrupted/partial Ivy cache in `~/.ivy2`.
+    
+3. Wrong Java selected or `JAVA_HOME` not set for this shell (you have JDK 17, that’s fine, but make sure the server uses it).
+    
+4. Permissions on the cache dirs.
+    
+
+Below is a **bullet-proof reset** that fixes all four.
+
+---
+
+# ✅ Fix in WSL (Ubuntu) — do these in order
+
+### 0) Open a fresh WSL shell
+
+Close VS Code terminals; open a new WSL terminal so env is clean.
+
+### 1) Make sure Java 17 + CA certs are installed
+
+```bash
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jdk ca-certificates curl wget unzip
+sudo update-ca-certificates
+java -version
+```
+
+You should see `openjdk 17…` (not 11, not 21).
+
+### 2) Set JAVA_HOME for this session
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export PATH="$JAVA_HOME/bin:$PATH"
+```
+
+### 3) Create a clean venv and install **matched** Deephaven packages
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip wheel setuptools
+
+# pin versions so server + client match
+pip install "deephaven-server==0.34.*" "deephaven==0.34.*"
+```
+
+### 4) Wipe any broken caches so jars re-download
+
+```bash
+rm -rf ~/.ivy2/cache/io.deephaven ~/.ivy2/cache/org.checkerframework \
+       ~/.ivy2/cache/javax.inject ~/.ivy2/cache/com.google.inject \
+       ~/.deephaven ~/.cache/deephaven 2>/dev/null || true
+```
+
+> If you’re behind a corporate proxy, set:
+> 
+> ```bash
+> export HTTPS_PROXY=http://your.proxy:port
+> export HTTP_PROXY=http://your.proxy:port
+> ```
+> 
+> and retry.
+
+### 5) Use Linux paths and let Deephaven map `/layouts` internally
+
+Don’t override `console.layout.dir`. Just give the **data root**; the server will create/use `data/layouts` automatically.
+
+```bash
+mkdir -p ~/deephaven/data/{layouts,cache,config}
+
+python - <<'PY'
+from deephaven_server import Server
+data_dir = "/home/$USER/deephaven/data".replace("$USER", __import__("os").getenv("USER",""))
+jvm_args = [
+    f"-Ddeephaven.data.dir={data_dir}",
+    f"-Ddeephaven.cache.dir={data_dir}/cache",
+    f"-Ddeephaven.config.dir={data_dir}/config",
+]
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven running at http://localhost:10000")
+s.await_shutdown()
+PY
+```
+
+> Key point: in **WSL** use **Linux** paths (`/home/...`). Don’t use Windows paths or `/mnt/c/...` unless you must; cross-filesystem permissions sometimes block writes during the Maven/Ivy download.
+
+---
+
+## If you still see `javax/inject/Provider` (very rare)
+
+It means the jar still didn’t download:
+
+1. **Test HTTPS from WSL**:
+    
+    ```bash
+    curl -I https://repo1.maven.org/maven2/
+    ```
+    
+    If SSL fails, your CA bundle/proxy is the issue.
+    
+2. **Manually pre-fetch** the jar into Ivy cache:
+    
+    ```bash
+    mkdir -p ~/.ivy2/cache/javax.inject/javax.inject/jars
+    cd ~/.ivy2/cache/javax.inject/javax.inject/jars
+    curl -O https://repo1.maven.org/maven2/javax/inject/javax.inject/1/javax.inject-1.jar
+    ```
+    
+    (Re-run the server after that.)
+    
+3. **Check permissions**:
+    
+    ```bash
+    sudo chown -R "$USER":"$USER" ~/.ivy2 ~/.deephaven ~/deephaven
+    ```
+    
+
+---
+
+## Why this fixes it
+
+- The `NoClassDefFoundError` is not a coding error; it’s a **missing dependency** because the first-run downloader didn’t complete.
+    
+- Clearing the partial Ivy cache and ensuring WSL can reach Maven Central over TLS with valid **CA certificates** resolves it.
+    
+- Setting only `deephaven.data.dir` avoids the earlier `/layouts` confusion — Deephaven maps the virtual `/layouts` to `${deephaven.data.dir}/layouts` automatically.
+    
+
+Ping me with the next error line if anything persists; paste the output of:
+
+```bash
+java -version
+python -c "import sys; print(sys.version)"
+pip show deephaven deephaven-server
+ls -la ~/.ivy2/cache/javax.inject/javax.inject/jars || true
+```
