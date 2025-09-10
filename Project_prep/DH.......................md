@@ -1333,3 +1333,127 @@ PY
     
 
 If any step errors, paste the one-liner output and I’ll adjust, but this sequence resolves the venv/ensurepip issue and the `/layouts` error on yum/dnf systems.
+
+--------------
+
+You’ve got JDK 17 installed, but Deephaven’s **embedded JVM** can’t start because the Python launcher needs to load `libjvm.so` (and sometimes `libjli.so`) from a **JDK**, and your shell doesn’t expose those libs. `java -version` works because `/usr/bin/java` finds its own libs, but the **embedded** start requires `JAVA_HOME` and `LD_LIBRARY_PATH`.
+
+Run these **exact** steps in your WSL shell (Ubuntu). No sudo inside the venv.
+
+---
+
+### 1) Ensure JDK 17 (not just JRE) is installed
+
+```bash
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jdk
+```
+
+### 2) Export JAVA_HOME + library paths for this shell
+
+```bash
+# Find the active JDK root dynamically
+export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(which javac)")")")"
+
+# Make sure the JVM shared libs are discoverable
+export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$JAVA_HOME/lib:$JAVA_HOME/lib/jli:${LD_LIBRARY_PATH}"
+
+# Sanity checks
+echo "JAVA_HOME=$JAVA_HOME"
+test -f "$JAVA_HOME/lib/server/libjvm.so" && echo "libjvm OK" || echo "libjvm MISSING"
+```
+
+You should see `libjvm OK`.
+
+> If `libjvm MISSING`, the JDK path is wrong—paste:  
+> `readlink -f $(which javac)` and `ls -al "$JAVA_HOME/lib/server"` to confirm.
+
+### 3) (Optional) Persist for future shells
+
+Append to `~/.bashrc`:
+
+```bash
+cat >> ~/.bashrc <<'EOF'
+# Deephaven / embedded-JVM requirements
+export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(which javac)")")")"
+export LD_LIBRARY_PATH="$JAVA_HOME/lib/server:$JAVA_HOME/lib:$JAVA_HOME/lib/jli:${LD_LIBRARY_PATH}"
+EOF
+```
+
+Reload:
+
+```bash
+source ~/.bashrc
+```
+
+### 4) Start Deephaven (WSL; keep Linux paths)
+
+Do **not** override `console.layout.dir`. Just set the data root; `/layouts` maps automatically.
+
+```bash
+# (inside your venv)
+mkdir -p ~/deephaven/data/{layouts,cache,config}
+
+deephaven --jvm-args \
+  "-Ddeephaven.data.dir=$HOME/deephaven/data" \
+  "-Ddeephaven.cache.dir=$HOME/deephaven/data/cache" \
+  "-Ddeephaven.config.dir=$HOME/deephaven/data/config"
+```
+
+—or from Python:
+
+```bash
+python - <<'PY'
+from deephaven_server import Server
+import os
+data_dir = os.path.expanduser('~/deephaven/data')
+jvm_args = [
+    f"-Ddeephaven.data.dir={data_dir}",
+    f"-Ddeephaven.cache.dir={data_dir}/cache",
+    f"-Ddeephaven.config.dir={data_dir}/config",
+]
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven running at http://localhost:10000")
+s.await_shutdown()
+PY
+```
+
+---
+
+## If it still errors
+
+- **JAVA_HOME empty** → step 2 didn’t run in this shell. Re-run or `source ~/.bashrc`.
+    
+- **`libjli.so` not found** → add `$JAVA_HOME/lib/jli` (already included above) to `LD_LIBRARY_PATH`.
+    
+- **Multiple Javas installed** → align alternatives:
+    
+    ```bash
+    sudo update-alternatives --config java
+    sudo update-alternatives --config javac
+    # pick the OpenJDK 17 entries
+    ```
+    
+- **Corporate proxy blocks Maven/Ivy** (first-run download) → set:
+    
+    ```bash
+    export HTTPS_PROXY=http://your.proxy:port
+    export HTTP_PROXY=http://your.proxy:port
+    ```
+    
+- **Still failing to resolve deps** → clear caches then retry:
+    
+    ```bash
+    rm -rf ~/.ivy2/cache/io.deephaven ~/.ivy2/cache/javax.inject ~/.deephaven ~/.cache/deephaven
+    ```
+    
+
+Run these two diagnostics if you get another JVM init error and share the output:
+
+```bash
+echo "JAVA_HOME=$JAVA_HOME"
+ldd "$JAVA_HOME/lib/server/libjvm.so" | head -20
+```
+
+This setup addresses exactly what your screenshots show: `deephaven_server` calling into `start_jvm` → failing because `JAVA_HOME`/`LD_LIBRARY_PATH` weren’t exposing `libjvm.so`/`libjli.so`.
