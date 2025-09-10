@@ -575,3 +575,131 @@ That’s the path Deephaven complains about (`/layouts` → `C:\layouts`). Creat
 ---
 
 Once the IDE is up, we can drop in the **Kafka consumer** code and you’ll have your push-based dashboard running.
+
+------------------------------------
+
+
+Thanks for sticking with it — your screenshots still show Deephaven boot failing with:
+
+```
+Invalid ARGUMENT: Invalid path: /layouts
+```
+
+That means Java is still reading a config that points to **`/layouts`** and **ignoring** the file you created under AppData. Let’s force Deephaven to use _our_ config and paths, so it can’t fall back.
+
+Below are copy-paste steps for **Git Bash** only (no PowerShell).
+
+---
+
+## 1) Make clean folders we control
+
+```bash
+# workspace & layouts (under your user)
+mkdir -p /c/Users/TAP3507/dh-local/workspace
+mkdir -p /c/Users/TAP3507/dh-local/layouts
+
+# a dedicated config dir (separate from AppData)
+mkdir -p /c/Users/TAP3507/dh-local/config
+```
+
+## 2) Write an explicit **deephaven.properties** in that config dir
+
+```bash
+cat > "/c/Users/TAP3507/dh-local/config/deephaven.properties" << 'EOF'
+# Force Deephaven to use these dirs (Windows paths with double backslashes)
+deephaven.layouts.dir = C:\\Users\\TAP3507\\dh-local\\layouts
+deephaven.workspace   = C:\\Users\\TAP3507\\dh-local\\workspace
+
+# Extra aliases (harmless if not used)
+deephaven.console.layouts.dir = C:\\Users\\TAP3507\\dh-local\\layouts
+deephaven.ide.layouts.dir     = C:\\Users\\TAP3507\\dh-local\\layouts
+deephaven.server.notebook.dir = C:\\Users\\TAP3507\\dh-local\\workspace
+deephaven.server.notebook.filesystem.root = C:\\Users\\TAP3507\\dh-local\\workspace
+EOF
+```
+
+Verify:
+
+```bash
+cat "/c/Users/TAP3507/dh-local/config/deephaven.properties"
+```
+
+## 3) Replace your `start_dh.py` with hard overrides
+
+> We will 1) point Deephaven **explicitly** at our config directory, and 2) **also** pass the same directories via JVM args. This double-ensures no fallback to `/layouts`.
+
+Create `C:\Users\TAP3507\dh-local\start_dh.py`:
+
+```python
+import os
+from deephaven_server import Server
+
+BASE = r"C:\Users\TAP3507\dh-local"
+WORKSPACE = rf"{BASE}\workspace"
+LAYOUTS   = rf"{BASE}\layouts"
+CFG       = rf"{BASE}\config"
+
+os.makedirs(WORKSPACE, exist_ok=True)
+os.makedirs(LAYOUTS,   exist_ok=True)
+os.makedirs(CFG,       exist_ok=True)
+
+jvm_args = [
+    "-Xmx2g",
+
+    # 1) Tell DH which config directory to read (ours)
+    f"-Ddeephaven.config.dir={CFG}",
+
+    # 2) Also override the specific properties directly
+    f"-Ddeephaven.layouts.dir={LAYOUTS}",
+    f"-Ddeephaven.workspace={WORKSPACE}",
+    f"-Ddeephaven.console.layouts.dir={LAYOUTS}",
+    f"-Ddeephaven.ide.layouts.dir={LAYOUTS}",
+    f"-Ddeephaven.server.notebook.dir={WORKSPACE}",
+    f"-Ddeephaven.server.notebook.filesystem.root={WORKSPACE}",
+
+    # 3) Debug: print loaded config on startup
+    "-Ddeephaven.config.print=true",
+]
+
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven IDE → http://localhost:10000/ide/  (Ctrl+C to stop)")
+
+import time; time.sleep(10**9)
+```
+
+## 4) Start using your venv’s Python (no activation)
+
+```bash
+"/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe" \
+  "/c/Users/TAP3507/dh-local/start_dh.py"
+```
+
+On startup you should now see lines printing the properties file it loaded and the values. The server should come up at **[http://localhost:10000/ide/](http://localhost:10000/ide/)**.
+
+---
+
+## 5) Guaranteed fallback (if anything still points at `/layouts`)
+
+Create the exact folder it’s complaining about:
+
+```bash
+mkdir -p /c/layouts
+```
+
+That’s `C:\layouts` in Windows terms and will satisfy any leftover default. You can keep both: your custom dirs **and** `C:\layouts` as a safety net.
+
+---
+
+## Why this works
+
+- `-Ddeephaven.config.dir=<dir>` tells Deephaven to read config **only** from that directory.
+    
+- Passing the **same paths** as JVM properties makes them win even if some other config gets picked up.
+    
+- `config.print=true` helps confirm the active values at runtime.
+    
+
+---
+
+If you still hit an error, please grab just the **first 10–15 lines** of startup (where it prints the config values) and the **first line** of the exception (the “Invalid path: …” line). With that, I can pinpoint the remaining override.
