@@ -268,4 +268,103 @@ Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)**.
 
 ---
 
-If you want, paste back the output of step 3 (the `OK ...` line). If it still says “ModuleNotFoundError”, I’ll adjust the paths to match your exact directory layout.
+If you want, paste back the output of step 3 (the `OK ...` line). If it still says “ModuleNotFoundError”, I’ll adjust the paths to match your exact directory layout
+
+
+-----------------------------
+
+
+Thanks for the screenshot—that stack trace is super helpful. Two things are happening:
+
+1. The server is trying to create/use a **local working folder** called `./.dh_py`, but your current shell/cwd combo (Git Bash on Windows) is confusing the path handling → `OSError: [Errno 2] No such file or directory: './.dh_py'`.
+    
+2. It also tried to use a **layouts** folder that ended up as `'/layouts'` (a Unix-root path that doesn’t exist on Windows) → “Invalid path: `/layouts`”.
+    
+
+Both are easy to fix by 1) running from a simple Windows path you own and 2) telling Deephaven explicitly where to keep its workspace and layouts using absolute Windows paths.
+
+## Do this (Git Bash friendly; no activation needed)
+
+1. **Pick a clean local folder** (no network drive). I’ll use:
+    
+
+```
+C:\Users\TAP3507\dh-local
+```
+
+2. **Create the folders Deephaven will use:**
+    
+
+```bash
+mkdir -p /c/Users/TAP3507/dh-local/workspace
+mkdir -p /c/Users/TAP3507/dh-local/layouts
+```
+
+3. **Create a fresh start script** `start_dh.py` in `C:\Users\TAP3507\dh-local\`:
+    
+
+```python
+# start_dh.py
+import os
+from deephaven_server import Server
+
+# Use explicit absolute Windows paths (no leading slashes)
+WORKSPACE = r"C:\Users\TAP3507\dh-local\workspace"
+LAYOUTS   = r"C:\Users\TAP3507\dh-local\layouts"
+
+# make sure they exist
+os.makedirs(WORKSPACE, exist_ok=True)
+os.makedirs(LAYOUTS,   exist_ok=True)
+
+# Tell Deephaven where to put notebooks/workspace & layouts
+jvm_args = [
+    "-Xmx2g",
+    f"-Ddeephaven.workspace={WORKSPACE}",
+    f"-Ddeephaven.layouts.dir={LAYOUTS}",
+]
+
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven IDE → http://localhost:10000/ide/  (Ctrl+C to stop)")
+
+# keep process alive
+import time;  time.sleep(10**9)
+```
+
+> Those system properties force Deephaven to use **Windows absolute paths**, avoiding `./.dh_py` and `/layouts`.
+
+4. **Run it using your venv’s Python (no activation)**
+    
+
+```bash
+/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe \
+  /c/Users/TAP3507/dh-local/start_dh.py
+```
+
+If Java 17+ is installed, you should now see it come up cleanly. Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)**.
+
+---
+
+### If you still see a path error
+
+- Make sure you’re running **from a local folder** (not a network share).
+    
+- Double-check the two paths in the script are valid on your machine.
+    
+- If you changed the username or base path, mirror it in both the `mkdir` commands and `WORKSPACE`/`LAYOUTS` strings.
+    
+
+---
+
+### Why this works
+
+- Git Bash sometimes converts or normalizes relative paths oddly on Windows. By giving Deephaven **absolute Windows paths** via JVM args, we bypass that ambiguity.
+    
+- Creating the directories up front removes the “No such file or directory: './.dh_py'” failure mode.
+    
+- Setting `-Ddeephaven.layouts.dir` prevents it from defaulting to a bogus root path like `'/layouts'`.
+    
+
+---
+
+If you want, paste the very first 10–15 lines of output after you run the command above. If there’s still an error, I’ll diagnose it from the exact message and tweak the property names/paths accordingly.
