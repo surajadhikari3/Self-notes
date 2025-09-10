@@ -462,3 +462,116 @@ Run it:
 ## If anything still fails
 
 Send me the **first 10–15 lines** after you start the script (just the header + the first exception line). But in most cases, creating `C:\layouts` (and `C:\Users\TAP3507\.dh_py`) makes the server boot immediately.
+
+---------------------------
+
+
+Perfect—that explains it. Since there’s **no config** under:
+
+```
+C:\Users\TAP3507\AppData\Roaming\Deephaven Data Labs\deephaven\config
+```
+
+the server falls back to a bad default (`/layouts`). Let’s **create the config and point Deephaven to your own folders** so it stops looking for `/layouts`.
+
+---
+
+## Do this exactly (Git Bash friendly)
+
+### 1) Create folders Deephaven will use
+
+```bash
+mkdir -p /c/Users/TAP3507/dh-local/workspace
+mkdir -p /c/Users/TAP3507/dh-local/layouts
+```
+
+### 2) Create the Deephaven config folder
+
+```bash
+mkdir -p "/c/Users/TAP3507/AppData/Roaming/Deephaven Data Labs/deephaven/config"
+```
+
+### 3) Create a **deephaven.properties** file with explicit Windows paths
+
+```bash
+cat > "/c/Users/TAP3507/AppData/Roaming/Deephaven Data Labs/deephaven/config/deephaven.properties" << 'EOF'
+# Force Deephaven to use these directories (avoid /layouts default)
+deephaven.layouts.dir = C:\\Users\\TAP3507\\dh-local\\layouts
+deephaven.workspace   = C:\\Users\\TAP3507\\dh-local\\workspace
+
+# Extra aliases some builds look at (harmless if unused)
+deephaven.console.layouts.dir = C:\\Users\\TAP3507\\dh-local\\layouts
+deephaven.ide.layouts.dir     = C:\\Users\\TAP3507\\dh-local\\layouts
+deephaven.server.notebook.dir = C:\\Users\\TAP3507\\dh-local\\workspace
+deephaven.server.notebook.filesystem.root = C:\\Users\\TAP3507\\dh-local\\workspace
+EOF
+```
+
+> Note the **double backslashes** (`\\`) — required in Java properties for Windows paths.
+
+### 4) Start the server (no activation; use your venv’s python)
+
+```bash
+"/c/Users/TAP3507/source/test_folder/dh-dashboard/dh-env/Scripts/python.exe" \
+  "/c/Users/TAP3507/dh-local/start_dh.py"
+```
+
+Open: **[http://localhost:10000/ide/](http://localhost:10000/ide/)**
+
+---
+
+## If you still see `/layouts` in the error
+
+That would mean the properties weren’t loaded. Quick checks:
+
+```bash
+# confirm the file exists and contents look right
+ls -l "/c/Users/TAP3507/AppData/Roaming/Deephaven Data Labs/deephaven/config/deephaven.properties"
+cat "/c/Users/TAP3507/AppData/Roaming/Deephaven Data Labs/deephaven/config/deephaven.properties"
+```
+
+Then try the **belt-and-suspenders** approach: also pass the same values via JVM args in your `start_dh.py`:
+
+```python
+# start_dh.py (replace with this if needed)
+import os
+from deephaven_server import Server
+
+BASE = r"C:\Users\TAP3507\dh-local"
+WORKSPACE = rf"{BASE}\workspace"
+LAYOUTS   = rf"{BASE}\layouts"
+os.makedirs(WORKSPACE, exist_ok=True)
+os.makedirs(LAYOUTS,   exist_ok=True)
+
+jvm_args = [
+    "-Xmx2g",
+    f"-Ddeephaven.layouts.dir={LAYOUTS}",
+    f"-Ddeephaven.workspace={WORKSPACE}",
+    f"-Ddeephaven.console.layouts.dir={LAYOUTS}",
+    f"-Ddeephaven.ide.layouts.dir={LAYOUTS}",
+    f"-Ddeephaven.server.notebook.dir={WORKSPACE}",
+    f"-Ddeephaven.server.notebook.filesystem.root={WORKSPACE}",
+]
+s = Server(port=10000, jvm_args=jvm_args)
+s.start()
+print("Deephaven IDE → http://localhost:10000/ide/  (Ctrl+C to stop)")
+import time; time.sleep(10**9)
+```
+
+Run again with the same command in step 4.
+
+---
+
+## One more safety net (works instantly)
+
+If for any reason the config still doesn’t register, **create the folder it’s asking for**:
+
+```bash
+mkdir -p /c/layouts
+```
+
+That’s the path Deephaven complains about (`/layouts` → `C:\layouts`). Creating it guarantees startup, even without the properties file.
+
+---
+
+Once the IDE is up, we can drop in the **Kafka consumer** code and you’ll have your push-based dashboard running.
