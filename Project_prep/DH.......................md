@@ -1781,3 +1781,107 @@ No extra configs needed unless you want Compose (then just `sudo yum install doc
 ---
 
 Do you also want me to give you the **minimal one-liner script** (just copy-paste and done) so you don’t have to run each step manually?
+
+--------------------------------
+
+hhhh
+
+You can install and run **Deephaven on Windows using only Python/pip** (no Docker needed). Here’s a clean step-by-step guide:
+
+---
+
+## ✅ 1. Prerequisites
+
+- **Python 3.9+** (ideally 3.9–3.11)
+    
+- **Java 11+** (you said you already have Java 17, that’s perfect)
+    
+- Make sure both Python and Java are added to your `PATH`.
+    
+
+Check:
+
+```powershell
+python --version
+java -version
+```
+
+---
+
+## ✅ 2. Create Virtual Environment
+
+```powershell
+python -m venv venv
+.\venv\Scripts\activate
+```
+
+---
+
+## ✅ 3. Install Deephaven Server
+
+Inside the virtual environment:
+
+```powershell
+pip install --upgrade pip wheel setuptools
+pip install deephaven-server
+```
+
+This installs the Deephaven Python package and server.
+
+---
+
+## ✅ 4. Set Required Folders (to avoid “invalid path /layouts” errors)
+
+Deephaven expects some directories for configs/layouts. Create them manually:
+
+```powershell
+mkdir C:\deephaven\data
+mkdir C:\deephaven\cache
+mkdir C:\deephaven\config
+mkdir C:\deephaven\layouts
+```
+
+Set environment variables (add to PowerShell before running Deephaven):
+
+```powershell
+$env:DEEPHAVEN_DATA_DIR="C:\deephaven\data"
+$env:DEEPHAVEN_CACHE_DIR="C:\deephaven\cache"
+$env:DEEPHAVEN_CONFIG_DIR="C:\deephaven\config"
+$env:DEEPHAVEN_LAYOUTS_DIR="C:\deephaven\layouts"
+```
+
+---
+
+## ✅ 5. Start Deephaven
+
+Simply run:
+
+```powershell
+deephaven
+```
+
+It should launch at:  
+👉 [http://localhost:10000](http://localhost:10000/)
+
+---
+
+## ✅ 6. (Optional) Connect via Java Client
+
+If you want to build dashboards in Java:
+
+```xml
+<dependency>
+  <groupId>io.deephaven</groupId>
+  <artifactId>deephaven-client</artifactId>
+  <version>0.34.0</version> <!-- or latest -->
+</dependency>
+```
+
+---
+
+🔥 That’s it — no Docker required.  
+You now have Deephaven running locally with Python only.
+
+---
+
+Do you also want me to show you how to **connect Deephaven to Kafka locally** (so you can build your real-time dashboard end-to-end)?
