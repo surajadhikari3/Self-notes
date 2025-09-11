@@ -1885,3 +1885,151 @@ You now have Deephaven running locally with Python only.
 ---
 
 Do you also want me to show you how to **connect Deephaven to Kafka locally** (so you can build your real-time dashboard end-to-end)?
+
+----
+
+You’re typing the **properties into PowerShell**, which tries to execute them as commands—that’s why you get “not recognized as the name of a cmdlet…”. Those lines must go **inside a text file** (`deephaven.prop`) or be passed as **JVM args** when you start the server.
+
+Here’s the exact, copy-paste way to do **Option B (config file)** in PowerShell:
+
+1. Make sure the folders exist:
+    
+
+```powershell
+mkdir C:\deephaven\config -ea 0
+mkdir C:\deephaven\layouts -ea 0
+mkdir C:\deephaven\notebooks -ea 0
+```
+
+2. Create `C:\deephaven\config\deephaven.prop` with the correct contents:
+    
+
+```powershell
+$conf = @"
+includefiles=dh-defaults.prop
+web.storage.layout.directory=C:\\deephaven\\layouts
+web.storage.notebook.directory=C:\\deephaven\\notebooks
+"@
+Set-Content -Path C:\deephaven\config\deephaven.prop -Value $conf -Encoding ASCII
+```
+
+(If you want to verify:)
+
+```powershell
+Get-Content C:\deephaven\config\deephaven.prop
+```
+
+3. Point Deephaven at that config dir and start:
+    
+
+```powershell
+$env:DEEPHAVEN_CONFIG_DIR="C:\deephaven\config"
+deephaven server --port 10000
+```
+
+You should now see the startup log show the Windows paths and not `/layouts`.
+
+---
+
+If you’d rather do **Option A (JVM args)**, the quoting in PowerShell is the trick:
+
+```powershell
+deephaven server --port 10000 --jvm-args '-Dweb.storage.layout.directory=C:\deephaven\layouts -Dweb.storage.notebook.directory=C:\deephaven\notebooks'
+```
+
+(Use single quotes around the whole `--jvm-args` string in PowerShell. If that still complains, try Java-friendly forward slashes:)
+
+```powershell
+deephaven server --port 10000 --jvm-args '-Dweb.storage.layout.directory=C:/deephaven/layouts -Dweb.storage.notebook.directory=C:/deephaven/notebooks'
+```
+
+---
+
+### Quick sanity checks / gotchas
+
+- Remove any global Java override that might inject bad args:
+    
+    ```powershell
+    Remove-Item Env:_JAVA_OPTIONS -ErrorAction SilentlyContinue
+    ```
+    
+- Ensure you’re in the **venv** when starting Deephaven.
+    
+- Paths must exist and be writable.
+    
+
+If it still throws `INVALID_ARGUMENT: Invalid path: /layouts`, paste the **first 30 lines** of the new startup log (the part that prints the directories) and I’ll zero in on what’s still pointing to `/layouts`.
+
+--------
+working-bitsss..
+
+
+You're super close — the server is rejecting the **absolute Windows paths** you’re giving for the Web File Storage service. The storage service expects paths **relative to Deephaven’s dataDir** (your log shows `deephaven.dataDir=C:\deephaven\data`). Point those properties **inside** that folder and make sure the directories exist.
+
+Here’s the exact, working fix on Windows/PowerShell:
+
+1. Create the storage folders under the data directory
+    
+
+```powershell
+New-Item -Force -ItemType Directory C:\deephaven\data\storage\layouts | Out-Null
+New-Item -Force -ItemType Directory C:\deephaven\data\storage\notebooks | Out-Null
+```
+
+2. Put the properties in your Deephaven config (note: **relative** to dataDir)
+    
+
+```powershell
+$conf = @"
+includefiles=dh-defaults.prop
+web.storage.layout.directory=storage/layouts
+web.storage.notebook.directory=storage/notebooks
+"@
+Set-Content -Path C:\deephaven\config\deephaven.prop -Value $conf -Encoding ASCII
+
+$env:DEEPHAVEN_CONFIG_DIR="C:\deephaven\config"
+```
+
+3. Start the server (no extra JVM args needed)
+    
+
+```powershell
+deephaven server --port 10000
+```
+
+That’s it. The paths `storage/layouts` and `storage/notebooks` will resolve to:
+
+- `C:\deephaven\data\storage\layouts`
+    
+- `C:\deephaven\data\storage\notebooks`
+    
+
+…which the server will accept.
+
+### Why this works (and what went wrong)
+
+- The Web UI storage directories are configured via `web.storage.layout.directory` and `web.storage.notebook.directory`. They’re part of the standard Web defaults you can set in `deephaven.prop`. ([Deephaven](https://deephaven.io/core/0.39.8/docs/how-to-guides/configuration/configure-web/ "Web Defaults | Deephaven"))
+    
+- Using absolute Windows paths like `C:\deephaven\layouts` causes `FilesystemStorageService` to reject them as “Invalid path”. Pointing the properties **inside the server’s dataDir** (and ensuring the directories exist) matches how Deephaven expects to store notebooks/layouts (e.g., Docker default keeps notebooks under `/data/storage/notebooks`). ([Deephaven](https://deephaven.io/core/docs/reference/community-questions/import-python-script/?utm_source=chatgpt.com "How do I import one Python script into another in the ..."))
+    
+- Creating your own `deephaven.prop` that includes `dh-defaults.prop` is the recommended way to supply these settings. ([Deephaven](https://deephaven.io/core/0.39.8/docs/how-to-guides/configuration/config-file/?utm_source=chatgpt.com "Create a Deephaven configuration file"))
+    
+
+### Optional: JVM-args variant
+
+If you prefer passing properties on the command line instead of a file, you can do:
+
+```powershell
+deephaven server --port 10000 --jvm-args `
+"-Dweb.storage.layout.directory=storage/layouts -Dweb.storage.notebook.directory=storage/notebooks"
+```
+
+### If you still see “Invalid path”
+
+Very rarely, older builds may also accept file-URIs. Try:
+
+```powershell
+--jvm-args "-Dweb.storage.layout.directory=file:///C:/deephaven/data/storage/layouts -Dweb.storage.notebook.directory=file:///C:/deephaven/data/storage/notebooks"
+```
+
+Run those exact steps and the server should start cleanly without the `INVALID_ARGUMENT: Invalid path` error.
