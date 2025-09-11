@@ -541,3 +541,171 @@ kpis_5m = (
     
 
 If you paste one **sample JSON message** (keys + values), I’ll lock the `json_spec` exactly to your fields and add a rolling window chart tailored to your Gold schema.
+
+---
+
+```python
+# === Deephaven real-time dashboard from Kafka (latest API) ===
+
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.agg import sum_
+import deephaven.plot.express as dx
+
+# -------------------------------------------------------------------
+# 1) Kafka config (POSitional arg; new API).  Fill in your values.
+# -------------------------------------------------------------------
+TOPIC = "gold_positions_changes"     # <-- your topic name
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-xxxx.canadacentral.azure.confluent.cloud:9092",
+    "group.id": "dh-gold-consumer",
+    "auto.offset.reset": "latest",
+
+    # --- SASL over TLS + OAUTHBEARER (matches your Databricks setup) ---
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+
+    # JAAS stanza is REQUIRED with OAUTH; empty options are fine
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;",
+
+    # Try non-shaded class first; if you get ClassNotFound, switch to shaded line
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.login.callback.handler.class":
+    #   "kafkashaded.org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+
+    "sasl.oauthbearer.token.endpoint.url": "https://<your-idp>/oauth2/token",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "<KAFKA_CLIENT_ID>",
+    "sasl.oauthbearer.client.secret": "<KAFKA_CLIENT_SECRET>",
+
+    # If your broker requires these extensions (you had them in Databricks), keep them:
+    "sasl.oauthbearer.extensions.logicalCluster": "<LOGICAL_CLUSTER>",
+    "sasl.oauthbearer.extensions.identityPoolId": "<IDENTITY_POOL_ID>",
+    "sasl.oauthbearer.extensions.identityPool": "<IDENTITY_POOL>",
+
+    "ssl.endpoint.identification.algorithm": "https",
+
+    # Deserialize as strings; JSON parsing is handled by json_spec below
+    "key.deserializer":   "org.apache.kafka.common.serialization.StringDeserializer",
+    "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+}
+
+# -------------------------------------------------------------------
+# 2) Describe the JSON VALUE your producer sends (Silver schema)
+#    (Include the columns you care about in the dashboard.)
+# -------------------------------------------------------------------
+VALUE_SPEC = kc.json_spec({
+    "_source_system": dt.string,     # "FIXED INCOME" | "GED" | "COMMODITIES"
+    "allotment":      dt.string,
+    "positionId":     dt.string,
+    "instrumentCode": dt.string,
+    "cusip":          dt.string,
+    "isin":           dt.string,
+    "pnl":            dt.double,
+    "mtm":            dt.double,     # keep if present
+    "qty":            dt.int32,      # keep if present
+    "price":          dt.double,     # keep if present
+    "event_time":     dt.string,     # ISO-8601 text (e.g., "...Z")
+})
+
+# -------------------------------------------------------------------
+# 3) Consume → refreshing table (POSitional args + TableType enum)
+# -------------------------------------------------------------------
+raw = kc.consume(
+    KAFKA_CONFIG,            # kafka config (dict)
+    TOPIC,                   # topic (str)
+    key_spec=kc.KeyValueSpec.IGNORE,   # you have the key in VALUE anyway
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# -------------------------------------------------------------------
+# 4) Clean/cast convenience columns (formula language inside strings)
+# -------------------------------------------------------------------
+live = raw.update([
+    "EventTs = isNull(event_time) ? null : parseInstant(event_time)",
+
+    # Prefer CUSIP; if blank/null, fall back to ISIN
+    "identifier = (!isNull(cusip) && cusip != ``) ? cusip "
+    "           : ((!isNull(isin) && isin != ``) ? isin : null)"
+])
+
+# -------------------------------------------------------------------
+# 5) Choose a source_system slice for the dashboard (change anytime)
+# -------------------------------------------------------------------
+SOURCE = "GED"   # or "FIXED INCOME", "COMMODITIES"
+pos = live.where(f"_source_system == `{SOURCE}`")
+
+# -------------------------------------------------------------------
+# 6) Dashboard tables (all refresh in real time)
+# -------------------------------------------------------------------
+
+# 6a) Overall data (your selected columns)
+overall = pos.view([
+    "_source_system", "allotment", "positionId", "instrumentCode",
+    "cusip", "isin", "identifier",
+    "pnl", "mtm", "qty", "price", "EventTs"
+])
+
+# 6b) Highest P&L row (for the selected source_system)
+highest_pnl = pos.sort_descending("pnl").head(1)
+
+# 6c) Sum of P&L by allotment (table + bar)
+pnl_by_allot = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["allotment"])
+       .sort_descending("total_pnl")
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_allot = dx.bar(
+    pnl_by_allot, x="total_pnl", y="allotment", color="sign",
+    title=f"P&L by Allotment • {SOURCE}"
+)
+
+# 6d) Top 10 instruments by total P&L (table + bar)
+top10_instruments = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["instrumentCode"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10_instr = dx.bar(
+    top10_instruments, x="total_pnl", y="instrumentCode", color="sign",
+    title=f"Top 10 Instruments by P&L • {SOURCE}"
+)
+
+# 6e) Top 10 “security” by total P&L (prefer CUSIP else ISIN)
+top10_security = (
+    pos.where("identifier != null")
+       .agg_by([sum_("total_pnl = pnl")], by=["identifier"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10_security = dx.bar(
+    top10_security, x="total_pnl", y="identifier", color="sign",
+    title=f"Top 10 Security by P&L • {SOURCE}"
+)
+
+# (Optional) rolling 5-minute KPIs per instrument
+kpis_5m = (
+    pos.where("EventTs >= now() - MINUTE * 5")
+       .agg_by([sum_("qty_sum = qty"), sum_("notional = price * qty"), sum_("pnl_5m = pnl")],
+               by=["instrumentCode"])
+       .sort_descending("pnl_5m")
+)
+```
+
+### Notes / gotchas (these match your last errors)
+
+- **Datetime conversion**: use `parseInstant(event_time)` **inside** `update([...])` (formula language). Don’t call Python helpers there.
+    
+- **JAAS/KafkaClient error**: the one-liner  
+    `sasl.jaas.config = "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;"`  
+    satisfies the JAAS requirement for OAUTHBEARER.
+    
+- **Callback handler class**: if you see `ClassNotFound`, switch to the **shaded** class shown in the comment.
+    
+- **Key handling**: since `source_system` is already in your VALUE payload, we ignore the Kafka key. If your key itself is JSON you can set `key_spec=kc.json_spec({...})`.
+    
+
+If you want this dashboard **per source_system simultaneously**, say the word and I’ll give you a small param-control pattern (three filtered views and a tabbed layout).
