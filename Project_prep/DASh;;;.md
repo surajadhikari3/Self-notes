@@ -857,3 +857,401 @@ bar_top10_security = dx.bar(
     
 
 If `instrumentCode` in your topic is truly numeric, change its dtype in `VALUE_SPEC` to `dt.int64` and the code still works. If you want all three **source systems** on one screen (three panels), say the word and I’ll give you a quick trellis pattern.
+
+------------------
+
+
+great progress! let’s tighten a few things based on your screenshots:
+
+- you have **both** `_START_AT/_END_AT` **and** `_start_at/_end_at`.
+    
+- `_START_AT/_END_AT` are timestamps in Databricks, but come through Kafka as strings (or sometimes true timestamps).
+    
+- your `highest_pnl` view showed Kafka metadata—so we’ll **only select** the columns you want.
+    
+- make the bars **wider / clearer** and add **axis labels**.
+    
+
+Below is a **drop-in update** using the **new Kafka API** you’re already on. It:
+
+- coalesces start/end using either upper- or lower-case fields and works whether they arrive as strings or timestamps,
+    
+- removes any Kafka metadata from the widgets,
+    
+- makes charts horizontal, **limits to top-N**, and sets axis labels.
+    
+
+```python
+# === Deephaven real-time dashboard from Kafka (your columns, cleaned) ===
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.agg import sum_
+import deephaven.plot.express as dx
+
+# --- 1) Kafka config (same as you have now) ---
+TOPIC = "gold_positions_changes"
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-xxxx.canadacentral.azure.confluent.cloud:9092",
+    "group.id": "dh-gold-consumer",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;",
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.login.callback.handler.class":
+    #   "kafkashaded.org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.oauthbearer.token.endpoint.url": "https://<your-idp>/oauth2/token",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "<KAFKA_CLIENT_ID>",
+    "sasl.oauthbearer.client.secret": "<KAFKA_CLIENT_SECRET>",
+    "sasl.oauthbearer.extensions.logicalCluster": "<LOGICAL_CLUSTER>",
+    "sasl.oauthbearer.extensions.identityPoolId": "<IDENTITY_POOL_ID>",
+    "sasl.oauthbearer.extensions.identityPool": "<IDENTITY_POOL>",
+    "ssl.endpoint.identification.algorithm": "https",
+    "key.deserializer":   "org.apache.kafka.common.serialization.StringDeserializer",
+    "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+}
+
+# --- 2) JSON schema: only the fields you actually have ---
+VALUE_SPEC = kc.json_spec({
+    "_source_system": dt.string,
+    "allotment":      dt.string,
+    "positionId":     dt.string,
+    "instrumentCode": dt.string,  # change to dt.int64 if truly numeric
+    "cusip":          dt.string,
+    "isin":           dt.string,
+    "pnl":            dt.double,
+    "mtm":            dt.double,
+    "_event_ts":      dt.string,
+    "_START_AT":      dt.string,
+    "_END_AT":        dt.string,
+    "_start_at":      dt.string,  # seen in your screenshots; keep as backup
+    "_end_at":        dt.string,
+})
+
+# --- 3) Consume (positional args + TableType) ---
+raw = kc.consume(
+    KAFKA_CONFIG, TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# --- 4) Normalization: robust timestamp casting + identifier preference ---
+# Use parseInstant on whichever variant is present; handle both true timestamps and strings
+live = raw.update([
+    # Event time (upper-case field in your screenshots)
+    "EventTs = isNull(_event_ts) ? null : parseInstant(_event_ts)",
+
+    # Start/End: prefer UPPER variant; if null, try lower; parse string form
+    "StartAt = !isNull(_START_AT) ? parseInstant(string(_START_AT)) "
+    "        : (!isNull(_start_at) ? parseInstant(_start_at) : null)",
+
+    "EndAt   = !isNull(_END_AT)   ? parseInstant(string(_END_AT)) "
+    "        : (!isNull(_end_at)  ? parseInstant(_end_at)  : null)",
+
+    # Security identifier: prefer CUSIP, else ISIN
+    "identifier = (!isNull(cusip) && cusip != ``) ? cusip "
+    "          : ((!isNull(isin)  && isin  != ``) ? isin  : null)"
+])
+
+# --- 5) Slice by source system ---
+SOURCE = "GED"  # change to "FIXED INCOME" or "COMMODITIES" as needed
+pos = live.where(f"_source_system == `{SOURCE}`")
+
+# --- 6) Dashboard tables (select only business columns; no Kafka metadata) ---
+
+# Overall table
+overall = pos.view([
+    "_source_system", "allotment", "positionId", "instrumentCode",
+    "cusip", "isin", "identifier", "pnl", "mtm", "EventTs", "StartAt", "EndAt"
+])
+
+# Highest P&L row (business columns only)
+highest_pnl = (
+    pos.sort_descending("pnl").view([
+        "_source_system", "instrumentCode", "identifier",
+        "allotment", "positionId", "pnl", "mtm", "EventTs"
+    ]).head(1)
+)
+
+# Sum P&L by allotment (horizontal bars, top 12)
+pnl_by_allot = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["allotment"])
+       .sort_descending("total_pnl").head(12)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_allot = dx.bar(
+    pnl_by_allot,
+    x="total_pnl", y="allotment", color="sign",
+    title=f"P&L by Allotment • {SOURCE}",
+    x_label="Total P&L", y_label="Allotment"
+)
+
+# Top 10 instruments by total P&L (horizontal bars)
+top10_instruments = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["instrumentCode"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10_instr = dx.bar(
+    top10_instruments,
+    x="total_pnl", y="instrumentCode", color="sign",
+    title=f"Top 10 Instruments by P&L • {SOURCE}",
+    x_label="Total P&L", y_label="Instrument"
+)
+
+# Top 10 security by total P&L (CUSIP→ISIN fallback; horizontal bars)
+top10_security = (
+    pos.where("identifier != null")
+       .agg_by([sum_("total_pnl = pnl")], by=["identifier"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10_security = dx.bar(
+    top10_security,
+    x="total_pnl", y="identifier", color="sign",
+    title=f"Top 10 Security by P&L • {SOURCE}",
+    x_label="Total P&L", y_label="Security (CUSIP or ISIN)"
+)
+```
+
+### Why this fixes your points
+
+- **StartAt/EndAt nulls**: we now **coalesce** `_START_AT` → `_start_at`, and use `parseInstant(string(...))` so it works whether the field arrives as a string or a timestamp.
+    
+- **Kafka metadata showing up**: `highest_pnl` and other widgets use **`view([...])`** to select only business columns.
+    
+- **Bars clearer & wider**: horizontal orientation + **top-N** (10–12) yields thicker bars; and we set **axis labels** with `x_label`/`y_label`.
+    
+
+If you want a **tabbed dashboard** for all three source systems at once, or to persist the layout, say the word and I’ll add that pattern too.
+
+---------------
+
+Here you go — a single, copy-paste **end-to-end** script that:
+
+- uses the **current** Kafka API (`deephaven.stream.kafka.consumer`)
+    
+- works with your **Silver** schema (no `qty/price`, uses `pnl`, `mtm`, `_event_ts`, `_START_AT/_start_at`, `_END_AT/_end_at`)
+    
+- normalizes timestamps, prefers **CUSIP then ISIN** for “security”
+    
+- builds a **tabbed dashboard**: **ALL**, **GED**, **FIXED INCOME**, **COMMODITIES**
+    
+- shows: **Highest P&L**, **P&L by Allotment**, **Top-10 Instruments**, **Top-10 Security**, plus (in ALL) **P&L by Source System**
+    
+- uses **horizontal bars**, **top-N** (thicker bars), and **axis labels**
+    
+- selects only business columns (no Kafka metadata)
+    
+
+> Fill in `TOPIC` and the OAuth values in `KAFKA_CONFIG` and run.
+
+```python
+# ==== Deephaven real-time dashboard from Kafka (tabbed, end-to-end) ====
+
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.agg import sum_
+import deephaven.plot.express as dx
+from deephaven import ui
+
+# ---------------------------------------------------------------------
+# 1) Kafka config (edit TOPIC + OAuth values to your environment)
+# ---------------------------------------------------------------------
+TOPIC = "gold_positions_changes"   # <-- your topic
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-xxxx.canadacentral.azure.confluent.cloud:9092",
+    "group.id": "dh-gold-consumer",
+    "auto.offset.reset": "latest",
+
+    # --- SASL over TLS + OAUTHBEARER ---
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+
+    # JAAS stanza is REQUIRED with OAUTH; empty options are fine
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;",
+
+    # Try non-shaded handler first; if you see ClassNotFound, switch to the shaded line below
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.login.callback.handler.class":
+    #   "kafkashaded.org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+
+    "sasl.oauthbearer.token.endpoint.url": "https://<your-idp>/oauth2/token",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "<KAFKA_CLIENT_ID>",
+    "sasl.oauthbearer.client.secret": "<KAFKA_CLIENT_SECRET>",
+
+    # Keep these if your broker requires them (you had them in Databricks)
+    "sasl.oauthbearer.extensions.logicalCluster": "<LOGICAL_CLUSTER>",
+    "sasl.oauthbearer.extensions.identityPoolId": "<IDENTITY_POOL_ID>",
+    "sasl.oauthbearer.extensions.identityPool": "<IDENTITY_POOL>",
+
+    "ssl.endpoint.identification.algorithm": "https",
+
+    # We read JSON text then map via json_spec
+    "key.deserializer":   "org.apache.kafka.common.serialization.StringDeserializer",
+    "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+}
+
+# ---------------------------------------------------------------------
+# 2) JSON VALUE schema — only the columns you actually have
+# ---------------------------------------------------------------------
+VALUE_SPEC = kc.json_spec({
+    "_source_system": dt.string,     # GED / FIXED INCOME / COMMODITIES
+    "allotment":      dt.string,
+    "positionId":     dt.string,
+    "instrumentCode": dt.string,     # switch to dt.int64 if truly numeric
+    "cusip":          dt.string,
+    "isin":           dt.string,
+    "pnl":            dt.double,
+    "mtm":            dt.double,
+    "_event_ts":      dt.string,     # ISO-8601 text
+    "_START_AT":      dt.string,     # may arrive as string or timestamp; we handle both
+    "_END_AT":        dt.string,
+    "_start_at":      dt.string,     # lowercase variants observed
+    "_end_at":        dt.string,
+})
+
+# ---------------------------------------------------------------------
+# 3) Consume (POSitional args; TableType enum)
+# ---------------------------------------------------------------------
+raw = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,   # key is not needed; source system is in VALUE
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# ---------------------------------------------------------------------
+# 4) Normalize timestamps + preferred identifier (CUSIP→ISIN)
+#   - parseInstant() is Deephaven's formula function (used inside update strings)
+#   - string(...) lets us safely coerce timestamp objects to string if needed
+# ---------------------------------------------------------------------
+live = raw.update([
+    "EventTs = isNull(_event_ts) ? null : parseInstant(_event_ts)",
+
+    "StartAt = !isNull(_START_AT) ? parseInstant(string(_START_AT)) "
+    "        : (!isNull(_start_at) ? parseInstant(_start_at) : null)",
+
+    "EndAt   = !isNull(_END_AT)   ? parseInstant(string(_END_AT)) "
+    "        : (!isNull(_end_at)  ? parseInstant(_end_at)  : null)",
+
+    "identifier = (!isNull(cusip) && cusip != ``) ? cusip "
+    "          : ((!isNull(isin)  && isin  != ``) ? isin  : null)"
+])
+
+# ---------------------------------------------------------------------
+# 5) Helper to build one dashboard panel
+#    source=None → ALL (unfiltered) and includes extra "by source" chart
+# ---------------------------------------------------------------------
+def make_panel(source: str | None):
+    base = live if source is None else live.where(f"_source_system == `{source}`")
+    title_suffix = "ALL" if source is None else source
+
+    # Overall business columns only (no Kafka metadata)
+    overall = base.view([
+        "_source_system", "allotment", "positionId", "instrumentCode",
+        "cusip", "isin", "identifier", "pnl", "mtm", "EventTs", "StartAt", "EndAt"
+    ])
+
+    # Highest P&L row (business columns)
+    highest_pnl = (
+        base.sort_descending("pnl")
+            .view(["_source_system", "instrumentCode", "identifier",
+                   "allotment", "positionId", "pnl", "mtm", "EventTs"])
+            .head(1)
+    )
+
+    # P&L by allotment (limit to top 12 for thicker bars)
+    pnl_by_allot = (
+        base.agg_by([sum_("total_pnl = pnl")], by=["allotment"])
+            .sort_descending("total_pnl").head(12)
+            .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+    )
+    bar_allot = dx.bar(
+        pnl_by_allot, x="total_pnl", y="allotment", color="sign",
+        title=f"P&L by Allotment • {title_suffix}",
+        x_label="Total P&L", y_label="Allotment"
+    )
+
+    # Top 10 instruments by P&L
+    top10_instr = (
+        base.agg_by([sum_("total_pnl = pnl")], by=["instrumentCode"])
+            .sort_descending("total_pnl").head(10)
+            .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+    )
+    bar_top10_instr = dx.bar(
+        top10_instr, x="total_pnl", y="instrumentCode", color="sign",
+        title=f"Top 10 Instruments by P&L • {title_suffix}",
+        x_label="Total P&L", y_label="Instrument"
+    )
+
+    # Top 10 security by P&L (CUSIP→ISIN)
+    top10_sec = (
+        base.where("identifier != null")
+            .agg_by([sum_("total_pnl = pnl")], by=["identifier"])
+            .sort_descending("total_pnl").head(10)
+            .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+    )
+    bar_top10_security = dx.bar(
+        top10_sec, x="total_pnl", y="identifier", color="sign",
+        title=f"Top 10 Security by P&L • {title_suffix}",
+        x_label="Total P&L", y_label="Security (CUSIP or ISIN)"
+    )
+
+    # Extra for ALL: P&L by Source System
+    extra_row = None
+    if source is None:
+        by_source = (
+            base.agg_by([sum_("total_pnl = pnl")], by=["_source_system"])
+                .sort_descending("total_pnl")
+                .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+        )
+        bar_by_source = dx.bar(
+            by_source, x="total_pnl", y="_source_system", color="sign",
+            title="P&L by Source System",
+            x_label="Total P&L", y_label="Source System"
+        )
+        extra_row = ui.hbox(bar_by_source, bar_top10_security)
+    else:
+        extra_row = ui.hbox(bar_top10_security)
+
+    # Layout for this tab
+    return ui.vbox(
+        ui.heading(f"{title_suffix} — Live Positions"),
+        highest_pnl,
+        ui.hbox(bar_allot, bar_top10_instr),
+        extra_row,
+        overall,
+        gap="16px"
+    )
+
+# ---------------------------------------------------------------------
+# 6) Build the four tabs and expose a 'dashboard' variable
+# ---------------------------------------------------------------------
+tab_all = make_panel(None)
+tab_ged = make_panel("GED")
+tab_fi  = make_panel("FIXED INCOME")
+tab_cmd = make_panel("COMMODITIES")
+
+dashboard = ui.tabbed({
+    "ALL": tab_all,
+    "GED": tab_ged,
+    "FIXED INCOME": tab_fi,
+    "COMMODITIES": tab_cmd,
+})
+```
+
+**Notes**
+
+- If your OAuth callback handler throws `ClassNotFound`, uncomment the **shaded** class line and comment out the non-shaded one.
+    
+- If `instrumentCode` is numeric, change its dtype to `dt.int64` in `VALUE_SPEC`.
+    
+- You can drag/resize panels and **File → Save Layout** to keep your preferred arrangement.
