@@ -373,3 +373,171 @@ top20 = gold_latest.sort_descending("price").head(20)
     
 
 If you paste one **sample JSON message** from your topic and your **true key columns**, I can align the `value_fields` and the “latest by” logic precisely for your schema.
+
+
+---------------------------------
+
+You’re right—the **new API** lives at `deephaven.stream.kafka.consumer`, and its `consume(...)` signature expects the **Kafka config as the first positional arg**, not a `properties=` keyword. It also wants a `TableType` enum (not `"append"`), and modern dtypes (`int32/int64/double/Instant`, etc.). Below is **zero-issue, copy-paste** code for both a local broker and your OAuth/SASL broker.
+
+I’m following the current Deephaven docs for `consume`, `json_spec`, `KeyValueSpec`, and `TableType`. ([Deephaven](https://deephaven.io/core/0.39.8/docs/reference/data-import-export/Kafka/consume/?utm_source=chatgpt.com "consume"))
+
+---
+
+# ✅ Option A — Local Kafka (PLAINTEXT) sanity test
+
+```python
+# --- Imports (new API) ---
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dht
+import deephaven.plot.express as dx
+from deephaven.agg import sum_
+
+# 1) Kafka client config (PLAINTEXT)
+KAFKA_CONFIG = {
+    "bootstrap.servers": "localhost:9092",
+    "group.id": "dh-consumer",
+    "auto.offset.reset": "latest",
+}
+TOPIC = "positions"
+
+# 2) Declare JSON schema for message VALUE
+VALUE_SPEC = kc.json_spec({
+    "_source_system": dht.string,
+    "allotment":      dht.string,
+    "instrumentCode": dht.string,
+    "positionId":     dht.string,
+    "pnl":            dht.double,
+    "mtm":            dht.double,
+    "isin":           dht.string,
+    "cusip":          dht.string,
+    "qty":            dht.int32,
+    "price":          dht.double,
+    "event_time":     dht.string,   # ISO-8601 string; we’ll parse to Instant next
+})
+
+# 3) Consume → refreshing table (NOTE: positional args; no 'properties=')
+positions = kc.consume(
+    KAFKA_CONFIG,           # kafka_config (dict) — positional
+    TOPIC,                  # topic (str)
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# 4) Parse event_time to Instant for windowing/ordering
+positions = positions.update(["EventTime = (Instant)toDatetime(event_time)"])
+
+# 5) A tiny, real-time dashboard slice
+SOURCE = "GED"
+pos = positions.where(f"_source_system == `{SOURCE}`")
+
+latest = pos.sort_descending("EventTime").last_by("instrumentCode")
+
+pnl_by_instr = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["instrumentCode"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10 = dx.bar(pnl_by_instr, x="total_pnl", y="instrumentCode", color="sign",
+                   title=f"Top 10 by P&L • {SOURCE}")
+
+pnl_by_allot = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["allotment"])
+       .sort_descending("total_pnl")
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_allot = dx.bar(pnl_by_allot, x="total_pnl", y="allotment", color="sign",
+                   title=f"P&L by Allotment • {SOURCE}")
+```
+
+---
+
+# 🔐 Option B — OAuth (SASL_SSL + OAUTHBEARER) like your Databricks setup
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dht
+from deephaven.agg import sum_
+import deephaven.plot.express as dx
+
+# 1) Kafka client config (SASL_SSL + OAUTHBEARER)
+TOPIC = "gold_positions_changes"  # <-- your topic
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-XXXX.azure.confluent.cloud:9092",
+    "group.id": "dh-gold-consumer",
+    "auto.offset.reset": "latest",
+
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+
+    # Try non-shaded first; if you get ClassNotFound, switch to shaded line below
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.login.callback.handler.class":
+    #   "kafkashaded.org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+
+    "sasl.oauthbearer.token.endpoint.url": "https://<your-idp>/oauth2/token",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "<KAFKA_CLIENT_ID>",
+    "sasl.oauthbearer.client.secret": "<KAFKA_CLIENT_SECRET>",
+
+    # If your cluster requires these (match your Databricks producer)
+    "sasl.oauthbearer.extensions.logicalCluster": "<LOGICAL_CLUSTER>",
+    "sasl.oauthbearer.extensions.identityPoolId": "<IDENTITY_POOL_ID>",
+    "sasl.oauthbearer.extensions.identityPool": "<IDENTITY_POOL>",
+
+    "ssl.endpoint.identification.algorithm": "https",
+}
+
+# 2) Declare JSON schema for VALUE
+VALUE_SPEC = kc.json_spec({
+    "event_ts":  dht.string,   # or dht.Instant if you already send epoch/Instant
+    "symbol":    dht.string,
+    "price":     dht.double,
+    "qty":       dht.int32,
+    "op":        dht.string,   # CDC op if present: I/U/D
+    # ...add all columns you produce...
+})
+
+# 3) Consume → refreshing table (positional args)
+t = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,   # or kc.json_spec({...}) if key is JSON
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# 4) Cast event_ts to Instant if it’s ISO-8601 text
+live = t.update(["EventTs = (Instant)toDatetime(event_ts)"])
+
+# 5) Examples
+latest = live.sort_descending("EventTs").last_by("symbol")
+
+from deephaven.agg import sum_
+kpis_5m = (
+    live.where("EventTs >= now() - MINUTE * 5")
+        .agg_by([sum_("qty_sum = qty"), sum_("notional = price * qty")], by=["symbol"])
+        .sort_descending("notional")
+)
+```
+
+---
+
+## Common gotchas (with exact fixes)
+
+- **“consumer is not taking the properties”** → Use **positional** `consume(kafka_config, topic, ...)` as above; don’t pass `properties=`. This matches the reference signature. ([Deephaven](https://deephaven.io/core/0.39.8/docs/reference/data-import-export/Kafka/consume/?utm_source=chatgpt.com "consume"))
+    
+- **Wrong module/import** → Use `from deephaven.stream.kafka import consumer as kc` (not `from deephaven import kafka`). ([Deephaven](https://deephaven.io/core/docs/how-to-guides/data-import-export/kafka-stream/?utm_source=chatgpt.com "Connect to a Kafka stream"))
+    
+- **Wrong table type** → Use `kc.TableType.append()` (enum), not `"append"`. ([Deephaven](https://deephaven.io/core/0.39.8/docs/reference/data-import-export/Kafka/consume/?utm_source=chatgpt.com "consume"))
+    
+- **Dtypes** → Use `int32/int64/double/string/Instant` from `deephaven.dtypes`.
+    
+- **OAuth handler `ClassNotFound`** → switch to the **shaded** handler class (see code).
+    
+- **No rows** → verify `TOPIC`, broker reachability (VPN/ACL), and that your producer is sending JSON objects (since we used `json_spec`).
+    
+
+If you paste one **sample JSON message** (keys + values), I’ll lock the `json_spec` exactly to your fields and add a rolling window chart tailored to your Gold schema.
