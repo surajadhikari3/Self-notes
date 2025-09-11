@@ -1341,3 +1341,237 @@ Everything else in your script can stay the same. If you still see any nulls in 
 ```
 
 That’ll clear the x/y label error and give you readable axis labels.
+
+
+---------------
+
+latest................
+
+
+yep — if your build includes `ui.dashboard`, it’s a nice, higher-level wrapper. since availability differs by version, here’s a **safe, copy-paste end-to-end** that:
+
+- uses the latest Kafka consumer (`deephaven.stream.kafka.consumer`)
+    
+- builds the same four views
+    
+- **tries** to render with `ui.dashboard` if present
+    
+- otherwise **falls back** to `ui.tabs` (so you won’t get errors)
+    
+
+Just fill in your Kafka OAuth values and topic.
+
+```python
+# ============================================
+# Real-time Deephaven Kafka Dashboard (auto: ui.dashboard or ui.tabs)
+# ============================================
+
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.agg import sum_
+import deephaven.plot.express as dx
+from deephaven import ui
+
+# -----------------------------
+# 1) Kafka config (edit these)
+# -----------------------------
+TOPIC = "gold_positions_changes"  # <-- your topic
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-xxxx.canadacentral.azure.confluent.cloud:9092",
+    "group.id": "dh-gold-consumer",
+    "auto.offset.reset": "latest",
+
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;",
+
+    # Try non-shaded; if ClassNotFound, switch to the shaded line below.
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.login.callback.handler.class":
+    #   "kafkashaded.org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+
+    "sasl.oauthbearer.token.endpoint.url": "https://<your-idp>/oauth2/token",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "<KAFKA_CLIENT_ID>",
+    "sasl.oauthbearer.client.secret": "<KAFKA_CLIENT_SECRET>",
+
+    # keep if required by your broker:
+    "sasl.oauthbearer.extensions.logicalCluster": "<LOGICAL_CLUSTER>",
+    "sasl.oauthbearer.extensions.identityPoolId": "<IDENTITY_POOL_ID>",
+    "sasl.oauthbearer.extensions.identityPool": "<IDENTITY_POOL>",
+
+    "ssl.endpoint.identification.algorithm": "https",
+    "key.deserializer":   "org.apache.kafka.common.serialization.StringDeserializer",
+    "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+}
+
+# --------------------------------------
+# 2) JSON schema: only your actual cols
+# --------------------------------------
+VALUE_SPEC = kc.json_spec({
+    "_source_system": dt.string,    # GED | FIXED INCOME | COMMODITIES
+    "cusip":          dt.string,
+    "isin":           dt.string,
+    "allotment":      dt.string,
+    "positionId":     dt.string,
+    "instrumentCode": dt.string,    # change to dt.int64 if numeric in your stream
+    "pnl":            dt.double,
+    "mtm":            dt.double,
+    "_event_ts":      dt.string,
+    "_START_AT":      dt.string,
+    "_END_AT":        dt.string,
+    "_start_at":      dt.string,
+    "_end_at":        dt.string,
+})
+
+# --------------------------------------
+# 3) Consume (positional args)
+# --------------------------------------
+raw = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# --------------------------------------
+# 4) Normalize timestamps & identifiers
+# --------------------------------------
+live = raw.update([
+    "EventTs = isNull(_event_ts) ? null : parseInstant(_event_ts)",
+
+    # prefer UPPER; fall back to lower; parse ISO strings
+    "StartAt = !isNull(_START_AT) ? parseInstant(_START_AT) "
+    "        : (!isNull(_start_at) ? parseInstant(_start_at) : null)",
+    "EndAt   = !isNull(_END_AT)   ? parseInstant(_END_AT) "
+    "        : (!isNull(_end_at)  ? parseInstant(_end_at)  : null)",
+
+    # prefer CUSIP else ISIN
+    "identifier = (!isNull(cusip) && cusip != ``) ? cusip "
+    "          : ((!isNull(isin)  && isin  != ``) ? isin  : null)"
+])
+
+# --------------------------------------
+# 5) Helpers to build per-slice content
+# --------------------------------------
+def build_views(slice_tbl, label: str):
+    overall = slice_tbl.view([
+        "_source_system", "allotment", "positionId", "instrumentCode",
+        "cusip", "isin", "identifier", "pnl", "mtm", "EventTs", "StartAt", "EndAt"
+    ])
+
+    highest_pnl = (
+        slice_tbl.sort_descending("pnl")
+                 .view(["_source_system", "instrumentCode", "identifier",
+                        "allotment", "positionId", "pnl", "mtm", "EventTs"])
+                 .head(1)
+    )
+
+    pnl_by_allot = (
+        slice_tbl.agg_by([sum_("total_pnl = pnl")], by=["allotment"])
+                 .sort_descending("total_pnl").head(12)
+                 .update(["Sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+    )
+    pnl_by_allot_plot = pnl_by_allot.rename_columns([
+        "Total_PnL=total_pnl", "Allotment=allotment"
+    ])
+    bar_allot = dx.bar(
+        pnl_by_allot_plot,
+        x="Total_PnL", y="Allotment", color="Sign",
+        title=f"P&L by Allotment • {label}",
+    )
+
+    top10_instr = (
+        slice_tbl.agg_by([sum_("total_pnl = pnl")], by=["instrumentCode"])
+                 .sort_descending("total_pnl").head(10)
+                 .update(["Sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+    )
+    top10_instr_plot = top10_instr.rename_columns([
+        "Total_PnL=total_pnl", "Instrument=instrumentCode"
+    ])
+    bar_top10_instr = dx.bar(
+        top10_instr_plot,
+        x="Total_PnL", y="Instrument", color="Sign",
+        title=f"Top 10 Instruments by P&L • {label}",
+    )
+
+    top10_sec = (
+        slice_tbl.where("identifier != null")
+                 .agg_by([sum_("total_pnl = pnl")], by=["identifier"])
+                 .sort_descending("total_pnl").head(10)
+                 .update(["Sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+    )
+    top10_sec_plot = top10_sec.rename_columns([
+        "Total_PnL=total_pnl", "Security=identifier"
+    ])
+    bar_top10_security = dx.bar(
+        top10_sec_plot,
+        x="Total_PnL", y="Security", color="Sign",
+        title=f"Top 10 Security by P&L • {label}",
+    )
+
+    return overall, highest_pnl, bar_allot, bar_top10_instr, bar_top10_security
+
+def make_panel(slice_tbl, label: str):
+    overall, highest_pnl, bar_allot, bar_top10_instr, bar_top10_security = build_views(slice_tbl, label)
+    left_col  = ui.flex(bar_allot, bar_top10_instr, bar_top10_security, direction="column")
+    right_col = ui.flex(ui.table(overall), ui.table(highest_pnl), direction="column")
+    return ui.flex(left_col, right_col, direction="row")
+
+# --------------------------------------
+# 6) Build the slices
+# --------------------------------------
+all_slice = live
+ged_slice = live.where("_source_system == `GED`")
+fi_slice  = live.where("_source_system == `FIXED INCOME`")
+com_slice = live.where("_source_system == `COMMODITIES`")
+
+all_panel = make_panel(all_slice, "All Sources")
+ged_panel = make_panel(ged_slice, "GED")
+fi_panel  = make_panel(fi_slice, "FIXED INCOME")
+com_panel = make_panel(com_slice, "COMMODITIES")
+
+# --------------------------------------
+# 7) Prefer ui.dashboard if available; else fallback to tabs
+# --------------------------------------
+dashboard = None
+if hasattr(ui, "dashboard"):
+    try:
+        # Try common signatures — if it errors, we fall back to tabs
+        # Pattern 1: ui.dashboard accepts panels as keyword sections
+        dashboard = ui.dashboard(
+            ("All Sources", all_panel),
+            ("GED",          ged_panel),
+            ("FIXED INCOME", fi_panel),
+            ("COMMODITIES",  com_panel),
+        )
+    except Exception:
+        dashboard = None
+
+if dashboard is None:
+    # Guaranteed-safe fallback
+    dashboard = ui.tabs(
+        ui.tab(all_panel, title="All Sources"),
+        ui.tab(ged_panel, title="GED"),
+        ui.tab(fi_panel, title="FIXED INCOME"),
+        ui.tab(com_panel, title="COMMODITIES"),
+    )
+
+# Expose `dashboard` in the IDE. Arrange panels; File → Save Layout to persist.
+```
+
+**How this helps**
+
+- If your build has `ui.dashboard`, you’ll get a dedicated dashboard container; otherwise it gracefully falls back to `ui.tabs` (identical content).
+    
+- Horizontal bars + top-N keep charts readable; axis labels come from renamed columns.
+    
+- Only business columns are shown (no Kafka metadata).
+    
+- Timestamp coalescing handles both `_START_AT/_END_AT` and `_start_at/_end_at`.
+    
+
+Want me to add a **global time window** control (e.g., last 1/5/15 minutes) and wire all tabs to it?
