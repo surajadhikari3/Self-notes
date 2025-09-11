@@ -1277,3 +1277,67 @@ If you later discover `_START_AT` is a true timestamp (not text) in some partiti
 Do the same for `EndAt` if needed.
 
 Everything else in your dashboard can stay as-is. If you still see a formula error, send me the **exact** expression line mentioned at the top of the stack trace and I’ll patch it precisely.
+
+------------------------
+
+Good catch — `deephaven.plot.express.dx.bar()` **doesn’t support** `x_label` / `y_label`. That’s why you get:
+
+> `TypeError: bar() got an unexpected keyword argument 'x_label'`
+
+Use **column renames** to control axis labels (dx will show the column names). Here’s a drop-in patch — replace your three bar sections with this:
+
+```python
+# --- P&L by allotment (labels via rename) ---
+pnl_by_allot_plot = pnl_by_allot.rename_columns([
+    "Total_PnL=total_pnl",
+    "Allotment=allotment",
+    "Sign=sign",
+])
+bar_allot = dx.bar(
+    pnl_by_allot_plot,
+    x="Total_PnL", y="Allotment", color="Sign",
+    title=f"P&L by Allotment • {SOURCE}",
+)
+
+# --- Top 10 instruments by P&L ---
+top10_instruments_plot = top10_instruments.rename_columns([
+    "Total_PnL=total_pnl",
+    "Instrument=instrumentCode",
+    "Sign=sign",
+])
+bar_top10_instr = dx.bar(
+    top10_instruments_plot,
+    x="Total_PnL", y="Instrument", color="Sign",
+    title=f"Top 10 Instruments by P&L • {SOURCE}",
+)
+
+# --- Top 10 security by P&L (CUSIP→ISIN) ---
+top10_security_plot = top10_security.rename_columns([
+    "Total_PnL=total_pnl",
+    "Security=identifier",
+    "Sign=sign",
+])
+bar_top10_security = dx.bar(
+    top10_security_plot,
+    x="Total_PnL", y="Security", color="Sign",
+    title=f"Top 10 Security by P&L • {SOURCE}",
+)
+```
+
+### Make the bars look thicker
+
+- Keep bars **horizontal** (string on `y`, number on `x`) as we are now.
+    
+- Show fewer categories (e.g., `.head(8)` instead of `.head(10)`).
+    
+- Give the chart panel more **vertical height** in the IDE (drag the splitter).
+    
+
+Everything else in your script can stay the same. If you still see any nulls in `StartAt`/`EndAt`, keep the last coalescing expressions we used:
+
+```python
+"StartAt = !isNull(_START_AT) ? parseInstant(_START_AT) : (!isNull(_start_at) ? parseInstant(_start_at) : null)",
+"EndAt   = !isNull(_END_AT)   ? parseInstant(_END_AT)   : (!isNull(_end_at)  ? parseInstant(_end_at)  : null)",
+```
+
+That’ll clear the x/y label error and give you readable axis labels.
