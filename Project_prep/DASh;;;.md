@@ -1241,3 +1241,39 @@ dashboard = ui.tabbed({
 - If `instrumentCode` is numeric, change its dtype to `dt.int64` in `VALUE_SPEC`.
     
 - You can drag/resize panels and **File → Save Layout** to keep your preferred arrangement.
+
+-------------------------
+
+
+You're bumping into a Deephaven **formula** error because I used `string(...)` inside `update([...])`. There’s no `string()` function in the formula language—use the value directly (it’s already a string) or cast with `(String)`.
+
+Here’s the **one-line fix** for each timestamp field; replace your current `StartAt` / `EndAt` expressions with these:
+
+```python
+live = raw.update([
+    "EventTs = isNull(_event_ts) ? null : parseInstant(_event_ts)",
+
+    # ✅ no string() — both variants treated as ISO strings
+    "StartAt = !isNull(_START_AT) ? parseInstant(_START_AT) "
+    "        : (!isNull(_start_at) ? parseInstant(_start_at) : null)",
+
+    "EndAt   = !isNull(_END_AT)   ? parseInstant(_END_AT) "
+    "        : (!isNull(_end_at)  ? parseInstant(_end_at)  : null)",
+
+    "identifier = (!isNull(cusip) && cusip != ``) ? cusip "
+    "          : ((!isNull(isin)  && isin  != ``) ? isin  : null)"
+])
+```
+
+That removes the `FormulaCompilationException: Cannot find method string(java.lang.String)` error.
+
+If you later discover `_START_AT` is a true timestamp (not text) in some partitions, switch to a cast instead of parsing:
+
+```python
+"StartAt = !isNull(_START_AT) ? (Instant)_START_AT "
+"        : (!isNull(_start_at) ? parseInstant(_start_at) : null)",
+```
+
+Do the same for `EndAt` if needed.
+
+Everything else in your dashboard can stay as-is. If you still see a formula error, send me the **exact** expression line mentioned at the top of the stack trace and I’ll patch it precisely.
