@@ -41,12 +41,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/DH.......................md",
+                "file": "Project_prep/DASh;;;.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "DH......................"
+              "title": "DASh;;;"
             }
           }
         ],
@@ -224,6 +224,7 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
+    "Project_prep/DH.......................md",
     "Project_prep/User.md",
     "DH.md",
     "Project_prep/fill............md",
@@ -253,7 +254,6 @@
     "Gems/Collections.md",
     "Interviews/Gurpreet.md",
     "Interviews/On-class interview -Mohan.md",
-    "Interviews/Mohan TD interview.md",
     "Rest-api",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",
