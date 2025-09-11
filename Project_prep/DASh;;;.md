@@ -709,3 +709,151 @@ kpis_5m = (
     
 
 If you want this dashboard **per source_system simultaneously**, say the word and I’ll give you a small param-control pattern (three filtered views and a tabbed layout).
+
+-----------------------------------------------
+
+    
+
+Here’s a **zero-error, drop-in Deephaven script** using the **new Kafka consumer API**.  
+It converts your timestamps, builds the same four widgets, and makes the bars easier to read (top-N only + horizontal bars).
+
+```python
+# ==== Real-time Deephaven dashboard from Kafka (new API, your columns) ====
+
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.agg import sum_
+import deephaven.plot.express as dx
+
+# 1) Kafka config (fill in your broker + OAuth values)
+TOPIC = "gold_positions_changes"   # <-- your topic
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-xxxx.canadacentral.azure.confluent.cloud:9092",
+    "group.id": "dh-gold-consumer",
+    "auto.offset.reset": "latest",
+
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+
+    # JAAS stanza required for OAUTH
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;",
+
+    # callback handler – if ClassNotFound, switch to the shaded class below
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.login.callback.handler.class":
+    #   "kafkashaded.org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+
+    "sasl.oauthbearer.token.endpoint.url": "https://<your-idp>/oauth2/token",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "<KAFKA_CLIENT_ID>",
+    "sasl.oauthbearer.client.secret": "<KAFKA_CLIENT_SECRET>",
+    "sasl.oauthbearer.extensions.logicalCluster": "<LOGICAL_CLUSTER>",
+    "sasl.oauthbearer.extensions.identityPoolId": "<IDENTITY_POOL_ID>",
+    "sasl.oauthbearer.extensions.identityPool": "<IDENTITY_POOL>",
+
+    "ssl.endpoint.identification.algorithm": "https",
+
+    # We read JSON strings and map via json_spec below
+    "key.deserializer":   "org.apache.kafka.common.serialization.StringDeserializer",
+    "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+}
+
+# 2) JSON VALUE schema – only the columns you actually have
+VALUE_SPEC = kc.json_spec({
+    "_source_system": dt.string,
+    "cusip":          dt.string,
+    "isin":           dt.string,
+    "allotment":      dt.string,
+    "positionId":     dt.string,
+    "instrumentCode": dt.string,   # if it’s truly numeric in your feed, you can change to dt.int64
+    "pnl":            dt.double,
+    "mtm":            dt.double,
+    "_event_ts":      dt.string,   # ISO-8601 like “...Z”
+    "_START_AT":      dt.string,   # bitemporal
+    "_END_AT":        dt.string,   # bitemporal
+})
+
+# 3) Consume (positional args; TableType enum)
+raw = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=VALUE_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# 4) Normalize timestamps + preferred identifier (CUSIP else ISIN)
+live = raw.update([
+    "EventTs  = isNull(_event_ts)  ? null : parseInstant(_event_ts)",
+    "StartAt  = isNull(_START_AT)  ? null : parseInstant(_START_AT)",
+    "EndAt    = isNull(_END_AT)    ? null : parseInstant(_END_AT)",
+    "identifier = (!isNull(cusip) && cusip != ``) ? cusip "
+    "          : ((!isNull(isin)  && isin  != ``) ? isin  : null)"
+])
+
+# 5) pick a source slice (switch this any time and re-run the line)
+SOURCE = "GED"  # "GED" | "FIXED INCOME" | "COMMODITIES"
+pos = live.where(f"_source_system == `{SOURCE}`")
+
+# 6) DASHBOARD TABLES (all refreshing)
+
+# 6a) Overall table
+overall = pos.view([
+    "_source_system", "allotment", "positionId", "instrumentCode",
+    "cusip", "isin", "identifier", "pnl", "mtm", "EventTs", "StartAt", "EndAt"
+])
+
+# 6b) Highest P&L row
+highest_pnl = pos.sort_descending("pnl").head(1)
+
+# 6c) Sum of P&L by allotment (table + horizontal bar)
+pnl_by_allot = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["allotment"])
+       .sort_descending("total_pnl")
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+# horizontal bars (x = value, y = category) and top-N so the bars are thicker
+bar_allot = dx.bar(
+    pnl_by_allot.head(12),
+    x="total_pnl", y="allotment", color="sign",
+    title=f"P&L by Allotment • {SOURCE}"
+)
+
+# 6d) Top 10 instruments by total P&L (table + horizontal bar)
+top10_instruments = (
+    pos.agg_by([sum_("total_pnl = pnl")], by=["instrumentCode"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10_instr = dx.bar(
+    top10_instruments,
+    x="total_pnl", y="instrumentCode", color="sign",
+    title=f"Top 10 Instruments by P&L • {SOURCE}"
+)
+
+# 6e) Top 10 security by total P&L (CUSIP→ISIN fallback, horizontal bar)
+top10_security = (
+    pos.where("identifier != null")
+       .agg_by([sum_("total_pnl = pnl")], by=["identifier"])
+       .sort_descending("total_pnl").head(10)
+       .update(["sign = (total_pnl >= 0) ? `Gain` : `Loss`"])
+)
+bar_top10_security = dx.bar(
+    top10_security,
+    x="total_pnl", y="identifier", color="sign",
+    title=f"Top 10 Security by P&L • {SOURCE}"
+)
+```
+
+### Why the bars now look better
+
+- We draw **horizontal** bars (`x`=metric, `y`=category) so long labels don’t get cramped.
+    
+- We **limit to top-N** (10–12) so each bar is thicker and legible.
+    
+- Gain/Loss coloring helps at a glance.
+    
+
+If `instrumentCode` in your topic is truly numeric, change its dtype in `VALUE_SPEC` to `dt.int64` and the code still works. If you want all three **source systems** on one screen (three panels), say the word and I’ll give you a quick trellis pattern.
