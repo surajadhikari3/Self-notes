@@ -1030,21 +1030,7 @@ If you want a **tabbed dashboard** for all three source systems at once, or to p
 
 ---------------
 
-Here you go — a single, copy-paste **end-to-end** script that:
 
-- uses the **current** Kafka API (`deephaven.stream.kafka.consumer`)
-    
-- works with your **Silver** schema (no `qty/price`, uses `pnl`, `mtm`, `_event_ts`, `_START_AT/_start_at`, `_END_AT/_end_at`)
-    
-- normalizes timestamps, prefers **CUSIP then ISIN** for “security”
-    
-- builds a **tabbed dashboard**: **ALL**, **GED**, **FIXED INCOME**, **COMMODITIES**
-    
-- shows: **Highest P&L**, **P&L by Allotment**, **Top-10 Instruments**, **Top-10 Security**, plus (in ALL) **P&L by Source System**
-    
-- uses **horizontal bars**, **top-N** (thicker bars), and **axis labels**
-    
-- selects only business columns (no Kafka metadata)
     
 
 > Fill in `TOPIC` and the OAuth values in `KAFKA_CONFIG` and run.
