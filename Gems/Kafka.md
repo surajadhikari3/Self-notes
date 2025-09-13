@@ -438,7 +438,47 @@ Excellent ask 👍 — at senior Java interviews, Kafka questions are rarely jus
 - After N retries → send to **DLQ topic**.
     
 - Monitor DLQ, fix bad data, re-ingest.
+
+In Kafka, sometimes a **“poison message”** arrives:
+
+- Message has bad format (JSON parsing fails).
     
+- Business logic fails (divide by zero, missing account).
+    
+- External system (DB, API) temporarily unavailable.
+    
+
+If you keep retrying forever, your consumer is stuck (lag grows).  
+If you skip it, you risk **losing trades**.
+
+👉 Solution: **Retries + Dead Letter Queue (DLQ)**.
+
+“In Kafka, we handle poison messages using a retry + DLQ strategy. The consumer first retries processing with exponential backoff to handle temporary failures. If the message still fails after N retries, it’s sent to a Dead Letter Queue topic. This prevents the consumer from getting stuck and ensures no data loss. DLQ messages are monitored, investigated, and re-ingested once the root cause is fixed. That way, the main stream keeps flowing while bad messages are quarantined.”
+
+
+how to set the kafka retry in spring boot 
+
+
+```java
+@Component
+public class OrdersListenerV2 {
+
+  @RetryableTopic(
+      attempts = "4",                                 // 1 try + 3 retries
+      backoff = @Backoff(delay = 1000, multiplier = 2.0, maxDelay = 5000),
+      autoCreateTopics = "true",
+      dltStrategy = DltStrategy.FAIL_ON_ERROR)
+  @KafkaListener(topics = "orders", groupId = "orders-cg-v2")
+  public void onMessage(String payload) {
+    // throw to trigger retry; after final attempt it goes to orders.DLT
+    if (payload.contains("bad")) {
+      throw new RuntimeException("Poison message");
+    }
+    // process normally
+  }
+}
+
+```
 
 ---
 
@@ -488,11 +528,12 @@ Excellent ask 👍 — at senior Java interviews, Kafka questions are rarely jus
 👉 _“How do you handle schema changes in Kafka messages?”_
 
 - Use **Schema Registry** with Avro/Protobuf/JSON.
-    
-- Set **compatibility=BACKWARD**.
+     
+- Set **compatibility=BACKWARD**.(most commonly used...) others are FORWARD, FULL.... 
     
 - Producers evolve schema; consumers still read old messages.
-    
+
+“We handle schema changes in Kafka with a Schema Registry. Producers register their schema versions (Avro/Protobuf/JSON), and each message references a schema ID. We set compatibility to BACKWARD so new producers can add optional fields or defaults without breaking old consumers. For example, if we add `tradeType` to our Trade schema with a default, consumers on the old schema still process old messages, and new consumers can safely read both old and new. This way, schema evolution is controlled and safe in production.”
 
 ---
 
