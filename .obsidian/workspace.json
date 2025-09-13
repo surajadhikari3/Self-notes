@@ -22,35 +22,21 @@
             }
           },
           {
-            "id": "496e484b07079299",
-            "type": "leaf",
-            "state": {
-              "type": "markdown",
-              "state": {
-                "file": "----------.md",
-                "mode": "source",
-                "source": false
-              },
-              "icon": "lucide-file",
-              "title": "----------"
-            }
-          },
-          {
             "id": "2c21ca8d70617dda",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/DASh;;;.md",
+                "file": "Gems/Kafka.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "DASh;;;"
+              "title": "Kafka"
             }
           }
         ],
-        "currentTab": 2
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -121,7 +107,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 270.50271224975586
+    "width": 264.5026054382324
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -222,8 +208,22 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "21a7aecd5be464f6",
+  "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
+    "Coding things/Java 8 hands-on notes.md",
+    "Celpip/Vocabs and basics.md",
+    "----------.md",
+    "Gems/SSL (Two way SSL ).md",
+    "Coding things/Coding concepts...md",
+    "Coding things/Cmds.md",
+    "Gems/Microservice Architecture and Concepts.md",
+    "Gems/Kafka.md",
+    "Gems/Java basics.md",
+    "Gems/Java 8.md",
+    "Gems/Garbage collection.md",
+    "Gems/Design pattern(Bassed on gangs of 4).....md",
+    "Gems/Collections.md",
+    "Project_prep/DASh;;;.md",
     "Project_prep/DH.......................md",
     "Project_prep/User.md",
     "DH.md",
@@ -231,8 +231,6 @@
     "interview-prep",
     "Project_prep/ui/ui....md",
     "Project_prep/ui/single-user-gap.svg",
-    "----------.md",
-    "Celpip/Vocabs and basics.md",
     "Project_prep/ui",
     "Project_prep/dashhh....md",
     "Project_prep/Stremmm....md",
@@ -241,19 +239,7 @@
     "Untitled 3.md",
     "Celpip",
     "Project_prep/React............md",
-    "Coding things/Java 8 hands-on notes.md",
     "Project_prep/ADF.md",
-    "Cloud/Kubernets.md",
-    "Cloud/AWS.md",
-    "Cloud/Architecture.md",
-    "Gems/Kafka.md",
-    "Gems/Java basics.md",
-    "Gems/Java 8.md",
-    "Gems/Garbage collection.md",
-    "Gems/Design pattern(Bassed on gangs of 4).....md",
-    "Gems/Collections.md",
-    "Interviews/Gurpreet.md",
-    "Interviews/On-class interview -Mohan.md",
     "Rest-api",
     "confluentinc-kafka-connect-jdbc-10.8.4.zip",
     "DatabricksJDBC42-2.7.3.1010.zip",

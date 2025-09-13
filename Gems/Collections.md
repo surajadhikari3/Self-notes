@@ -27,21 +27,21 @@ Map(is also a Interface) is not a subtype of Collection in java
 
 ![[Pasted image 20250512162816.png]]#### **Difference between HashSet and TreeSet?**
 
-| Feature     | HashSet                  | TreeSet                        |
-| ----------- | ------------------------ | ------------------------------ |
-| Order       | No order                 | Sorted (natural or comparator) |
-| Performance | Faster (uses hash table) | Slower (uses Red-Black Tree)   |
-| Nulls       | Allows one null          | No null elements allowed       |
+| Feature     | HashSet                  | TreeSet                                                                    |
+| ----------- | ------------------------ | -------------------------------------------------------------------------- |
+| Order       | No order                 | Sorted (natural or comparator)                                             |
+| Performance | Faster (uses hash table) | Slower (uses Red-Black Tree)                                               |
+| Nulls       | Allows one null          | No null elements allowed(as there is no natural ordering for null value..) |
 
 HashMap Vs HashTable 
 
 HastTable implements Map<K, V> interface 
 
-|Feature|HashMap|Hashtable|
-|---|---|---|
-|Thread Safety|Not synchronized|Synchronized (Legacy)|
-|Null Keys/Val|Allows one null key|No null key/value|
-|Performance|Faster|Slower|
+| Feature       | HashMap                                        | Hashtable             |
+| ------------- | ---------------------------------------------- | --------------------- |
+| Thread Safety | Not synchronized                               | Synchronized (Legacy) |
+| Null Keys/Val | Allows one null key, and multiple null value.. | No null key/value     |
+| Performance   | Faster                                         | Slower                |
 -> Concept if it is not thread safe and normal it is faster and allowed the null 
     but if it is thread safe or ordered then it is slow and does not allowed null.
 # How does HashMap work internally?
@@ -79,7 +79,7 @@ Why do we override equals() and hashCode() ?
 🎯 Use `ConcurrentHashMap` in **multi-threaded** environments for high concurrency and thread safety.
 
 
-#### **How does CopyOnWriteArrayList work?**
+#### **How does CopyOnWriteArrayList work? (Thread Safe..)**
 
 **Answer**:  
 

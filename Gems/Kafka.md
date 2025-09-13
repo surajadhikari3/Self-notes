@@ -360,3 +360,226 @@ Kafka (pre-3.0) relies on **ZooKeeper** for cluster state. ZooKeeper itself is r
 ---
 
 Would you like a **diagram showing leader–follower setup and failover** or a **real-world analogy** to explain this in interviews?
+
+------------------------------------------------
+
+Kafka security Layer:
+
+Transport Layer --> mTLS
+SASL (Simple Authentication and Security Layer) --> SASL_SSL
+
+
+--------------------------
+
+Excellent ask 👍 — at senior Java interviews, Kafka questions are rarely just _definition-based_. They’re usually **scenario-driven** to test design, troubleshooting, and production-readiness. Here’s a curated list of **common scenario-based Kafka questions** you should be ready for (with short notes on how to approach).
+
+---
+
+# 🔥 Top Scenario-Based Kafka Questions (Senior Java)
+
+## 1. **High Throughput**
+
+👉 _“Your application must process 2000 TPS of trade events with <100ms latency. How do you design Kafka producers/consumers to handle this?”_
+
+- Talk about **partitions scaling**, **idempotent producers**, **linger.ms / batch.size tuning**, **compression (lz4/zstd)**, and consumer parallelism.
+    
+- Mention **load testing with kafka-producer-perf-test**.
+    
+
+---
+
+## 2. **Exactly Once Delivery**
+
+👉 _“How do you ensure an order is not processed twice in a trading app?”_
+
+- Producer: `enable.idempotence=true`, `acks=all`, `transactional.id`.
+    
+- Consumer: read within a transaction, commit offsets only if processing succeeds.
+    
+- Say “we use **EOS (exactly-once semantics)** with Kafka transactions + DB sink.”
+    
+
+---
+
+## 3. **Backpressure / Consumer Lag**
+
+👉 _“What if consumers fall behind and lag starts increasing?”_
+
+- Scale **more partitions + consumers**.
+    
+- Use **max.poll.records**, **fetch.min.bytes** to batch.
+    
+- Possibly offload heavy logic via **Kafka Streams / Flink**.
+    
+- Monitor with **lag exporters**.
+    
+
+---
+
+## 4. **Reprocessing Data**
+
+👉 _“A bug was found in trade enrichment. How do you reprocess data from Kafka?”_
+
+- Reset offsets with **`kafka-consumer-groups.sh --reset-offsets`**.
+    
+- Or use **topic compaction / DLQ replay**.
+    
+- Or store raw trades in **immutable topic (bronze)** → downstream apps can re-read.
+    
+
+---
+
+## 5. **Dead Letter Queue (DLQ)**
+
+👉 _“How do you handle poison messages in Kafka?”_
+
+- Retry mechanism (Spring Kafka RetryTemplate, exponential backoff).
+    
+- After N retries → send to **DLQ topic**.
+    
+- Monitor DLQ, fix bad data, re-ingest.
+    
+
+---
+
+## 6. **Ordering Guarantees**
+
+👉 _“How do you guarantee order of trades per customer?”_
+
+- Use **keyed messages** (`key=customerId`) → all messages go to the same partition.
+    
+- One consumer per partition.
+    
+- Warn: order is only guaranteed _within_ a partition, not across partitions.
+    
+
+---
+
+## 7. **Security in Trading Apps**
+
+👉 _“How do you secure Kafka in a financial environment?”_
+
+- `SASL_SSL` with **SCRAM or mTLS**.
+    
+- **ACLs** per service account (OMS writer, Risk reader).
+    
+- Encryption at rest (disk/KMS) + payload encryption for PII.
+    
+- **Least privilege** + secret rotation.
+    
+
+---
+
+## 8. **Data Loss / Broker Crash**
+
+👉 _“What happens if a broker crashes — do you lose messages?”_
+
+- Messages safe if **replication.factor ≥ 3** + `acks=all`.
+    
+- If ISR not met → producers block/retry.
+    
+- Consumer rebalances automatically after leader election.
+    
+
+---
+
+## 9. **Schema Evolution**
+
+👉 _“How do you handle schema changes in Kafka messages?”_
+
+- Use **Schema Registry** with Avro/Protobuf/JSON.
+    
+- Set **compatibility=BACKWARD**.
+    
+- Producers evolve schema; consumers still read old messages.
+    
+
+---
+
+## 10. **Cross Data Center / DR**
+
+👉 _“How would you design Kafka for disaster recovery?”_
+
+- Use **Cluster Linking** or **MirrorMaker 2**.
+    
+- Topics replicated to DR site.
+    
+- Keep ACLs, quotas, schemas synced.
+    
+- Mention **RPO/RTO trade-offs**.
+    
+
+---
+
+## 11. **Large Messages**
+
+👉 _“What if you need to send >10MB messages?”_
+
+- Avoid giant messages; instead **chunk/split** or store payload in **S3/DB** and send reference in Kafka.
+    
+- If must → tune `max.request.size`, `message.max.bytes`.
+    
+
+---
+
+## 12. **Multi-tenant Topics**
+
+👉 _“Different teams share the Kafka cluster. How do you isolate them?”_
+
+- **Separate topics/namespaces**, quotas (`producer_byte_rate`, `consumer_byte_rate`).
+    
+- ACLs per principal.
+    
+- Possibly **dedicated clusters** for critical apps (trading vs analytics).
+    
+
+---
+
+## 13. **Monitoring & Alerting**
+
+👉 _“How do you monitor Kafka in production?”_
+
+- Metrics: **consumer lag**, ISR count, under-replicated partitions, request latency, authentication failures.
+    
+- Tools: Prometheus + Grafana, Confluent Control Center, LinkedIn Burrow.
+    
+- Alert when **lag > threshold** or **ISR < RF**.
+    
+
+---
+
+## 14. **Idempotency & Retries**
+
+👉 _“What happens if the producer retries a message?”_
+
+- Without idempotence → duplicate trades possible.
+    
+- With `enable.idempotence=true` → Kafka ensures each message per partition is written once.
+    
+
+---
+
+## 15. **Mixing Batch & Real-Time**
+
+👉 _“We have a batch job and a streaming app reading the same topic. How do you design it?”_
+
+- Use **separate consumer groups** (offsets are per group).
+    
+- Batch job can consume at its pace, streaming app runs continuously.
+    
+
+---
+
+✅ **Pro tip for interviews:**  
+When asked a scenario, answer in **3 layers**:
+
+1. **Concept** (what Kafka guarantees).
+    
+2. **Config/code knobs** (producer/consumer/broker settings).
+    
+3. **Real-world trade-off** (latency vs throughput, cost vs durability).
+    
+
+---
+
+Would you like me to **turn these into Q&A flashcards with short “model answers”** (so you can rehearse them quickly like in an interview)?

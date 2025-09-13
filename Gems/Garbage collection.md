@@ -57,3 +57,91 @@ Second one can decrease the per thread stack size with the -Xss this way overall
 | **Weak**    | GC’ed in next GC cycle           | WeakHashMap, listeners    |
 | **Phantom** | After finalize, cleanup tracking | Resource cleanup          |
 ![[Pasted image 20250429160641.png]]
+
+Default GC for now is the G1 GC ( region based and low pause time )
+
+
+- **ZGC** and **Shenandoah** collectors introduced (low-latency GCs).
+    
+- Not the default, but you can enable them explicitly:
+    
+    - `-XX:+UseZGC`
+        
+    - `-XX:+UseShenandoahGC`
+
+
+| Java Version | Default GC  |
+| ------------ | ----------- |
+| Java 8       | Parallel GC |
+| Java 9–10    | Parallel GC |
+| Java 11+     | G1 GC       |
+| Java 17      | G1 GC       |
+| Java 21      | G1 GC       |
+Got it 👍 — let’s structure this in a **hierarchical way** so it’s super clear for interviews.
+
+---
+
+## **Heap Layout in G1 GC (High Level → Detailed)**
+
+### 1. **Young Generation**
+
+- Where new objects are allocated.
+    
+- Collected frequently with **Minor GCs** (short pauses).
+    
+- Subdivided into:
+    
+    - **Eden regions** → fresh allocations (short-lived).
+        
+    - **Survivor regions (S0, S1)** → objects that survive a collection in Eden get copied here.
+        
+        - Ping-pong between S0 and S1 on each cycle.
+            
+
+---
+
+### 2. **Old Generation**
+
+- Where **long-lived objects** eventually end up.
+    
+- Collected less frequently, often via **Mixed GCs** (collect some old + young regions).
+    
+- Subdivided into:
+    
+    - **Old regions** → promoted survivors.
+        
+    - **Humongous regions** → very large objects (≥ 50% of region size). Allocated directly here.
+        
+
+---
+
+### 3. **Free Regions**
+
+- Unused regions, available for allocation as Eden/Survivor/Old when needed.
+    
+
+---
+
+## **Hierarchy View**
+
+```
+Heap
+├── Young Generation
+│   ├── Eden regions
+│   └── Survivor regions (S0, S1)
+│
+├── Old Generation
+│   ├── Old regions
+│   └── Humongous regions
+│
+└── Free Regions
+```
+
+---
+
+💡 **Interview phrasing:**  
+👉 _“In G1 GC, the heap is divided into equal-sized regions. At a high level, these regions are grouped into Young (Eden + Survivors), Old (long-lived + Humongous), and Free regions. Unlike older collectors, the boundaries are not fixed — regions can change roles dynamically depending on GC activity.”_
+
+---
+
+Do you want me to now create a **colored diagram** matching this hierarchy (Young vs Old vs Free, with subdivisions) so you can use it visually in prep?

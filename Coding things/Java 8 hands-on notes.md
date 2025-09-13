@@ -391,7 +391,7 @@ String cleaned = paragraph.replaceAll("[^a-zA-Z0-9\\s]", "");  // removes punctu
 String[] words = cleaned.split("\\s+");
 ```
 
-- `[^\w\s]` or `[^a-zA-Z0-9\\s]` means "anything that's not a word character or whitespace".
+- `[^\w\s]` or `[^a-zA-Z0-9\\s]` means "anything that's not a word character or whitespace". (String s1 = s.replaceAll("[^\\w\\s]", "");)
     
 - This removes `.,!?:;"'()[]{}` etc.
     
@@ -456,4 +456,15 @@ within the scope with the bracket like below  and can use the `AbstractMap.Simpl
                 Collectors.counting()  
         ));**
 ```
+
+
+
+---Summary
+
+Collectors.groupBy(x-> x.getName, TreeMap::new, Collectors.toList())
+
+Collectors.toMap(key, value, (a,b) -> b,  LinkedHashMap::new)
+
+Collectors.grouping(key, value)
+
 
