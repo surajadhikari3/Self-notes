@@ -133,11 +133,12 @@ DI is a design pattern that allows objects to receive their dependencies from an
 **Example:**  
 If a car needs an engine, instead of creating it inside the `Car` class, Spring injects an `Engine` into `Car`.
 
-
-`@Component 
+```java
+@Component 
 public class Engine {} 
 
-@Component public class Car { 
+@Component
+public class Car { 
 private final Engine engine;  
 
 @Autowired  
@@ -146,7 +147,6 @@ this.engine = engine;   }
 }`
 
 **Diagram:**
-```
 [Spring Container]
        |
 [Engine Bean] ---> injected into ---> [Car Bean]
@@ -227,6 +227,7 @@ AOP separates cross-cutting concerns (like logging, security, transactions) from
 ``@Aspect 
 @Component
 public class LoggingAspect { 
+
 @Before("execution(* com.example.service.*.*(..))")  
 public void logBefore() {   
 	System.out.println("Method execution started");   

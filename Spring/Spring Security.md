@@ -22,6 +22,8 @@ JWT (Json web token) Based security)
 
 > In stateless JWT authentication, CSRF protection is **not required** because tokens are manually sent in the `Authorization` header — **not automatically attached** by the browser like cookies. Since the server doesn’t rely on sessions, the typical CSRF attack vector doesn't exist.
 
+“CSRF happens because browsers automatically attach cookies, like session IDs, to cross-site requests. That’s why in session-based authentication we need CSRF tokens. With JWT-based authentication, tokens are usually sent in the `Authorization` header or manually attached by the client, so a malicious site cannot force the browser to include the token. This removes the automatic CSRF risk. However, JWTs are still vulnerable to XSS if stored in localStorage, and if you store them in cookies, you still need CSRF protection.”
+
 ---
 
 ## 🧠 How to Remember?
@@ -30,15 +32,15 @@ JWT (Json web token) Based security)
 
 # Cookie vs JWT — Direct Comparison Chart
 
-|Aspect|Cookie-based (Session)|JWT-based (Token)|
-|---|---|---|
-|Server Storage|YES (Session in server memory)|NO (Stateless)|
-|Browser sends automatically|YES (cookies auto-attached)|NO (manual Authorization header)|
-|Scalability|Poor (session replication needed)|Excellent (no session tracking)|
-|CSRF risk|YES (cookies auto-send)|NO (tokens sent manually)|
-|Performance|Session lookup needed|Only token decoding needed|
-|Logout/Invalidate|Easy (delete session)|Hard (token must expire or blacklist manually)|
-|Typical Usage|Traditional web apps (login forms)|APIs, Mobile apps, Microservices|
+| Aspect                      | Cookie-based (Session)             | JWT-based (Token)                              |
+| --------------------------- | ---------------------------------- | ---------------------------------------------- |
+| Server Storage              | YES (Session in server memory)     | NO (Stateless)                                 |
+| Browser sends automatically | YES (cookies auto-attached)        | NO (manual Authorization header)               |
+| Scalability                 | Poor (session replication needed)  | Excellent (no session tracking)                |
+| CSRF risk                   | YES (cookies auto-send)            | NO (tokens sent manually)                      |
+| Performance                 | Session lookup needed              | Only token decoding needed                     |
+| Logout/Invalidate           | Easy (delete session)              | Hard (token must expire or blacklist manually) |
+| Typical Usage               | Traditional web apps (login forms) | APIs, Mobile apps, Microservices               |
 
 
 Monilithic application --> State(Sessions is maintained)
@@ -53,6 +55,7 @@ Server fetch the csrf token in the hidden field in the html and based on the csr
 For interview answers..
 
 Cookie-based auth stores user sessions on the server, which breaks down in distributed systems due to the need for sticky sessions or a shared session store. This adds latency, complexity, and violates microservice statelessness.  
+
 JWT solves this by being stateless and self-contained — any microservice can validate the token without extra network calls or storage, making it ideal for scalable, cloud-native architectures.
 
 ![[Screenshot 2025-04-29 at 4.29.03 PM.png]]

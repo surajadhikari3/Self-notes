@@ -8,7 +8,7 @@ Commonly used annotations 
 
 @Before , @After, @AfterReturning, @AfterThrowing, @Around —> Types of advice
 
-@Poitcut. ——> Define the reusable point cuts…
+@Pointcut. ——> Define the reusable point cuts…
 
 - **JoinPoint** = Any events where the advice can be hooked. For example method call
 - **Pointcut** = **Filter** that says "only calls related to _technical support_ are important for me."

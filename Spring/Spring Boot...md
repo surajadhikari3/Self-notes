@@ -90,9 +90,7 @@ By following these conventions, Spring Boot allows developers to focus on busine
 
 Global Exception Handler --> For the class level we use the @RestControllerAdvice (For rest controller) or @ControllerAdvice(For non-rest controller)  and method level @ExceptionHandler...
 
-```
-@RestControllerAdvice   // Use @ControllerAdvice for non-REST controllers
-public class GlobalExceptionHandler {
+```java
 
    @RestControllerAdvice // Use @ControllerAdvice for non-REST controllers
 public class GlobalExceptionHandler {
@@ -474,7 +472,7 @@ public class UserDTO {
 
     public interface Create {}  // Validation group
 
-    // Getters and setters
+    // Getters and setter
 }
 
 ![[Pasted image 20250525171357.png]]

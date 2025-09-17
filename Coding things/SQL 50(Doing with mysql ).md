@@ -239,7 +239,7 @@ Window function
 
 It does the computation like group by but does not collapse the table like group by 
 
-it takes  over()  --> over takes the `partition by` based on it the partition is done and 
+it takes  over()  --> over takes the `partition by` based on it the partition is done and  @POR
 order by() --> based on it sorting is performed.............
 
 ![[Pasted image 20250604170502.png]]
@@ -660,7 +660,8 @@ Using window function...............
 
 
 select distinct salary from (
-select salary , dense_rank over(order by salary desc) as rn
+select salary , 
+dense_rank over(order by salary desc) as rn
 ) as high_sal
 where rn = 3
 

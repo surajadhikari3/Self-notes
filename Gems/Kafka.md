@@ -229,6 +229,19 @@ Sliding:    [---]   [---]   [---]   (based on time difference between two record
 | Consumer | Offset Commit | Controls read/processing confirmation    | `enable.auto.commit`, `commitSync()`   |
 | Streams  | EOS           | Guarantees once-and-only-once processing | `processing.guarantee=exactly_once_v2` |
 
+### Producer knobs that matter (besides compression)
+
+- `batch.size` (increase) + `linger.ms` (a few ms) → bigger batches = better compression & throughput.
+    
+- `acks=1` (throughput) or `acks=all` (stronger durability; a bit less TPS).
+    
+- `enable.idempotence=true` (exactly-once semantics for producer; slight overhead but worth it).
+    
+- Enough **partitions** to parallelize.
+    
+- **Keys** that distribute load evenly.
+
+
 ## **Consumer Acknowledgements (Offset Commits)**
 
 Kafka doesn’t **auto-track what’s been read** — **consumers commit offsets** to mark progress.
@@ -532,6 +545,17 @@ public class OrdersListenerV2 {
 - Set **compatibility=BACKWARD**.(most commonly used...) others are FORWARD, FULL.... 
     
 - Producers evolve schema; consumers still read old messages.
+
+
+When producer sends an Avro message, it does **not** send the full schema. Instead, it sends:
+
+`[ magic_byte | schema_id | serialized Avro payload ]`
+
+- **magic_byte** (1 byte) → always `0` (for Confluent wire format).
+    
+- **schema_id** (4 bytes, big-endian) → here: `7`.
+    
+- **payload** (N bytes) → Avro binary encoding of the record.
 
 “We handle schema changes in Kafka with a Schema Registry. Producers register their schema versions (Avro/Protobuf/JSON), and each message references a schema ID. We set compatibility to BACKWARD so new producers can add optional fields or defaults without breaking old consumers. For example, if we add `tradeType` to our Trade schema with a default, consumers on the old schema still process old messages, and new consumers can safely read both old and new. This way, schema evolution is controlled and safe in production.”
 

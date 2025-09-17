@@ -307,6 +307,11 @@ Result:
 +----------+---------+
 
 ```
+select E1.name as Employee , E2.name as Manager 
+from employee E1
+self join employee E2
+on E1.id = E2.manager_id;
+
 
 Performance Tuning (via `Execution plan`)
 
