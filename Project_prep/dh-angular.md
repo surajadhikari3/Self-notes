@@ -1279,3 +1279,222 @@ else:
     
 
 Your Angular component from earlier will work unchanged with this service.
+
+
+----------------
+
+left
+
+Thanks for the screenshots — they tell us a lot.
+
+Your app **loads** `/jsapi/dh-core.js` (200 OK), but the **IDE WebSocket** that the JS API opens afterwards is **disconnecting** with `reconnectauthfailed`. That usually happens for one of these reasons:
+
+1. **Auth mismatch**: we didn’t call the exact auth handler your server expects (even “no-auth” servers sometimes still want a specific _anonymous/noop handler_ call).
+    
+2. **Origin blocked**: the DH server is rejecting the WebSocket because your Angular dev origin (`http://localhost:4200`) isn’t allowed.
+    
+3. **Proxy/HTTPS mismatch**: WS upgrade isn’t making it through an ingress/proxy, or you’re mixing `http` page with `wss` server (or vice-versa).
+    
+
+Below is a tight fix + a quick diagnostic checklist.
+
+---
+
+## A. Drop-in service: force anonymous/no-auth + log the real error
+
+Paste this over your `DeephavenService`. It:
+
+- imports the JS API the Vite-safe way,
+    
+- tries **many** known “no-auth/anonymous” handler class names (covers typical builds),
+    
+- if login still isn’t needed, **skips** it,
+    
+- **logs the precise WebSocket/auth error** so we can tell if it’s actually an **origin/CORS** block.
+    
+
+```ts
+// src/app/services/deephaven.service.ts
+import { Injectable } from '@angular/core';
+
+// keep loose to avoid version/type drift
+type DhNS = any;
+type DhTable = any;
+
+export type TableCatalogRow = { name: string; columns_csv: string };
+export type JoinMode = 'natural' | 'exact' | 'left' | 'join' | 'aj';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+
+  async connect(serverUrl = 'http://localhost:10000', psk?: string): Promise<void> {
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+
+    // Log errors once so we can see the *real* reason in the console
+    this.client.addEventListener?.('error', (e: any) => console.error('[DH] client error:', e));
+    this.client.addEventListener?.('disconnect', (e: any) => console.warn('[DH] disconnect:', e?.reason ?? e));
+    this.client.addEventListener?.('reconnectauthfailed', () =>
+      console.error('[DH] reconnectauthfailed → auth mismatch or origin blocked')
+    );
+
+    await this.tryLogin(psk);
+
+    const conn = await this.client.getAsIdeConnection();
+    // Optionally observe IDE connection state
+    conn.addEventListener?.('error', (e: any) => console.error('[DH] IDE error:', e));
+    conn.addEventListener?.('disconnect', (e: any) => console.warn('[DH] IDE disconnect:', e?.reason ?? e));
+
+    this.ide = await conn.startSession('python');
+    console.log('[DH] IDE session ready');
+  }
+
+  private async tryLogin(psk?: string): Promise<void> {
+    // Try PSK first if provided
+    if (psk) {
+      try {
+        await this.client.login({
+          type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+          token: psk,
+        });
+        console.log('[DH] PSK login ok');
+        return;
+      } catch (e) {
+        console.warn('[DH] PSK login failed, trying anonymous/no-auth handlers…', e);
+      }
+    }
+
+    // Try a bunch of anonymous/no-auth handlers (different builds ship different names)
+    const anonHandlers = [
+      'io.deephaven.authentication.AnonymousAuthenticationHandler',
+      'io.deephaven.authentication.noop.NoopAuthenticationHandler',
+      'io.deephaven.authentication.AuthenticationHandler$None',
+      'io.deephaven.authentication.NoopAuthenticationHandler',
+      'io.deephaven.auth.NoAuthPlugin',
+      'io.deephaven.authentication.AllowAllAuthenticationHandler',
+    ];
+
+    for (const type of anonHandlers) {
+      try {
+        await this.client.login({ type });
+        console.log('[DH] Logged in with', type);
+        return;
+      } catch {
+        // try next
+      }
+    }
+
+    // If server truly has no auth, skipping login is fine.
+    console.log('[DH] Skipping login (server likely no-auth)');
+  }
+
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+names, schemas = [], []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+__dh_live_catalog = new_table([ string_col("name", names), string_col("columns_csv", schemas) ])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  async createJoinedTable(opts: {
+    leftName: string; rightName: string; mode: JoinMode; on: string[]; joins?: string[];
+  }): Promise<DhTable> {
+    const { leftName, rightName, mode, on, joins = ['*'] } = opts;
+    const rid = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random()}`)
+      .toString().replace(/[^a-zA-Z0-9_]/g, '');
+    const varName = `joined_${rid}`;
+    const py = `
+left = ${leftName}
+right = ${rightName}
+mode = "${mode}"
+on_cols = ${JSON.stringify(on)}
+join_cols = ${JSON.stringify(joins)}
+if mode == "natural":
+    ${varName} = left.natural_join(right, on=on_cols, joins=join_cols)
+elif mode == "exact":
+    ${varName} = left.exact_join(right, on=on_cols, joins=join_cols)
+elif mode == "left":
+    ${varName} = left.left_join(right, on=on_cols, joins=join_cols)
+elif mode == "aj":
+    ${varName} = left.aj(right, on=on_cols)
+else:
+    ${varName} = left.join(right, on=on_cols, joins=join_cols)
+`;
+    await this.ide.runCode(py);
+    return await this.ide.getTable(varName);
+  }
+}
+```
+
+---
+
+## B. Quick diagnostics (2 minutes)
+
+1. **Network tab → failing request**  
+    Open the **failing** entry that corresponds to the WebSocket upgrade (often `/socket` or `/session/...`). Check:
+    
+    - **Status**: is it `401/403`?
+        
+    - **Headers → Request → Origin**: likely `http://localhost:4200`.
+        
+    - **Response**: any text mentioning “origin not allowed” or “unauthorized”?
+        
+    
+    • If it’s `401/403` and the response mentions auth → it’s **auth mismatch** → use the service above and look for the “Logged in with …” line, or tell me the class name your server uses.  
+    • If it’s `403` and mentions origin → it’s **origin/CORS** (see next).
+    
+2. **Allow your dev origin for WebSocket**  
+    If your app runs at `http://localhost:4200`, the DH server must allow that origin for the WS handshake. Configure Deephaven to allow it (examples, depending on your deployment):
+    
+    - **Docker env (compose)**:
+        
+        ```yaml
+        environment:
+          - DEEPHAVEN_SERVER_ALLOWED_ORIGINS=http://localhost:4200
+        # or wildcard during dev:
+        # - DEEPHAVEN_SERVER_ALLOWED_ORIGINS=*
+        ```
+        
+    - **Java system property (if you launch with java -D...)**:
+        
+        ```
+        -Ddeephaven.server.allowed.origins=http://localhost:4200
+        ```
+        
+    - **K8s/Ingress**: make sure the WS upgrade for the DH port is proxied through, and add the origin allowlist env/prop.
+        
+    
+    (Exact property name can vary by DH build; look for “allowed origins/origin whitelist” in your server config docs. During dev, `*` is easiest; then lock it down.)
+    
+3. **Protocol match**
+    
+    - If your app is on **https**, use an **https** DH URL so the browser uses **wss**. Mixed content will be blocked.
+        
+4. **No auth for REST ≠ no auth for IDE**  
+    Your Postman GET of `/jsapi/dh-core.js` proves the **static file** is open, but the **IDE/WebSocket** still might require an auth _handshake_. That’s why we explicitly try anonymous handlers in code.
+    
+
+---
+
+## C. After this change
+
+- If the **console** now prints `Logged in with …` and `IDE session ready`, your join UI should work.
+    
+- If it still spams `reconnectauthfailed`, it’s almost certainly **origin**. Add the allow-origin config, restart DH, and it will stop.
+    
+
+If you share (a) the **status code + response** of the failed WS request from the Network tab, or (b) the line your DH server prints about **auth handler/origin settings** at startup, I’ll tailor the one-liner you need for your deployment (Docker/K8s/bare-metal).
