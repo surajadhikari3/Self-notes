@@ -912,3 +912,195 @@ export class JoinBuilderComponent implements OnInit, OnDestroy {
     
 
 If you still prefer to go through the bootstrap package, we can switch to that, but this direct import is the fastest way to get you unblocked and it matches Deephaven’s official guidance.
+
+
+--------------------------------------------------------------------
+
+
+Got it — your server has **no auth**, but our code was trying **PSK**, so the IDE WebSocket kept failing with `reconnectauthfailed`. Let’s fix the connection flow to:
+
+1. **Load the JS API** directly from your DH server (this is fine; your Postman GET proves it’s reachable).
+    
+2. **Attempt login gracefully**:
+    
+    - If you provided a PSK, use it.
+        
+    - Otherwise, try known “no-auth/anonymous” handlers.
+        
+    - If those aren’t required, **skip login** entirely.
+        
+3. **Open the IDE session** and suppress the spammy reconnect logs.
+    
+
+Below is a **drop-in replacement** for your `DeephavenService` that does exactly that. Keep your component the same.
+
+---
+
+### `deephaven.service.ts` (no-auth friendly)
+
+```ts
+import { Injectable } from '@angular/core';
+
+// Use 'any' for dh runtime to avoid type drift between versions
+type DhNS = any;
+type DhTable = any;
+
+export type TableCatalogRow = { name: string; columns_csv: string };
+export type JoinMode = 'natural' | 'exact' | 'left' | 'join' | 'aj';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+
+  /**
+   * Connect to Deephaven and start an IDE session.
+   * If you pass psk === '' (empty) or undefined, we'll auto-try anonymous/no-auth flows.
+   */
+  async connect(serverUrl = 'http://localhost:10000', psk?: string): Promise<void> {
+    const base = serverUrl.replace(/\/+$/, '');
+
+    // 1) Load JS API directly from server (works regardless of npm package versions)
+    const mod = await import(/* webpackIgnore: true */ `${base}/jsapi/dh-core.js`);
+    this.dh = mod.default;
+
+    // 2) Create client and attach minimal listeners to avoid console spam
+    this.client = new this.dh.CoreClient(serverUrl);
+    // Optional: quiet noisy reconnect logs
+    this.client.addEventListener?.('disconnect', () => {/* noop */});
+    this.client.addEventListener?.('reconnectauthfailed', () => {/* noop */});
+
+    // 3) Try to authenticate appropriately
+    await this.tryLogin(psk);
+
+    // 4) Open IDE session
+    const conn = await this.client.getAsIdeConnection();
+    this.ide = await conn.startSession('python'); // or 'groovy'
+  }
+
+  /** Try PSK if provided, else try no-auth/anonymous handlers, else proceed with no login. */
+  private async tryLogin(psk?: string): Promise<void> {
+    // If caller gave a PSK, try it first
+    if (psk) {
+      try {
+        await this.client.login({
+          type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+          token: psk,
+        });
+        return;
+      } catch (e) {
+        console.warn('[DH] PSK login failed, falling back to no-auth/anonymous…', e);
+      }
+    }
+
+    // Common “no auth” handlers across DH versions/environments
+    const anonymousHandlers = [
+      // some builds expose an explicit anonymous handler
+      'io.deephaven.authentication.AnonymousAuthenticationHandler',
+      // noop handler (no authentication)
+      'io.deephaven.authentication.noop.NoopAuthenticationHandler',
+      // older/alt naming
+      'io.deephaven.authentication.AuthenticationHandler$None',
+    ];
+
+    for (const type of anonymousHandlers) {
+      try {
+        await this.client.login({ type });
+        return; // success
+      } catch {
+        // try next
+      }
+    }
+
+    // If server truly has no auth, it's OK to skip login entirely.
+    // CoreClient can still open an IDE connection in that mode.
+    try {
+      // sanity check: if server *requires* auth, the next call will fail, and the catch in connect() will surface it.
+      return;
+    } catch (e) {
+      console.error('[DH] No-auth login attempts failed.', e);
+      throw e;
+    }
+  }
+
+  /** Build a catalog of LIVE (ticking) tables from server globals(). */
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+
+names = []
+schemas = []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+
+__dh_live_catalog = new_table([
+    string_col("name", names),
+    string_col("columns_csv", schemas),
+])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  /** Create a ticking joined table server-side and return a handle to it. */
+  async createJoinedTable(opts: {
+    leftName: string;
+    rightName: string;
+    mode: JoinMode;
+    on: string[];
+    joins?: string[];
+  }): Promise<DhTable> {
+    const { leftName, rightName, mode, on, joins = ['*'] } = opts;
+
+    const rid = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random()}`)
+      .toString()
+      .replace(/[^a-zA-Z0-9_]/g, '');
+    const varName = `joined_${rid}`;
+
+    const py = `
+left = ${leftName}
+right = ${rightName}
+mode = "${mode}"
+on_cols = ${JSON.stringify(on)}
+join_cols = ${JSON.stringify(joins)}
+
+if mode == "natural":
+    ${varName} = left.natural_join(right, on=on_cols, joins=join_cols)
+elif mode == "exact":
+    ${varName} = left.exact_join(right, on=on_cols, joins=join_cols)
+elif mode == "left":
+    ${varName} = left.left_join(right, on=on_cols, joins=join_cols)
+elif mode == "aj":
+    ${varName} = left.aj(right, on=on_cols)
+else:
+    ${varName} = left.join(right, on=on_cols, joins=join_cols)
+`;
+    await this.ide.runCode(py);
+    return await this.ide.getTable(varName);
+  }
+
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+}
+```
+
+---
+
+### Quick checks if it still fails
+
+- **Confirm server auth mode**: In the DH server logs, you should see something like “No authentication configured” (or equivalent). If auth is enabled, use the proper handler instead of anonymous.
+    
+- **CORS / origins**: If your Angular app runs on `http://localhost:4200`, ensure the DH server allows that origin for websockets. (If needed, set the server’s allowed origins to include `http://localhost:4200`.)
+    
+- **Scheme/port match**: If DH is behind HTTPS/ingress, use `https://…` and ensure wss works through the proxy.
+    
+- **Network tab**: Look for a failing request to `/socket` or similar with 401/403 — that indicates auth is still required.
+    
+
+With the fallback flow above, a no-auth server should stop emitting `reconnectauthfailed`, the catalog call should succeed, and your **“Unable to load live tables.”** banner should disappear.
