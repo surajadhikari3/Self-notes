@@ -56,15 +56,43 @@ AWS Lambda --> Is server-less compute service that lets you run code without pro
 
 
 
+## “When would you choose X over Y?” (rapid-fire lines)
+
+- **Lambda vs ECS**: bursty/event-driven with short tasks → **Lambda**; steady containerized services or custom runtimes → **ECS** (Fargate).
+    
+- **ECS vs EKS**: want containers without K8s complexity → **ECS**; org standardizes on K8s → **EKS**.
+    
+- **S3 vs EFS vs EBS**: objects/data lake → **S3**; shared POSIX FS → **EFS**; single-instance block disk → **EBS**.
+    
+- **RDS vs DynamoDB**: relational joins/ACID → **RDS/Aurora**; massive scale, simple key access → **DynamoDB**.
+    
+- **SQS vs SNS vs EventBridge**: queue workers → **SQS**; broadcast → **SNS**; rule-based routing/integrations/schedules → **EventBridge**.
+    
+- **API Gateway vs ALB**: serverless APIs, quotas, API keys → **API GW**; microservices behind load balancer, OIDC auth, HTTP routing → **ALB**.
+    
+- **Kinesis vs MSK**: AWS-native streaming with minimal ops → **Kinesis**; Kafka ecosystem/compatibility → **MSK**.
+    
+
+---
+
+## Sample “reference” architectures you can say out loud
+
+- **HA web app**: Route53 → CloudFront (+WAF) → ALB → ECS Fargate (Spring Boot) → Aurora Postgres; ElastiCache (Redis) for cache; S3 for assets; SQS for async jobs; CloudWatch/X-Ray for observability; IAM/KMS/Secrets Manager for security.
+    
+- **Event-driven serverless**: API Gateway/EventBridge/S3 triggers → Lambda → DynamoDB; SQS DLQs; Step Functions for orchestrations; CloudWatch for logs/alarms.
+    
+- **Streaming analytics**: Kinesis/MSK → Lambda/EMR/Glue → S3 data lake → Athena/Redshift → QuickSight dashboards.
+
+
 ## Key Features of AWS Lambda
 
-|Feature|Description|
-|---|---|
-|**Event-driven**|Lambda runs code in response to events (e.g., S3 upload, API Gateway call, DynamoDB stream).|
-|**Serverless**|No need to manage servers — AWS handles scaling and infrastructure.|
-|**Auto-scaling**|Automatically scales out to handle the load, and scales in when idle.|
-|**Pay-as-you-go**|Charged based on number of requests and execution time (in milliseconds).|
-|**Stateless**|Each execution is independent; use external services (like S3, RDS) for state/data.|
+| Feature           | Description                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| **Event-driven**  | Lambda runs code in response to events (e.g., S3 upload, API Gateway call, DynamoDB stream). |
+| **Serverless**    | No need to manage servers — AWS handles scaling and infrastructure.                          |
+| **Auto-scaling**  | Automatically scales out to handle the load, and scales in when idle.                        |
+| **Pay-as-you-go** | Charged based on number of requests and execution time (in milliseconds).                    |
+| **Stateless**     | Each execution is independent; use external services (like S3, RDS) for state/data.          |
 ```
 User → API Gateway → Lambda → DynamoDB/S3
                  ↑

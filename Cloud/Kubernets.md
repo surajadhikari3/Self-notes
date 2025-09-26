@@ -265,13 +265,13 @@ Great question! ✅ Understanding **liveness vs. readiness probes** is **crucial
 
 ## 🔎 Quick Summary Table
 
-|Feature|**Liveness Probe**|**Readiness Probe**|
-|---|---|---|
-|**Purpose**|Checks **if the app is _alive_** (running or stuck?)|Checks **if the app is _ready to serve traffic_**|
-|**If it fails...**|K8s **kills and restarts** the container|K8s **removes the pod from Service endpoints**|
-|**Triggers restart?**|✅ Yes|❌ No (just stops traffic)|
-|**When is it used?**|Continuous health monitoring|Load balancer / Service-level availability|
-|**Traffic impact**|No impact on routing|Affects service routing / load balancing|
+| Feature               | **Liveness Probe**                                   | **Readiness Probe**                               |
+| --------------------- | ---------------------------------------------------- | ------------------------------------------------- |
+| **Purpose**           | Checks **if the app is _alive_** (running or stuck?) | Checks **if the app is _ready to serve traffic_** |
+| **If it fails...**    | K8s **kills and restarts** the container             | K8s **removes the pod from Service endpoints**    |
+| **Triggers restart?** | ✅ Yes                                                | ❌ No (just stops traffic)                         |
+| **When is it used?**  | Continuous health monitoring                         | Load balancer / Service-level availability        |
+| **Traffic impact**    | No impact on routing                                 | Affects service routing / load balancing          |
 
 ---
 
