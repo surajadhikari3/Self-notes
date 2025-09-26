@@ -1498,3 +1498,170 @@ else:
     
 
 If you share (a) the **status code + response** of the failed WS request from the Network tab, or (b) the line your DH server prints about **auth handler/origin settings** at startup, I’ll tailor the one-liner you need for your deployment (Docker/K8s/bare-metal).
+
+--------------------------------
+gji..........
+
+
+Good news: your screenshots show
+
+- `dh-core.js` loads (304) with `Access-Control-Allow-Origin: http://localhost:4200` ✔️
+    
+- The red spam is from the **IDE WebSocket** being rejected **after** we try to open a session → `reconnectauthfailed` ❌
+    
+
+That means it’s **not** a preflight/CORS problem. It’s an **auth handshake** problem for the IDE connection (different from serving static files).
+
+## Fix it in code (force an anonymous login)
+
+Some Deephaven builds _require_ a login call even when “no auth” is enabled, and they accept an **anonymous/noop** handler. Use this service (drop-in) and watch your console for “Logged in with …”:
+
+```ts
+// deephaven.service.ts
+import { Injectable } from '@angular/core';
+
+type DhNS = any;
+type DhTable = any;
+export type TableCatalogRow = { name: string; columns_csv: string };
+export type JoinMode = 'natural' | 'exact' | 'left' | 'join' | 'aj';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+
+  async connect(serverUrl = 'http://localhost:10000'): Promise<void> {
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+
+    // helpful logs (keep until it works)
+    this.client.addEventListener?.('reconnectauthfailed', () =>
+      console.error('[DH] reconnectauthfailed (auth handler mismatch)'));
+    this.client.addEventListener?.('disconnect', (e:any) =>
+      console.warn('[DH] disconnect:', e?.reason ?? e));
+
+    // 🔑 Force an anonymous/no-auth login; try several known class names
+    await this.loginAnonymous();
+
+    const conn = await this.client.getAsIdeConnection();
+    this.ide = await conn.startSession('python');
+    console.log('[DH] IDE session ready');
+  }
+
+  private async loginAnonymous(): Promise<void> {
+    const candidates = [
+      // common anonymous/no-auth handlers across DH builds
+      { type: 'io.deephaven.authentication.AnonymousAuthenticationHandler', username: 'angular-dev' },
+      { type: 'io.deephaven.authentication.noop.NoopAuthenticationHandler' },
+      { type: 'io.deephaven.authentication.AuthenticationHandler$None' },
+      { type: 'io.deephaven.authentication.NoopAuthenticationHandler' },
+      { type: 'io.deephaven.auth.NoAuthPlugin' },
+      { type: 'io.deephaven.authentication.AllowAllAuthenticationHandler' },
+    ];
+    for (const payload of candidates) {
+      try {
+        await this.client.login(payload as any);
+        console.log('[DH] Logged in with', payload.type);
+        return;
+      } catch {
+        // try next
+      }
+    }
+    // last resort: if server really allows *no* login, continue;
+    // if it still rejects the IDE websocket, server config needs tweaking (see below).
+    console.warn('[DH] Skipping login; server may still require an auth handler.');
+  }
+
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+names, schemas = [], []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+__dh_live_catalog = new_table([string_col("name", names), string_col("columns_csv", schemas)])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  async createJoinedTable(opts: {
+    leftName: string; rightName: string; mode: JoinMode; on: string[]; joins?: string[];
+  }): Promise<DhTable> {
+    const { leftName, rightName, mode, on, joins = ['*'] } = opts;
+    const rid = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random()}`)
+      .toString().replace(/[^a-zA-Z0-9_]/g, '');
+    const varName = `joined_${rid}`;
+    const py = `
+left = ${leftName}
+right = ${rightName}
+mode = "${mode}"
+on_cols = ${JSON.stringify(on)}
+join_cols = ${JSON.stringify(joins)}
+if mode == "natural":
+    ${varName} = left.natural_join(right, on=on_cols, joins=join_cols)
+elif mode == "exact":
+    ${varName} = left.exact_join(right, on=on_cols, joins=join_cols)
+elif mode == "left":
+    ${varName} = left.left_join(right, on=on_cols, joins=join_cols)
+elif mode == "aj":
+    ${varName} = left.aj(right, on=on_cols)
+else:
+    ${varName} = left.join(right, on=on_cols, joins=join_cols)
+`;
+    await this.ide.runCode(py);
+    return await this.ide.getTable(varName);
+  }
+}
+```
+
+## If it still spams `reconnectauthfailed`, it’s server config
+
+Some deployments expose static `/jsapi/*` without auth, but the **IDE/WS** still requires a handler. Two quick ways to make it accept the anonymous login above:
+
+### A) Docker / docker-compose (dev)
+
+```yaml
+environment:
+  # allow your Angular dev origin (WebSocket handshake)
+  - DEEPHAVEN_SERVER_ALLOWED_ORIGINS=http://localhost:4200
+  # enable anonymous/no-auth
+  - DEEPHAVEN_AUTH_TYPE=anonymous        # or:
+  # - DEEPHAVEN_AUTH_PLUGINS=io.deephaven.authentication.AnonymousAuthenticationHandler
+```
+
+### B) JVM flags (bare metal)
+
+```
+-Ddeephaven.server.allowed.origins=http://localhost:4200
+-Ddeephaven.authentication.type=anonymous
+# or:
+# -Ddeephaven.authentication.plugins=io.deephaven.authentication.AnonymousAuthenticationHandler
+```
+
+(Names vary slightly by build; if `DEEPHAVEN_AUTH_TYPE` isn’t recognized, use the `…PLUGINS` or the `-Ddeephaven.authentication…` variant.)
+
+## Why static JS works but IDE fails
+
+- `/jsapi/dh-core.js` is a **static file** → your server serves it openly (304, with ACAO header).
+    
+- The **IDE** uses a **gRPC-Web websocket** that passes auth metadata. If you don’t call a handler the server accepts, it rejects the socket, which shows up as `reconnectauthfailed`.
+    
+
+## Quick verification
+
+1. After applying the service above, check the console for **“Logged in with …”** and **“IDE session ready”**.
+    
+2. If it still fails, open the failing WS in **Network** and confirm the response is a 401/403 from the DH port. That confirms server still requires a handler → set one of the env/JVM flags above.
+    
+3. Keep `DEEPHAVEN_SERVER_ALLOWED_ORIGINS=http://localhost:4200` so the browser Origin is allowed.
+    
+
+Once you see “IDE session ready”, your **live tables** will load and your join UI will stream.
