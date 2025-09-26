@@ -1788,3 +1788,168 @@ If that succeeds, your Angular app will stop showing “Unable to load live tabl
 ---
 
 If you paste the **first 20–30 lines** of the DH startup log (right after “Starting Deephaven server”), I can tell you exactly which property is taking precedence in your build and give the one-line flag that wins on your machine.
+
+
+---------------------------
+
+
+yah...
+
+
+Here’s a **drop-in Angular 20** service that reads the **server URL** and **PSK** from `environment.ts`, then connects via PSK auth. It also includes the live-table catalog + server-side join helpers.
+
+### `src/app/services/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment'; // adjust path if needed
+
+// keep runtime types loose to avoid DH version drift
+type DhNS = any;
+type DhTable = any;
+
+export type TableCatalogRow = { name: string; columns_csv: string };
+export type JoinMode = 'natural' | 'exact' | 'left' | 'join' | 'aj';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+
+  /**
+   * Connect using PSK from environment.
+   * environment.deephavenUrl (e.g. 'http://localhost:10000')
+   * environment.deephavenPsk  (string from your DH server logs)
+   */
+  async connect(): Promise<void> {
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    // Vite-safe dynamic import of DH JS API served by your DH server
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+
+    // optional logs while wiring things up
+    this.client.addEventListener?.('error', (e: any) => console.error('[DH] client error:', e));
+    this.client.addEventListener?.('disconnect', (e: any) =>
+      console.warn('[DH] disconnect:', e?.reason ?? e)
+    );
+
+    // 🔐 PSK login
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    const conn = await this.client.getAsIdeConnection();
+    conn.addEventListener?.('error', (e: any) => console.error('[DH] IDE error:', e));
+    conn.addEventListener?.('disconnect', (e: any) =>
+      console.warn('[DH] IDE disconnect:', e?.reason ?? e)
+    );
+
+    this.ide = await conn.startSession('python'); // or 'groovy'
+    console.log('[DH] IDE session ready');
+  }
+
+  /** Return a table listing LIVE (ticking) tables from globals(). */
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+names, schemas = [], []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+__dh_live_catalog = new_table([
+    string_col("name", names),
+    string_col("columns_csv", schemas),
+])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  /** Create a ticking joined table on the server and return a handle to it. */
+  async createJoinedTable(opts: {
+    leftName: string;
+    rightName: string;
+    mode: JoinMode;
+    on: string[];
+    joins?: string[];
+  }): Promise<DhTable> {
+    const { leftName, rightName, mode, on, joins = ['*'] } = opts;
+
+    const rid = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random()}`)
+      .toString().replace(/[^a-zA-Z0-9_]/g, '');
+    const varName = `joined_${rid}`;
+
+    const py = `
+left = ${leftName}
+right = ${rightName}
+mode = "${mode}"
+on_cols = ${JSON.stringify(on)}
+join_cols = ${JSON.stringify(joins)}
+if mode == "natural":
+    ${varName} = left.natural_join(right, on=on_cols, joins=join_cols)
+elif mode == "exact":
+    ${varName} = left.exact_join(right, on=on_cols, joins=join_cols)
+elif mode == "left":
+    ${varName} = left.left_join(right, on=on_cols, joins=join_cols)
+elif mode == "aj":
+    ${varName} = left.aj(right, on=on_cols)
+else:
+    ${varName} = left.join(right, on=on_cols, joins=join_cols)
+`;
+    await this.ide.runCode(py);
+    return await this.ide.getTable(varName);
+  }
+
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+}
+```
+
+### Example environment files
+
+`src/environments/environment.ts` (dev):
+
+```ts
+export const environment = {
+  production: false,
+  deephavenUrl: 'http://localhost:10000',
+  // ⬇️ paste the PSK token copied from your server logs
+  deephavenPsk: 'PASTE_PSK_TOKEN_HERE',
+};
+```
+
+`src/environments/environment.prod.ts` (prod; adjust as needed):
+
+```ts
+export const environment = {
+  production: true,
+  deephavenUrl: 'http://localhost:10000',
+  deephavenPsk: '', // usually empty in prod; supply via a different config mechanism if needed
+};
+```
+
+### Usage in your component
+
+```ts
+// e.g., in ngOnInit
+await this.deephavenService.connect();
+const catalog = await this.deephavenService.getLiveTableCatalog();
+// ... setViewport, read rows, etc.
+```
+
+> Server-side dev tip: start Deephaven with your Angular origin allowed, e.g.  
+> `-Ddeephaven.server.allowed.origins=http://localhost:4200` (via `JAVA_TOOL_OPTIONS`) so the WS handshake succeeds.
