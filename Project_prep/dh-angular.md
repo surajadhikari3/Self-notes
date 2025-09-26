@@ -1104,3 +1104,178 @@ else:
     
 
 With the fallback flow above, a no-auth server should stop emitting `reconnectauthfailed`, the catalog call should succeed, and your **“Unable to load live tables.”** banner should disappear.
+
+
+
+
+
+---------------------
+
+toppp
+
+
+That yellow Vite message is because we’re doing a **dynamic import with a template string**. Vite tries to statically analyze `import()` paths, can’t, and warns. It’s harmless—but you can (and should) silence it and make the import rock-solid.
+
+Here’s the **fixed, no-auth friendly** `DeephavenService` that:
+
+- uses a Vite-safe dynamic import (`/* @vite-ignore */` + `new URL(...)`),
+    
+- connects to a server **with or without auth**,
+    
+- avoids reconnect spam,
+    
+- and is drop-in compatible with your Angular 20 + Vite setup.
+    
+
+### `src/app/services/deephaven.service.ts` (final)
+
+```ts
+import { Injectable } from '@angular/core';
+
+// Keep runtime types loose to avoid version drift issues
+type DhNS = any;
+type DhTable = any;
+
+export type TableCatalogRow = { name: string; columns_csv: string };
+export type JoinMode = 'natural' | 'exact' | 'left' | 'join' | 'aj';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+
+  /**
+   * Connect to Deephaven and start an IDE session.
+   * Pass psk only if your server actually uses PSK; otherwise omit it.
+   */
+  async connect(serverUrl = 'http://localhost:10000', psk?: string): Promise<void> {
+    // --- Vite-safe dynamic import of the JS API served by Deephaven ---
+    // Avoid template literals directly in import(); use URL + @vite-ignore.
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    // Create client and quiet noisy reconnect logs
+    this.client = new this.dh.CoreClient(serverUrl);
+    this.client.addEventListener?.('disconnect', () => {});
+    this.client.addEventListener?.('reconnectauthfailed', () => {});
+
+    // Try to login only if needed
+    await this.tryLogin(psk);
+
+    // Open IDE session
+    const conn = await this.client.getAsIdeConnection();
+    this.ide = await conn.startSession('python'); // or 'groovy'
+    console.log('[DH] Connected to Deephaven IDE session');
+  }
+
+  private async tryLogin(psk?: string): Promise<void> {
+    // If PSK provided, try it first
+    if (psk) {
+      try {
+        await this.client.login({
+          type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+          token: psk,
+        });
+        return;
+      } catch (e) {
+        console.warn('[DH] PSK login failed, trying anonymous/no-auth', e);
+      }
+    }
+    // Known “no-auth” handlers (some builds expose one of these)
+    const candidates = [
+      'io.deephaven.authentication.AnonymousAuthenticationHandler',
+      'io.deephaven.authentication.noop.NoopAuthenticationHandler',
+      'io.deephaven.authentication.AuthenticationHandler$None',
+    ];
+    for (const type of candidates) {
+      try {
+        await this.client.login({ type });
+        return;
+      } catch { /* try next */ }
+    }
+    // If the server truly has no auth, skipping login is OK
+    return;
+  }
+
+  /** List only LIVE (ticking) tables from globals(). */
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+
+names, schemas = [], []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+
+__dh_live_catalog = new_table([
+    string_col("name", names),
+    string_col("columns_csv", schemas),
+])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  /** Build a ticking joined table on the server and return a handle to it. */
+  async createJoinedTable(opts: {
+    leftName: string; rightName: string; mode: JoinMode; on: string[]; joins?: string[];
+  }): Promise<DhTable> {
+    const { leftName, rightName, mode, on, joins = ['*'] } = opts;
+
+    const rid = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random()}`)
+      .toString().replace(/[^a-zA-Z0-9_]/g, '');
+    const varName = `joined_${rid}`;
+
+    const py = `
+left = ${leftName}
+right = ${rightName}
+mode = "${mode}"
+on_cols = ${JSON.stringify(on)}
+join_cols = ${JSON.stringify(joins)}
+
+if mode == "natural":
+    ${varName} = left.natural_join(right, on=on_cols, joins=join_cols)
+elif mode == "exact":
+    ${varName} = left.exact_join(right, on=on_cols, joins=join_cols)
+elif mode == "left":
+    ${varName} = left.left_join(right, on=on_cols, joins=join_cols)
+elif mode == "aj":
+    ${varName} = left.aj(right, on=on_cols)
+else:
+    ${varName} = left.join(right, on=on_cols, joins=join_cols)
+`;
+    await this.ide.runCode(py);
+    return await this.ide.getTable(varName);
+  }
+
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+}
+```
+
+### Why this fixes your warning
+
+- The warning in your screenshot is exactly Vite saying: “dynamic import path can’t be analyzed.”  
+    Using `new URL('/jsapi/dh-core.js', serverUrl).toString()` + `/* @vite-ignore */` is the **supported** way to load a runtime URL that’s only known at runtime. It silences the warning and works in dev & prod.
+    
+
+---
+
+## Quick checklist if you still see “Unable to load live tables”
+
+- **No auth server**: call `connect('http://localhost:10000')` with **no PSK** (or `undefined`).
+    
+- **CORS / WebSocket**: ensure DH allows your dev origin (e.g., `http://localhost:4200`) for both HTTP and WS. If behind a proxy/ingress, make sure `/socket` (or DH WS path) is passed through.
+    
+- **Network tab**: if `/jsapi/dh-core.js` loads (like your Postman test), but `/socket` shows 401/403, auth is still required; then supply the correct handler/creds.
+    
+- **HTTPS vs HTTP**: if your app runs on HTTPS, use `https://…` and ensure WSS works.
+    
+
+Your Angular component from earlier will work unchanged with this service.
