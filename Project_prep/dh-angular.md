@@ -1953,3 +1953,377 @@ const catalog = await this.deephavenService.getLiveTableCatalog();
 
 > Server-side dev tip: start Deephaven with your Angular origin allowed, e.g.  
 > `-Ddeephaven.server.allowed.origins=http://localhost:4200` (via `JAVA_TOOL_OPTIONS`) so the WS handshake succeeds.
+
+--------------------------------------
+
+checkkk.......................
+
+
+Awesome—let’s build a **generic, plug-and-play Angular 20 component** that shows a _single_ Deephaven **live (ticking) table** and updates in real time whenever the table ticks on the DH server.
+
+You already have a PSK-based service wired to `environment.ts`. Below I:
+
+1. **Extend the service** with a `getTableHandle(name)` helper and a tiny “connected?” flag.
+    
+2. Provide a **standalone component** `LiveTableComponent` you can drop anywhere like:
+    
+    ```html
+    <app-live-table tableName="myKafkaLiveTable"></app-live-table>
+    ```
+    
+    It:
+    
+    - connects (if not connected),
+        
+    - attaches to the named DH table,
+        
+    - renders a viewport,
+        
+    - auto-refreshes on ticks,
+        
+    - cleans up listeners/handles.
+        
+
+---
+
+## 1) Service: add `getTableHandle` + connection guard
+
+Use this if you’re already using the PSK+environment service from earlier. Replace your `DeephavenService` with this (or just add the marked bits).
+
+```ts
+// src/app/services/deephaven.service.ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type DhNS = any;
+type DhTable = any;
+
+export type TableCatalogRow = { name: string; columns_csv: string };
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+  private ready = false; // 👈 track connection state
+
+  get isReady(): boolean {
+    return this.ready;
+  }
+
+  /** Connect using PSK from environment. */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    // Vite-safe dynamic import of DH JS API
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+    this.client.addEventListener?.('error', (e: any) => console.error('[DH] client error:', e));
+    this.client.addEventListener?.('disconnect', (e: any) =>
+      console.warn('[DH] disconnect:', e?.reason ?? e)
+    );
+
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    const conn = await this.client.getAsIdeConnection();
+    conn.addEventListener?.('error', (e: any) => console.error('[DH] IDE error:', e));
+    conn.addEventListener?.('disconnect', (e: any) =>
+      console.warn('[DH] IDE disconnect:', e?.reason ?? e)
+    );
+    this.ide = await conn.startSession('python');
+    this.ready = true;
+    console.log('[DH] IDE session ready');
+  }
+
+  /** Fetch a handle to a table that already exists in the server session's globals(). */
+  async getTableHandle(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table variable name: "${name}"`);
+    }
+    return await this.ide.getTable(name);
+  }
+
+  /** (Optional) Catalog of LIVE (ticking) tables if you want to list them elsewhere. */
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+names, schemas = [], []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+__dh_live_catalog = new_table([
+    string_col("name", names),
+    string_col("columns_csv", schemas),
+])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+}
+```
+
+---
+
+## 2) Generic streaming table component
+
+This is a **standalone** Angular 20 component. It:
+
+- takes `@Input() tableName: string`,
+    
+- uses a viewport (default first 300 rows),
+    
+- listens for `EVENT_UPDATED`,
+    
+- handles schema changes (rebuilds columns if schema changes),
+    
+- cleans up on destroy.
+    
+
+```ts
+// src/app/live-table/live-table.component.ts
+import { CommonModule } from '@angular/common';
+import { Component, Input, OnChanges, OnDestroy, OnInit, SimpleChanges, ChangeDetectorRef } from '@angular/core';
+import { DeephavenService } from '../services/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  template: `
+  <section class="card">
+    <header class="bar">
+      <h3>Live Table: <span class="mono">{{ tableName }}</span></h3>
+      <div class="status">
+        <span *ngIf="error" class="error">{{ error }}</span>
+        <span *ngIf="!error && loading">Connecting…</span>
+      </div>
+    </header>
+
+    <div class="grid" *ngIf="!error">
+      <div class="thead" *ngIf="cols.length">
+        <div class="th" *ngFor="let c of cols; trackBy: trackCol">{{ c }}</div>
+      </div>
+
+      <div class="tbody" (scroll)="onScroll($event)">
+        <div class="tr" *ngFor="let r of rows; trackBy: trackRow">
+          <div class="td" *ngFor="let v of r; trackBy: trackCell">{{ v }}</div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="pager" *ngIf="!error">
+      <button (click)="pageFirst()" [disabled]="offset === 0">First</button>
+      <button (click)="pagePrev()"  [disabled]="offset === 0">Prev</button>
+      <span class="mono">rows {{ offset }}–{{ offset + pageSize - 1 }}</span>
+      <button (click)="pageNext()">Next</button>
+      <button (click)="refresh()">Refresh</button>
+    </footer>
+  </section>
+  `,
+  styles: [`
+    :host { display:block; }
+    .card { border:1px solid #2a2a2a; border-radius:.75rem; background:#0f0f0f; color:#fff; }
+    .bar { display:flex; justify-content:space-between; align-items:center; padding:.75rem 1rem; border-bottom:1px solid #242424; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .status .error { color:#ffb3b3; }
+    .grid { display:flex; flex-direction:column; }
+    .thead, .tr { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+    .th, .td { padding:.5rem; border-bottom:1px solid #1c1c1c; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .thead { background:#111; position:sticky; top:0; z-index:1; }
+    .tbody { max-height: 60vh; overflow:auto; }
+    .pager { display:flex; gap:.5rem; align-items:center; padding:.5rem 1rem; border-top:1px solid #242424; }
+    button { background:#1a1a1a; color:#fff; border:1px solid #333; padding:.4rem .8rem; border-radius:.5rem; }
+    button:disabled { opacity:.5; }
+  `]
+})
+export class LiveTableComponent implements OnInit, OnChanges, OnDestroy {
+  /** Name of a table variable in DH globals(), e.g. "myKafkaLiveTable" */
+  @Input({ required: true }) tableName!: string;
+
+  /** Viewport size; increase if you want to show more rows at once */
+  @Input() pageSize = 300;
+
+  /** Optional starting offset */
+  @Input() initialOffset = 0;
+
+  loading = false;
+  error = '';
+
+  // DH table handle and derived bits
+  private table: any | null = null;
+  cols: string[] = [];
+  private colRefs: any[] = [];
+  rows: unknown[][] = [];
+
+  // viewport paging
+  offset = 0;
+
+  // bound listeners
+  private onUpdated = async () => {
+    if (!this.table) return;
+    try {
+      const vp = await this.table.getViewportData();
+      // fast path: use resolved column refs to avoid name lookups in the hot path
+      this.rows = vp.rows.map((r: any) => this.colRefs.map(col => r.get(col)));
+      this.cdr.markForCheck();
+    } catch (e) {
+      // ignore transient errors during teardown
+    }
+  };
+
+  private onSchemaChanged = async () => {
+    if (!this.table) return;
+    // schema updates (e.g., new columns) → rebuild column refs and re-render
+    this.colRefs = this.table.columns ?? [];
+    this.cols = this.colRefs.map((c: any) => c.name);
+    await this.onUpdated();
+  };
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  async ngOnInit(): Promise<void> {
+    this.offset = this.initialOffset;
+    await this.attach();
+  }
+
+  async ngOnChanges(ch: SimpleChanges): Promise<void> {
+    if (ch['tableName'] && !ch['tableName'].firstChange) {
+      await this.attach(true);
+    }
+  }
+
+  private async attach(reload = false): Promise<void> {
+    this.error = '';
+    this.loading = true;
+    this.cdr.markForCheck();
+
+    await this.detach();
+
+    try {
+      // ensure connection & fetch handle to this table
+      await this.dh.connect();
+      this.table = await this.dh.getTableHandle(this.tableName);
+
+      // prime columns & viewport
+      this.colRefs = this.table.columns ?? [];
+      this.cols = this.colRefs.map((c: any) => c.name);
+
+      await this.table.setViewport(this.offset, this.offset + this.pageSize - 1);
+      await this.onUpdated();
+
+      // subscribe to ticks + schema changes
+      this.table.addEventListener(this.table.EVENT_UPDATED, this.onUpdated);
+      if (this.table.EVENT_SCHEMA_CHANGED) {
+        this.table.addEventListener(this.table.EVENT_SCHEMA_CHANGED, this.onSchemaChanged);
+      }
+    } catch (e: any) {
+      this.error = 'Unable to load live table: ' + (e?.message ?? e);
+    } finally {
+      this.loading = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  private async detach(): Promise<void> {
+    try {
+      if (this.table) {
+        this.table.removeEventListener?.(this.table.EVENT_UPDATED, this.onUpdated);
+        if (this.table.EVENT_SCHEMA_CHANGED) {
+          this.table.removeEventListener?.(this.table.EVENT_SCHEMA_CHANGED, this.onSchemaChanged);
+        }
+        await this.table.close?.();
+      }
+    } catch {}
+    this.table = null;
+    this.rows = [];
+    this.cols = [];
+    this.colRefs = [];
+  }
+
+  // Simple pager helpers (viewport-based)
+  async pageFirst() {
+    this.offset = 0;
+    await this.refresh();
+  }
+
+  async pagePrev() {
+    this.offset = Math.max(0, this.offset - this.pageSize);
+    await this.refresh();
+  }
+
+  async pageNext() {
+    this.offset = this.offset + this.pageSize;
+    await this.refresh();
+  }
+
+  async refresh() {
+    if (!this.table) return;
+    await this.table.setViewport(this.offset, this.offset + this.pageSize - 1);
+    await this.onUpdated();
+  }
+
+  // Optional: lazy paging on scroll-to-bottom
+  async onScroll(evt: Event) {
+    const el = evt.target as HTMLElement;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) {
+      // near bottom → advance window
+      await this.pageNext();
+    }
+  }
+
+  trackCol = (_: number, c: string) => c;
+  trackRow = (i: number) => i;
+  trackCell = (i: number) => i;
+
+  async ngOnDestroy(): Promise<void> {
+    await this.detach();
+  }
+}
+```
+
+### Use it
+
+```html
+<!-- anywhere in your app -->
+<app-live-table tableName="myKafkaLiveTable" [pageSize]="300"></app-live-table>
+```
+
+> Server reminder for dev: start Deephaven with your Angular origin allowed, e.g.  
+> `JAVA_TOOL_OPTIONS="-Ddeephaven.server.allowed.origins=http://localhost:4200"` (and PSK auth enabled, since you’re using it).  
+> Put your **PSK** and **URL** into `environment.ts` as we did in the service.
+
+---
+
+### Why this is reliable
+
+- Uses **column references** (not names on every read) to avoid “no such element/column” glitches.
+    
+- Subscribes to both **`EVENT_UPDATED`** (ticks) and **`EVENT_SCHEMA_CHANGED`** (column changes).
+    
+- Cleans up listeners and closes the server handle on component destroy or table switch.
+    
+- Viewport-based paging avoids huge transfers and keeps the UI snappy.
+    
+- Auto-advances on scroll to keep things simple but still practical.
+    
+
+If you later want sorting, filtering, or column selection in the UI, we can add a thin layer that runs **server-side** transforms (`where`, `sortDescending`, `update_view`) and swaps the handle while keeping the same component.
