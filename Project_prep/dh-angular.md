@@ -1665,3 +1665,126 @@ environment:
     
 
 Once you see “IDE session ready”, your **live tables** will load and your join UI will stream.
+
+
+
+-----------------------------
+
+ohhh
+
+You’re close—the server is still picking **PSK** because something in your env/flags is overriding the anonymous setting. On a **venv + Git Bash** setup, here’s how to force **anonymous** and make sure nothing else wins.
+
+## 1) Clean the shell env (Git Bash)
+
+```bash
+# Show anything Deephaven-related that might be set
+env | grep -i deephaven
+
+# Unset anything auth-related that could force PSK
+unset DEEPHAVEN_AUTH_TYPE
+unset DEEPHAVEN_AUTH_PLUGINS
+unset DEEPHAVEN_AUTHENTICATION_TYPE
+unset DEEPHAVEN_AUTHENTICATION_PLUGINS
+unset DEEPHAVEN_AUTH_PSK
+unset DEEPHAVEN_AUTHENTICATION_PSK
+unset DEEPHAVEN_PSK
+unset DEEPHAVEN_AUTHENTICATION_TYPE_PSK
+
+# If you previously set JAVA_TOOL_OPTIONS, clear it first
+unset JAVA_TOOL_OPTIONS
+```
+
+## 2) Set **only** the flags we need (anonymous + allowed origin)
+
+> In **Git Bash**, use plain `export VAR='value'` syntax (no PowerShell `$env:`).
+
+```bash
+# allow your Angular dev origin
+export JAVA_TOOL_OPTIONS='-Ddeephaven.server.allowed.origins=http://localhost:4200 -Ddeephaven.authentication.type=anonymous'
+```
+
+If your build still ignores `authentication.type`, **override with plugins**:
+
+```bash
+export JAVA_TOOL_OPTIONS='-Ddeephaven.server.allowed.origins=http://localhost:4200 -Ddeephaven.authentication.plugins=io.deephaven.authentication.AnonymousAuthenticationHandler'
+```
+
+(You can combine both if you like; the **plugins** property tends to take precedence.)
+
+### Windows path fix (from your earlier error)
+
+/layouts on Windows is invalid. Give DH a real base dir:
+
+```bash
+mkdir -p "$USERPROFILE/.deephaven/layouts"
+export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS -Ddeephaven.filesystem.storage.base.path=$(cygpath -m "$USERPROFILE")/.deephaven"
+# Some builds also honor:
+# export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS -Ddeephaven.layouts.dir=$(cygpath -m "$USERPROFILE")/.deephaven/layouts"
+```
+
+> Tip: print it to be sure:  
+> `echo "$JAVA_TOOL_OPTIONS"`
+
+## 3) Start the server **from the same shell**
+
+```bash
+source venv/Scripts/activate  # or the correct path to your venv
+python -m deephaven_server    # or: python -m deephaven.server
+```
+
+### What you should see at startup
+
+- A log line that shows **anonymous** (or explicitly the class `io.deephaven.authentication.AnonymousAuthenticationHandler`).
+    
+- A line listing **allowed origins** with `http://localhost:4200`.
+    
+- No “Invalid path: /layouts”.
+    
+
+If you still see `io.deephaven.authentication.psk.PskAuthenticationHandler`, something else is injecting PSK (a wrapper script, profile, or another env var). Repeat step 1 and check **all** `env | grep -i psk` too.
+
+## 4) Client call (unchanged)
+
+Call your service with **no PSK**:
+
+```ts
+await dhService.connect('http://localhost:10000'); // no token param
+```
+
+The logs should show either:
+
+- `Logged in with io.deephaven.authentication.AnonymousAuthenticationHandler`, or
+    
+- `Skipping login (server likely no-auth)`,  
+    and then `IDE session ready`.
+    
+
+## 5) If the server still loads PSK
+
+Force-disable it explicitly:
+
+```bash
+export JAVA_TOOL_OPTIONS="$JAVA_TOOL_OPTIONS -Ddeephaven.authentication.type= -Ddeephaven.authentication.plugins=io.deephaven.authentication.AnonymousAuthenticationHandler -Ddeephaven.authentication.psk.enabled=false"
+```
+
+(Some builds don’t have the `psk.enabled` flag; the important bit is **plugins=Anonymous…** and leaving `type` empty.)
+
+---
+
+### Quick sanity test in the browser console
+
+This bypasses Angular and proves the server accepts anonymous:
+
+```js
+const dh = (await import('http://localhost:10000/jsapi/dh-core.js')).default;
+const c = new dh.CoreClient('http://localhost:10000');
+await c.login({ type: 'io.deephaven.authentication.AnonymousAuthenticationHandler', username: 'angular-dev' });
+const ide = await (await c.getAsIdeConnection()).startSession('python');
+console.log('IDE OK?', !!ide);
+```
+
+If that succeeds, your Angular app will stop showing “Unable to load live tables.”
+
+---
+
+If you paste the **first 20–30 lines** of the DH startup log (right after “Starting Deephaven server”), I can tell you exactly which property is taking precedence in your build and give the one-line flag that wins on your machine.
