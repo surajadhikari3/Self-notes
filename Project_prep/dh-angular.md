@@ -560,3 +560,355 @@ export class JoinBuilderComponent implements OnInit, OnDestroy {
     
 
 If you drop these two files in your Angular 20 app (plus a simple route to the component), you’ll have a working “pick live tables → build server join → stream to UI” flow with Deephaven.
+
+
+
+----------------------------------------------------------------------
+
+
+You’re right — with **`@deephaven/jsapi-bootstrap@1.5.3`** there isn’t an `init` export. The simplest, **guaranteed-working** approach (and the one Deephaven documents) is to import the JS API **directly from your DH server** at runtime, then use `CoreClient`. Below is a drop-in Angular 20.3.0 service + component that:
+
+- lists **live (ticking)** tables,
+    
+- lets the user choose two tables, join type, keys & columns,
+    
+- runs the **join on the DH server**,
+    
+- streams the ticking result into your Angular UI.
+    
+
+The only things you might change are your **server URL** and **PSK**.
+
+(Deephaven’s docs show importing `dh` from `http://<server>:10000/jsapi/dh-core.js` and then using `new dh.CoreClient(...)`, exactly what we do here. ([Deephaven](https://deephaven.io/core/docs/how-to-guides/use-jsapi/ "Use the JS API | Deephaven")))
+
+---
+
+## 1) Angular service
+
+```ts
+// src/app/services/deephaven.service.ts
+import { Injectable } from '@angular/core';
+
+// Keep the DH namespace/runtime as 'any' to avoid type drift across versions
+type DhNS = any;
+type DhTable = any;
+
+export type TableCatalogRow = { name: string; columns_csv: string };
+export type JoinMode = 'natural' | 'exact' | 'left' | 'join' | 'aj';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: any;
+  private ide!: any;
+
+  /**
+   * Connect to Deephaven and start an IDE session.
+   * serverUrl example: 'http://localhost:10000'
+   * psk example: 'very-secret'
+   */
+  async connect(serverUrl = 'http://localhost:10000', psk = 'very-secret'): Promise<void> {
+    const base = serverUrl.replace(/\/+$/, '');
+    // Import the JS API directly from the Deephaven server (documented approach)
+    // https://deephaven.io/core/docs/how-to-guides/use-jsapi/
+    const mod = await import(/* webpackIgnore: true */ `${base}/jsapi/dh-core.js`);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    const conn = await this.client.getAsIdeConnection();
+    this.ide = await conn.startSession('python'); // or 'groovy'
+  }
+
+  /** Build a catalog of LIVE (ticking) tables in the Python globals() and return it as a server-side table. */
+  async getLiveTableCatalog(): Promise<DhTable> {
+    const code = `
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table import Table
+
+names = []
+schemas = []
+for k, v in globals().items():
+    if isinstance(v, Table) and getattr(v, "is_refreshing", False):
+        names.append(k)
+        schemas.append(",".join([c.name for c in v.columns]))
+
+__dh_live_catalog = new_table([
+    string_col("name", names),
+    string_col("columns_csv", schemas),
+])
+`;
+    await this.ide.runCode(code);
+    return await this.ide.getTable('__dh_live_catalog');
+  }
+
+  /** Create a ticking joined table on the server, then return a handle you can subscribe to. */
+  async createJoinedTable(opts: {
+    leftName: string;
+    rightName: string;
+    mode: JoinMode;
+    on: string[];
+    joins?: string[]; // RIGHT-side columns to bring in; default ['*']
+  }): Promise<DhTable> {
+    const { leftName, rightName, mode, on, joins = ['*'] } = opts;
+
+    const rid = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random()}`)
+      .toString()
+      .replace(/[^a-zA-Z0-9_]/g, '');
+    const varName = `joined_${rid}`;
+
+    const py = `
+left = ${leftName}
+right = ${rightName}
+mode = "${mode}"
+on_cols = ${JSON.stringify(on)}
+join_cols = ${JSON.stringify(joins)}
+
+if mode == "natural":
+    ${varName} = left.natural_join(right, on=on_cols, joins=join_cols)
+elif mode == "exact":
+    ${varName} = left.exact_join(right, on=on_cols, joins=join_cols)
+elif mode == "left":
+    ${varName} = left.left_join(right, on=on_cols, joins=join_cols)
+elif mode == "aj":
+    ${varName} = left.aj(right, on=on_cols)  # include the time key in on_cols
+else:
+    ${varName} = left.join(right, on=on_cols, joins=join_cols)
+`;
+    await this.ide.runCode(py);
+    return await this.ide.getTable(varName);
+  }
+
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+}
+```
+
+---
+
+## 2) Generic standalone Angular component
+
+```ts
+// src/app/join-builder/join-builder.component.ts
+import { ChangeDetectorRef, Component, OnDestroy, OnInit, signal } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import type { JoinMode, TableCatalogRow } from '../services/deephaven.service';
+import { DeephavenService } from '../services/deephaven.service';
+
+@Component({
+  selector: 'app-join-builder',
+  standalone: true,
+  imports: [CommonModule, FormsModule],
+  template: `
+  <section class="card">
+    <h2>Build a Live Join</h2>
+
+    <form class="grid" (ngSubmit)="buildJoin()">
+      <label>
+        Left table
+        <select [(ngModel)]="left" name="left" required>
+          <option *ngFor="let t of tableList()" [value]="t.name">{{ t.name }}</option>
+        </select>
+      </label>
+
+      <label>
+        Right table
+        <select [(ngModel)]="right" name="right" required>
+          <option *ngFor="let t of tableList()" [value]="t.name">{{ t.name }}</option>
+        </select>
+      </label>
+
+      <label>
+        Join type
+        <select [(ngModel)]="mode" name="mode">
+          <option value="natural">natural_join</option>
+          <option value="exact">exact_join</option>
+          <option value="left">left_join</option>
+          <option value="join">join (inner)</option>
+          <option value="aj">aj (as-of)</option>
+        </select>
+      </label>
+
+      <label>
+        Keys (CSV)
+        <input [(ngModel)]="keysCsv" name="keysCsv" placeholder="e.g. Symbol,Timestamp"/>
+        <small *ngIf="mode==='aj'">Include your time key for as-of join.</small>
+      </label>
+
+      <label>
+        Right columns (CSV; '*' = all)
+        <input [(ngModel)]="joinsCsv" name="joinsCsv" placeholder="e.g. Bid,Ask or *"/>
+      </label>
+
+      <div class="row">
+        <button type="submit" [disabled]="building">Create Ticking Join</button>
+        <button type="button" (click)="reset()" [disabled]="!joinedTable">Reset</button>
+      </div>
+    </form>
+
+    <p class="hint" *ngIf="error">{{ error }}</p>
+  </section>
+
+  <section class="card" *ngIf="joinedTable">
+    <header class="thead">
+      <div class="th" *ngFor="let c of cols">{{ c }}</div>
+    </header>
+
+    <div class="tbody" role="table">
+      <div class="tr" role="row" *ngFor="let r of rows">
+        <div class="td" role="cell" *ngFor="let v of r">{{ v }}</div>
+      </div>
+    </div>
+  </section>
+  `,
+  styles: [`
+    :host { display:block; padding:1rem; color:#fff; }
+    .card { border:1px solid #2a2a2a; border-radius:.75rem; padding:1rem; margin-bottom:1rem; background:#111; }
+    .grid { display:grid; gap:.75rem; grid-template-columns: repeat(auto-fit,minmax(260px,1fr)); }
+    label { display:flex; flex-direction:column; gap:.25rem; }
+    input, select, button { padding:.5rem; background:#161616; color:#fff; border:1px solid #333; border-radius:.5rem; }
+    .row { display:flex; gap:.5rem; align-items:center; }
+    .thead, .tr { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+    .th, .td { padding:.5rem; border-bottom:1px solid #1f1f1f; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .thead { position:sticky; top:0; background:#0f0f0f; font-weight:600; border-bottom:1px solid #333; }
+    .tbody { max-height:60vh; overflow:auto; }
+    .hint { color:#ffb3b3; }
+  `]
+})
+export class JoinBuilderComponent implements OnInit, OnDestroy {
+  // form state
+  left = '';
+  right = '';
+  mode: JoinMode = 'natural';
+  keysCsv = '';
+  joinsCsv = '*';
+
+  // state
+  tableList = signal<TableCatalogRow[]>([]);
+  building = false;
+  error = '';
+
+  // current joined view
+  joinedTable: any | null = null;
+  cols: string[] = [];
+  private colRefs: any[] = [];
+  rows: unknown[][] = [];
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  private onUpdate = async () => {
+    if (!this.joinedTable) return;
+    try {
+      const vp = await this.joinedTable.getViewportData();
+      this.rows = vp.rows.map((r: any) => this.colRefs.map(col => r.get(col)));
+      this.cdr.markForCheck();
+    } catch {}
+  };
+
+  async ngOnInit(): Promise<void> {
+    try {
+      await this.dh.connect(); // set URL/PSK in the service if different
+      const catalog = await this.dh.getLiveTableCatalog();
+
+      await catalog.setViewport(0, 2000);
+      const vp = await catalog.getViewportData();
+      const nameCol = catalog.columns.find((c:any)=>c.name==='name');
+      const colsCol = catalog.columns.find((c:any)=>c.name==='columns_csv');
+      const items = vp.rows.map((r:any) => ({
+        name: r.get(nameCol),
+        columns_csv: r.get(colsCol),
+      })) as TableCatalogRow[];
+      this.tableList.set(items);
+
+      this.left  = items[0]?.name ?? '';
+      this.right = items[1]?.name ?? '';
+    } catch (e:any) {
+      this.error = 'Unable to load live tables. ' + (e?.message ?? '');
+    } finally {
+      this.cdr.markForCheck();
+    }
+  }
+
+  async buildJoin(): Promise<void> {
+    this.error = '';
+    this.building = true;
+    this.cdr.markForCheck();
+
+    await this.teardownJoinedTable();
+
+    try {
+      const on = this.keysCsv.split(',').map(s => s.trim()).filter(Boolean);
+      const joins = this.joinsCsv === '*' ? ['*'] : this.joinsCsv.split(',').map(s => s.trim()).filter(Boolean);
+
+      this.joinedTable = await this.dh.createJoinedTable({
+        leftName: this.left,
+        rightName: this.right,
+        mode: this.mode,
+        on,
+        joins,
+      });
+
+      this.colRefs = (this.joinedTable.columns ?? []);
+      this.cols = this.colRefs.map((c:any) => c.name);
+
+      await this.joinedTable.setViewport(0, 300);
+      await this.onUpdate();
+
+      this.joinedTable.addEventListener(this.joinedTable.EVENT_UPDATED, this.onUpdate);
+      this.joinedTable.addEventListener?.(this.joinedTable.EVENT_CLOSED, () => {
+        this.error = 'Joined table was closed on the server.';
+        this.cdr.markForCheck();
+      });
+    } catch (e:any) {
+      this.error = 'Failed to create joined table. ' + (e?.message ?? '');
+    } finally {
+      this.building = false;
+      this.cdr.markForCheck();
+    }
+  }
+
+  async reset(): Promise<void> {
+    this.error = '';
+    await this.teardownJoinedTable();
+    this.cols = [];
+    this.colRefs = [];
+    this.rows = [];
+    this.cdr.markForCheck();
+  }
+
+  private async teardownJoinedTable(): Promise<void> {
+    try {
+      if (this.joinedTable) {
+        this.joinedTable.removeEventListener?.(this.joinedTable.EVENT_UPDATED, this.onUpdate);
+        await this.joinedTable.close?.();
+      }
+    } catch {} finally {
+      this.joinedTable = null;
+    }
+  }
+
+  async ngOnDestroy(): Promise<void> {
+    await this.teardownJoinedTable();
+  }
+}
+```
+
+---
+
+### Why this works (and why `init` didn’t)
+
+- **`@deephaven/jsapi-bootstrap` 1.5.3** doesn’t export a default `init` function; its public API is different (hooks/classes). Importing `dh` **directly** from your Deephaven server is the supported, stable path and is exactly how the docs do it (see the “Use the JS API” guide where they import `dh` from `/jsapi/dh-core.js` and then `new dh.CoreClient(...)`). ([Deephaven](https://deephaven.io/core/docs/how-to-guides/use-jsapi/ "Use the JS API | Deephaven"))
+    
+- The code above avoids type/shape drift by treating the `dh` runtime as `any`, while still giving you safe Angular code and proper cleanup.
+    
+- It lists **only live tables**, performs the **join on the server**, and streams updates to the UI via `setViewport` + `EVENT_UPDATED`.
+    
+
+If you still prefer to go through the bootstrap package, we can switch to that, but this direct import is the fastest way to get you unblocked and it matches Deephaven’s official guidance.
