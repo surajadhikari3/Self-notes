@@ -776,3 +776,262 @@ api.setGridOption('quickFilterText', text);
 ```
 
 If you want, we can also switch to the new **Quartz theme** (`ag-theme-quartz`) or add server-side row model later—but the above is the smallest change to make your current app compile and run cleanly on **34.2.0**.
+
+
+------------------------------------------------------------------------------
+
+chil.........
+
+You’re right—the join should stay in Deephaven. In Angular you should only **read three existing live tables**: `user`, `account`, and your server-side `user_account`. Also, your template error is just a small parentheses/typing issue.
+
+Here’s the cleaned, **v34.2.0-compatible** setup:
+
+# 1) TS: only fetch existing tables (no createJoinedTable)
+
+```ts
+// join-tables.component.ts (relevant parts)
+async ngOnInit() {
+  await this.dh.connect();
+
+  // these must already exist in your DH session
+  this.userHandle = await this.dh.getTableHandle('user');
+  this.accountHandle = await this.dh.getTableHandle('account');
+  this.joinedHandle = await this.dh.getTableHandle('user_account'); // <-- FROM DH, not built in Angular
+
+  this.userCols   = this.makeCols(this.userHandle);
+  this.accountCols= this.makeCols(this.accountHandle);
+  this.joinedCols = this.makeCols(this.joinedHandle);
+
+  // bind Deephaven → arrays; Angular updates grids via [rowData]
+  this.userAdapter    = this.dh.createLiveAdapter();
+  this.accountAdapter = this.dh.createLiveAdapter();
+  this.joinedAdapter  = this.dh.createLiveAdapter();
+
+  await this.userAdapter.bind(this.userHandle,    rows => { this.userRows   = rows; });
+  await this.accountAdapter.bind(this.accountHandle, rows => { this.accountRows = rows; });
+  await this.joinedAdapter.bind(this.joinedHandle,  rows => { this.joinedRows  = rows; });
+}
+
+// v34 quick filter (setRowData/ setQuickFilter no longer exist)
+quickFilter(which: 'user'|'account'|'joined', text: string) {
+  const api =
+    which === 'user'    ? this.userApi :
+    which === 'account' ? this.accountApi :
+                          this.joinedApi;
+  api?.setGridOption('quickFilterText', text);
+}
+```
+
+# 2) HTML: fix the `(input)` syntax (your error)
+
+Angular template needs the **cast wrapped in parentheses**. Use exactly this:
+
+```html
+<!-- join-tables.component.html (inputs only) -->
+<input
+  placeholder="Search users…"
+  (input)="quickFilter('user', (($event.target as HTMLInputElement).value))" />
+
+<input
+  placeholder="Search accounts…"
+  (input)="quickFilter('account', (($event.target as HTMLInputElement).value))" />
+
+<input
+  placeholder="Search joined…"
+  (input)="quickFilter('joined', (($event.target as HTMLInputElement).value))" />
+```
+
+Common pitfalls that cause the “Missing closing parenthesis” parser error:
+
+- Missing the outer parentheses around the cast: `($event.target as HTMLInputElement).value`
+    
+- Smart quotes or stray commas. Copy exactly as above.
+    
+
+# 3) AG Grid v34 reminders (matches your package.json)
+
+- Bind rows with `[rowData]="...Rows"` (don’t call `setRowData`).
+    
+- Use `api.setGridOption('quickFilterText', text)` for search.
+    
+- Keep `ColDef[]` simple; you already have it.
+    
+
+# 4) Quick checklist
+
+- In Deephaven, make sure these Python variables exist and tick:
+    
+    - `user` (append),
+        
+    - `account` (append),
+        
+    - `user_account` (your `aj` join driven by `account`).
+        
+- In Angular, **only** read them with `getTableHandle(...)`.
+    
+
+If you want, paste your current `join-tables.component.html` (just the top inputs + ag-grid tags) and I’ll spot-fix any remaining template typos.
+
+
+--------------
+pil
+
+Perfect—here’s a **minimal, clean DeephavenService** that does only what you need:
+
+- PSK login
+    
+- `getTableHandle(name)` for existing (already-created) live tables on the DH server (e.g., `user`, `account`, `user_account`)
+    
+- Tiny live adapter to keep arrays in sync for AG Grid v34 (no `setRowData` calls)
+    
+- `closeTableHandle` and `disconnect` helpers
+    
+
+Drop this in `src/app/deephaven/deephaven.service.ts`.
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type DhNS = any;
+type DhClient = any;
+type DhIde = any;
+export type DhTable = any;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: DhClient;
+  private ide!: DhIde;
+  private ready = false;
+
+  get isReady(): boolean {
+    return this.ready;
+  }
+
+  /** Connect to Deephaven using PSK. */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    // load JS API from the DH server
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.Client(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python'); // ensure a python session exists
+    this.ready = true;
+  }
+
+  /** Get a handle to an existing server-side table variable (globals()). */
+  async getTableHandle(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table variable name: "${name}"`);
+    }
+    return this.ide.getTable(name);
+  }
+
+  /** Close a table handle (optional cleanup). */
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+
+  /** Disconnect (optional, if you want to tear down). */
+  async disconnect(): Promise<void> {
+    try { await this.ide?.close?.(); } catch {}
+    try { await this.client?.close?.(); } catch {}
+    this.ready = false;
+  }
+
+  /** Minimal live → array adapter for AG Grid. */
+  createLiveAdapter() {
+    const dh = this.dh;
+    return new LiveTableAdapter(dh);
+  }
+}
+
+/**
+ * LiveTableAdapter: keeps a viewport open and refreshes rows.
+ * Simple approach: resnapshot on updates (good for moderate tables).
+ */
+class LiveTableAdapter {
+  private viewport: any;
+  private sub: ((e: any) => void) | undefined;
+  private table: any;
+  private dh: any;
+
+  constructor(dh: any) { this.dh = dh; }
+
+  async bind(table: any, onRows: (rows: any[]) => void, columns?: string[]) {
+    this.table = table;
+    const cols = columns ?? table.columns.map((c: any) => c.name);
+
+    // initial snapshot
+    const snap = await table.snapshot(cols);
+    onRows(snap.toObjects?.() ?? snap);
+
+    // establish viewport for live updates
+    this.viewport = await table.setViewport(0, 10000, cols); // adjust row count if needed
+
+    // react to updates (resnapshot = simplest, robust path)
+    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+    this.sub = async () => {
+      try {
+        const s = await table.snapshot(cols);
+        onRows(s.toObjects?.() ?? s);
+      } catch (e) {
+        // swallow transient errors
+        console.warn('Viewport refresh failed', e);
+      }
+    };
+    table.addEventListener(EVENT, this.sub);
+  }
+
+  async unbind() {
+    try {
+      if (this.table && this.sub) {
+        const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+        this.table.removeEventListener?.(EVENT, this.sub);
+      }
+      await this.viewport?.close?.();
+    } catch {}
+  }
+}
+```
+
+### How to use it (recap)
+
+- In your component’s `ngOnInit`:
+    
+    ```ts
+    await this.dh.connect();
+    this.userHandle = await this.dh.getTableHandle('user');
+    this.accountHandle = await this.dh.getTableHandle('account');
+    this.joinedHandle = await this.dh.getTableHandle('user_account'); // built in DH
+    
+    this.userAdapter = this.dh.createLiveAdapter();
+    await this.userAdapter.bind(this.userHandle, rows => this.userRows = rows);
+    
+    // same for account + joined
+    ```
+    
+- In the template, bind `[rowData]="userRows"` (no `setRowData`) and for search use:
+    
+    ```ts
+    api.setGridOption('quickFilterText', text);
+    ```
+    
+
+That’s it—no join logic in Angular, only reading/streaming what DH already produces.
