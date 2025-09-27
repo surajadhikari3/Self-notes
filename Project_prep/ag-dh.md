@@ -1034,4 +1034,167 @@ class LiveTableAdapter {
     ```
     
 
-That’s it—no join logic in Angular, only reading/streaming what DH already produces.
+--------------------------------------------
+
+proper..................
+
+
+Gotcha — we’ll make PSK **required** exactly like before, using `CoreClient` + `PskAuthenticationHandler`. Here’s a **clean, minimal** `DeephavenService` that only does what you need and fails fast if PSK is missing.
+
+### `src/app/deephaven/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type DhNS = any;
+type DhCoreClient = any;
+type DhIde = any;
+export type DhTable = any;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: DhCoreClient;
+  private ide!: DhIde;
+  private ready = false;
+
+  get isReady(): boolean {
+    return this.ready;
+  }
+
+  /** Connect to Deephaven with REQUIRED PSK auth. */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    // Load DH JS API from the server
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    // CoreClient + PSK login
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    // IDE connection for table handles
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python'); // safe no-op if already present
+    this.ready = true;
+  }
+
+  /** Get a handle to an existing globals() table on the DH server. */
+  async getTableHandle(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table variable name: "${name}"`);
+    }
+    return this.ide.getTable(name);
+  }
+
+  /** Live → array adapter for AG Grid: open viewport, resnapshot on updates. */
+  createLiveAdapter() {
+    const dh = this.dh;
+    return new LiveTableAdapter(dh);
+  }
+
+  async closeTableHandle(table: DhTable | null | undefined): Promise<void> {
+    try { await table?.close?.(); } catch {}
+  }
+
+  async disconnect(): Promise<void> {
+    try { await this.ide?.close?.(); } catch {}
+    try { await this.client?.close?.(); } catch {}
+    this.ready = false;
+  }
+}
+
+/** Simple, robust live adapter (good for moderate table sizes). */
+class LiveTableAdapter {
+  private viewport: any;
+  private sub?: (e: any) => void;
+  private table: any;
+  private dh: any;
+
+  constructor(dh: any) { this.dh = dh; }
+
+  async bind(table: any, onRows: (rows: any[]) => void, columns?: string[]) {
+    this.table = table;
+    const cols = columns ?? (table?.columns ?? []).map((c: any) => c.name);
+
+    // Initial snapshot
+    const snap = await table.snapshot(cols);
+    onRows(snap.toObjects?.() ?? snap);
+
+    // Viewport for live updates (adjust rowCount if needed)
+    this.viewport = await table.setViewport(0, 10000, cols);
+
+    // Refresh rows on each update
+    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+    this.sub = async () => {
+      try {
+        const s = await table.snapshot(cols);
+        onRows(s.toObjects?.() ?? s);
+      } catch (e) {
+        console.warn('Viewport refresh failed', e);
+      }
+    };
+    table.addEventListener(EVENT, this.sub);
+  }
+
+  async unbind() {
+    try {
+      if (this.table && this.sub) {
+        const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+        this.table.removeEventListener?.(EVENT, this.sub);
+      }
+      await this.viewport?.close?.();
+    } catch {}
+  }
+}
+```
+
+### Environment (PSK **required**)
+
+```ts
+// src/environments/environment.ts
+export const environment = {
+  production: false,
+  deephavenUrl: 'http://localhost:10000', // your DH base URL
+  deephavenPsk: 'YOUR_PSK_TOKEN',         // must be set
+};
+```
+
+### AG Grid (standalone app) – register modules once
+
+```ts
+// src/main.ts
+import { bootstrapApplication } from '@angular/platform-browser';
+import { appConfig } from './app/app.config';
+import { AppComponent } from './app/app.component';
+
+import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
+ModuleRegistry.registerModules([AllCommunityModule]);
+
+bootstrapApplication(AppComponent, appConfig).catch(err => console.error(err));
+```
+
+This matches your AG Grid component usage:
+
+- You call `await dh.connect()` (PSK enforced).
+    
+- `getTableHandle('user')`, `getTableHandle('account')`, `getTableHandle('user_account')`.
+    
+- For each, `adapter.bind(handle, rows => this.rows = rows)`.
+    
+- Grids update via `[rowData]="rows"` and quick filter via `api.setGridOption('quickFilterText', text)`.
+    
+
+If anything still glitches, share the exact error text and I’ll tighten it further.
