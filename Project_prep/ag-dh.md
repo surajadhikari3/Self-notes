@@ -593,3 +593,186 @@ export class AppModule {}
     
 
 If you want me to switch the join to `natural_join` or `left_join`, just say the word.
+
+
+-----------------------
+top
+
+
+You’re on **AG Grid v34.2.0**. In v29+:
+
+- `gridApi.setRowData(...)` was **removed** → just bind `[rowData]` in the template and update the array.
+    
+- `gridApi.setQuickFilter(...)` was **removed** → use `gridApi.setGridOption('quickFilterText', text)`.
+    
+
+Here’s the minimal, **compatible** fix for your component.
+
+---
+
+## join-tables.component.ts (only the parts that change)
+
+```ts
+import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { AgGridAngular } from 'ag-grid-angular';
+import { ColDef, GridApi, GridReadyEvent } from 'ag-grid-community';
+import { DeephavenService, DhTable } from '../deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-join-tables',
+  templateUrl: './join-tables.component.html',
+  styleUrls: ['./join-tables.component.css'],
+})
+export class JoinTablesComponent implements OnInit, OnDestroy {
+  @ViewChild('userGrid') userGrid!: AgGridAngular;
+  @ViewChild('accountGrid') accountGrid!: AgGridAngular;
+  @ViewChild('joinedGrid') joinedGrid!: AgGridAngular;
+
+  userCols: ColDef[] = [];
+  accountCols: ColDef[] = [];
+  joinedCols: ColDef[] = [];
+
+  // bind these to [rowData] in the template
+  userRows: any[] = [];
+  accountRows: any[] = [];
+  joinedRows: any[] = [];
+
+  private userApi?: GridApi;
+  private accountApi?: GridApi;
+  private joinedApi?: GridApi;
+
+  private userHandle?: DhTable;
+  private accountHandle?: DhTable;
+  private joinedHandle?: DhTable;
+
+  private userAdapter?: any;
+  private accountAdapter?: any;
+  private joinedAdapter?: any;
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    await this.dh.connect();
+
+    this.userHandle = await this.dh.getTableHandle('user');
+    this.accountHandle = await this.dh.getTableHandle('account');
+
+    // For your “account append-only + enrich from user as-of time” case you chose `aj`
+    this.joinedHandle = await this.dh.createJoinedTable({
+      leftName: 'account',
+      rightName: 'user',
+      mode: 'aj',
+      on: ['userId', 'ts'],           // last element is the as-of key
+      joins: ['name', 'email', 'age'],
+    });
+
+    this.userCols = this.makeCols(this.userHandle);
+    this.accountCols = this.makeCols(this.accountHandle);
+    this.joinedCols = this.makeCols(this.joinedHandle);
+
+    // bind Deephaven → arrays; Angular will update the grid via [rowData]
+    this.userAdapter = this.dh.createLiveAdapter();
+    this.accountAdapter = this.dh.createLiveAdapter();
+    this.joinedAdapter = this.dh.createLiveAdapter();
+
+    await this.userAdapter.bind(this.userHandle, rows => { this.userRows = rows; });
+    await this.accountAdapter.bind(this.accountHandle, rows => { this.accountRows = rows; });
+    await this.joinedAdapter.bind(this.joinedHandle, rows => { this.joinedRows = rows; });
+  }
+
+  ngOnDestroy(): void {
+    this.userAdapter?.unbind();
+    this.accountAdapter?.unbind();
+    this.joinedAdapter?.unbind();
+    this.dh.closeTableHandle(this.userHandle);
+    this.dh.closeTableHandle(this.accountHandle);
+    this.dh.closeTableHandle(this.joinedHandle);
+  }
+
+  onUserGridReady(e: GridReadyEvent)   { this.userApi   = e.api; }
+  onAccountGridReady(e: GridReadyEvent){ this.accountApi= e.api; }
+  onJoinedGridReady(e: GridReadyEvent) { this.joinedApi = e.api; }
+
+  // v34 way to set quick filter
+  quickFilter(which: 'user'|'account'|'joined', text: string) {
+    const api =
+      which === 'user' ? this.userApi :
+      which === 'account' ? this.accountApi :
+      this.joinedApi;
+    api?.setGridOption('quickFilterText', text);
+  }
+
+  private makeCols(table: any): ColDef[] {
+    return (table?.columns ?? []).map((c: any) => ({
+      field: c.name,
+      sortable: true,
+      filter: true,
+      resizable: true,
+      minWidth: 120,
+    }));
+  }
+}
+```
+
+---
+
+## join-tables.component.html (unchanged data binding; inputs drive quick filter)
+
+```html
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-header">
+      <h3>User</h3>
+      <input placeholder="Search users…" (input)="quickFilter('user', ($event.target as HTMLInputElement).value)" />
+    </div>
+    <ag-grid-angular
+      #userGrid
+      class="ag-theme-alpine grid"
+      [rowData]="userRows"
+      [columnDefs]="userCols"
+      (gridReady)="onUserGridReady($event)">
+    </ag-grid-angular>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h3>Account</h3>
+      <input placeholder="Search accounts…" (input)="quickFilter('account', ($event.target as HTMLInputElement).value)" />
+    </div>
+    <ag-grid-angular
+      #accountGrid
+      class="ag-theme-alpine grid"
+      [rowData]="accountRows"
+      [columnDefs]="accountCols"
+      (gridReady)="onAccountGridReady($event)">
+    </ag-grid-angular>
+  </div>
+</div>
+
+<div class="panel full">
+  <div class="panel-header">
+    <h3>User × Account (as-of on ts)</h3>
+    <input placeholder="Search joined…" (input)="quickFilter('joined', ($event.target as HTMLInputElement).value)" />
+  </div>
+  <ag-grid-angular
+    #joinedGrid
+    class="ag-theme-alpine grid"
+    [rowData]="joinedRows"
+    [columnDefs]="joinedCols"
+    (gridReady)="onJoinedGridReady($event)">
+  </ag-grid-angular>
+</div>
+```
+
+---
+
+### Why your errors happened
+
+- `setRowData` and `setQuickFilter` were removed from the public API. In v34, you **bind `rowData`** and update arrays, and you **set quick filter** with:
+    
+
+```ts
+api.setGridOption('quickFilterText', text);
+```
+
+If you want, we can also switch to the new **Quartz theme** (`ag-theme-quartz`) or add server-side row model later—but the above is the smallest change to make your current app compile and run cleanly on **34.2.0**.
