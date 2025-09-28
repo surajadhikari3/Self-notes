@@ -1,184 +1,70 @@
+You’re seeing that storm because the frontend is opening **multiple viewports on the same DH global** (every bind/reattach from HMR or re-renders adds another), so when you re-run the Python cell and DH swaps the globals, all those stale viewports start firing `snapshot()` → `ClassCastException` → `Table already closed`.
 
-You’re hitting this because one of the arguments you pass to `kc.consume(...)` is a **Python function (or wrong type)**, and Deephaven’s Kafka bridge expects a Java-backed object with an internal `._object`. When it can’t find that, you get:
+Fix = make binding **single-flight per table variable** and **broadcast** updates to any listeners. That way there is only ever **one** viewport per DH global. Also make the binder self-healing (reattach once when the table is swapped) and make unsubscribe deterministic.
 
-```
-AttributeError: 'function' object has no attribute '_object'
-```
+Below is an end-to-end update that addresses all the issues you’ve hit:
 
-In practice, this happens if any of these are wrong:
-
-- `kc` got shadowed (e.g., you defined a function or variable named `kc`).
+- PSK login (unchanged).
     
-- `USER_VALUE_SPEC` / `ACCOUNT_VALUE_SPEC` isn’t a **json spec object** (e.g., you forgot to call `kc.json_spec(...)`).
+- A **TableHub** inside the service that:
     
-- `KAFKA_CONFIG` isn’t the **expected properties map** (e.g., you accidentally turned it into a function/tuple).
+    - de-duplicates by `varName`
+        
+    - keeps exactly **one** viewport open per table
+        
+    - snapshots once and **broadcasts** rows to all subscribers
+        
+    - self-heals on “closed” errors without flooding
+        
+    - reference-counts and closes the viewport when the last subscriber unsubscribes
+        
+- A minimal `LiveTableComponent` using the hub; it never calls `snapshot()` directly, so there’s no attach storm.
     
-- You re-ran a cell and redefined things in a partial state.
-    
-
-Below is a **minimal, safe, idempotent** Deephaven script you can paste as-is. It avoids functions, guards against re-run, and uses only the supported types for `kc.consume`. It also uses `KafkaTimestamp` directly (falls back to `now()` if not present).
-
-### ✅ Clean Deephaven script (run once; safe to re-run)
-
-```python
-# Deephaven Kafka consumers → append tables → as-of join (account-driven)
-
-from deephaven.stream.kafka import consumer as kc
-from deephaven import dtypes as dt
-
-# -------------------- CONFIG --------------------
-TOPIC1 = "ccd01_sb_its_esp_tap3507_bishowcaseraw"        # user
-TOPIC2 = "ccd01_sb_its_esp_tap3507_bishowcasescurated"   # account
-
-# IMPORTANT: dict of strings; DO NOT put callables in here.
-KAFKA_CONFIG = {
-    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
-    "security.protocol": "SASL_SSL",
-    "sasl.mechanism": "OAUTHBEARER",
-    "auto.offset.reset": "earliest",   # or "latest"
-    # your oauth settings (strings only):
-    "sasl.login.callback.handler.class":
-        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
-    "sasl.oauthbearer.token.endpoint.url":
-        "https://fdsit.rastest.tdbank.ca/as/token.oauth2",
-    "sasl.jaas.config":
-        "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required "
-        "oauth.jwks.endpoint.uri=\"https://.../jwks\" "
-        "oauth.token.endpoint.uri=\"https://.../token\" "
-        "oauth.client.id=\"TestScopeClient\" "
-        "oauth.client.secret=\"2Federate\" "
-        "oauth.scope=\"\" ;",
-    # remove any trailing '\' continuations you copied from Java props; above is a single python string
-}
-
-# JSON value specs – MUST be kc.json_spec(...), not a dict or function
-USER_VALUE_SPEC = kc.json_spec({
-    "userId": dt.string,
-    "name":   dt.string,
-    "email":  dt.string,
-    "age":    dt.int64,
-})
-ACCOUNT_VALUE_SPEC = kc.json_spec({
-    "userId":      dt.string,
-    "accountType": dt.string,
-    "balance":     dt.double,
-})
-
-# -------------------- SAFE (re)RUN GUARDS --------------------
-# only build the consumers once per session
-if "user_raw" not in globals():
-    user_raw = kc.consume(
-        KAFKA_CONFIG,                # dict of strings
-        TOPIC1,                      # string topic
-        key_spec=kc.KeyValueSpec.IGNORE,
-        value_spec=USER_VALUE_SPEC,  # kc.json_spec(...)
-        table_type=kc.TableType.append,
-    )
-if "account_raw" not in globals():
-    account_raw = kc.consume(
-        KAFKA_CONFIG,
-        TOPIC2,
-        key_spec=kc.KeyValueSpec.IGNORE,
-        value_spec=ACCOUNT_VALUE_SPEC,
-        table_type=kc.TableType.append,
-    )
-
-# -------------------- TIMESTAMP NORMALIZATION --------------------
-# Create a 'ts' Instant column on both sides. Prefer KafkaTimestamp if available.
-def _with_ts(t):
-    cols = [c.name for c in t.columns]
-    if "KafkaTimestamp" in cols:
-        return t.rename_columns(["ts = KafkaTimestamp"])
-    else:
-        from deephaven.time import now
-        return t.update(["ts = now()"])
-
-user    = _with_ts(user_raw)
-account = _with_ts(account_raw)
-
-# -------------------- JOIN (ACCOUNT-DRIVEN A/J) --------------------
-# As-of join: result only when account rows arrive; user fields frozen "as of" ts.
-# Last item in 'on' is the as-of key.
-users_hist = user.sort_descending("ts")
-user_account = account.aj(users_hist, on=["userId", "ts"], joins=["name", "email", "age"])
-
-PIPELINE_READY = True  # convenience flag
-```
-
-### Quick sanity checks (run right below the cell)
-
-```python
-print("user cols:", [c.name for c in user.columns])
-print("account cols:", [c.name for c in account.columns])
-print("joined cols:", [c.name for c in user_account.columns])
-print("sizes:", user.size(), account.size(), user_account.size())
-```
-
-If any of those `print`s throw, the table variables aren’t defined as expected.
-
----
-
-## What likely went wrong in your version
-
-- A helper **function** or name accidentally **shadowed** one of the Kafka objects (e.g., `KAFKA_CONFIG` became a function, or `USER_VALUE_SPEC` wasn’t created with `kc.json_spec`).
-    
-- Multiline Java-style property strings with `\` got pasted directly—Python treated those as **line continuations** that swallowed the next line or created an invalid object. In the script above, each property is a **single Python string**.
-    
-- Re-running the cell **recreated** consumers; your Angular app still had the old handles. The guards above (“`if 'user_raw' not in globals()`”) make the script **idempotent**.
+- Server side: keep your **top-level** DH cell (no helpers) that recreates `user`, `account`, `user_account` each run. The hub will reattach when that happens.
     
 
 ---
 
-## Angular (just to close the loop)
+## 1) Deephaven service (PSK + TableHub)
 
-Keep using the self-healing adapter I gave you previously with resolvers:
-
-```ts
-await this.userAdapter.bind(
-  await this.dh.getTableHandle('user'),
-  rows => this.userRows = rows,
-  undefined,
-  () => this.dh.getTableHandle('user')
-);
-```
-
-Same for `account` and `user_account`. No close/release calls from Angular.
-
----
-
-If you still hit an error after pasting the **exact** script above, copy the **first 5–6 lines of the traceback** and the **line number** it points to in your cell—I’ll pinpoint the exact field that’s off.
-
-
-You’re hitting “Table already closed” because the server-side variable is being redefined (or the DH session recycles) while your Angular viewport is still using the old handle. So your first snapshot works, the server re-runs Python (or you switch tabs, etc.), DH closes the old handle, and the next “safeSnapshot” throws.
-
-Fix: make the client **self-healing**. When DH says “closed”, automatically **re-acquire a fresh handle by name**, re-open the viewport, and resume streaming — no page reloads, no manual close.
-
-Below is a drop-in update for your service + the small component change to pass a resolver.
-
-# 1) `deephaven.service.ts` (PSK required + self-healing adapter)
+`src/app/deephaven/deephaven.service.ts`
 
 ```ts
 import { Injectable } from '@angular/core';
 import { environment } from '../../environments/environment';
 
 type DhNS = any;
-type DhCoreClient = any;
-type DhIde = any;
+type DhClient = any;
+type DhIDE = any;
 export type DhTable = any;
+
+type RowsListener = (rows: any[]) => void;
+
+interface HubEntry {
+  varName: string;
+  table?: DhTable;
+  viewport?: any;
+  cols: string[];
+  listeners: Set<RowsListener>;
+  refCount: number;
+  generation: number;
+  reconnecting: boolean;
+  destroyed: boolean;
+}
 
 @Injectable({ providedIn: 'root' })
 export class DeephavenService {
   private dh!: DhNS;
-  private client!: DhCoreClient;
-  private ide!: DhIde;
+  private client!: DhClient;
+  private ide!: DhIDE;
   private ready = false;
 
-  get isReady(): boolean { return this.ready; }
+  getDhNs() { return this.dh; }
+  get isReady() { return this.ready; }
 
-  /** PSK-required connect using CoreClient. */
+  /** PSK login – same as before */
   async connect(): Promise<void> {
     if (this.ready) return;
-
     const serverUrl = environment.deephavenUrl;
     const psk = environment.deephavenPsk;
     if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
@@ -199,194 +85,336 @@ export class DeephavenService {
     this.ready = true;
   }
 
-  /** Get a handle to an existing globals() table. */
-  async getTableHandle(name: string): Promise<DhTable> {
+  async getTableHandle(varName: string): Promise<DhTable> {
     if (!this.ready) await this.connect();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-      throw new Error(`Invalid table variable name: "${name}"`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(varName)) {
+      throw new Error(`Invalid table variable name: "${varName}"`);
     }
-    return this.ide.getTable(name);
+    return this.ide.getTable(varName);
   }
 
-  /** Create a live adapter. Pass a resolver to auto-reacquire when DH closes a handle. */
-  createLiveAdapter() {
-    return new LiveTableAdapter(this.dh);
-  }
-}
+  // --------------------------- TableHub ---------------------------
 
-/**
- * LiveTableAdapter (self-healing)
- * - Opens a viewport and snapshots to array for AG Grid.
- * - If DH says "table closed", uses the provided resolver() to reacquire a fresh handle,
- *   reopens the viewport, and continues without crashing.
- */
-class LiveTableAdapter {
-  private dh: any;
-  private table?: any;
-  private viewport?: any;
-  private sub?: (e: any) => void;
-  private destroyed = false;
-  private rebinding = false;
-
-  constructor(dh: any) { this.dh = dh; }
+  private hub = new Map<string, HubEntry>();
 
   /**
-   * Bind to a table. Provide a resolver that returns a *fresh* handle when needed.
-   * Example resolver: () => deephavenService.getTableHandle('user_account')
+   * Subscribe to a DH globals() table by variable name.
+   * Ensures ONLY ONE viewport per table variable.
+   * Returns an unsubscribe() that decrements the ref and cleans up if last.
    */
-  async bind(
-    table: any,
-    onRows: (rows: any[]) => void,
-    columns?: string[],
-    resolver?: () => Promise<any>
-  ) {
-    await this.unbind(); // serialize
-    this.destroyed = false;
-    this.table = table;
+  async subscribe(
+    varName: string,
+    onRows: RowsListener,
+    opts?: { offset?: number; size?: number }
+  ): Promise<() => Promise<void>> {
+    await this.connect();
+    let entry = this.hub.get(varName);
+    if (!entry) {
+      entry = {
+        varName,
+        cols: [],
+        listeners: new Set<RowsListener>(),
+        refCount: 0,
+        generation: 0,
+        reconnecting: false,
+        destroyed: false,
+      };
+      this.hub.set(varName, entry);
+      // Lazy attach on first subscriber
+    }
 
-    const cols = columns ?? (table?.columns ?? []).map((c: any) => c.name);
+    entry.refCount++;
+    entry.listeners.add(onRows);
 
-    // open viewport first
-    this.viewport = await this.table.setViewport(0, 10000, cols);
+    if (!entry.table) {
+      await this.attach(entry, opts);
+    } else if (opts) {
+      await this.setWindow(entry, opts.offset ?? 0, opts.size ?? 300, onRows);
+    } else {
+      // push a snapshot to the new listener immediately
+      await this.pushSnapshot(entry, onRows).catch(() => {});
+    }
 
-    // initial snapshot
-    await this.snapshotTo(onRows, cols, resolver);
-
-    // updates
-    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
-    this.sub = async () => {
-      if (this.destroyed) return;
-      await this.snapshotTo(onRows, cols, resolver);
+    // Unsubscribe
+    return async () => {
+      if (!this.hub.has(varName)) return;
+      const e = this.hub.get(varName)!;
+      e.listeners.delete(onRows);
+      e.refCount = Math.max(0, e.refCount - 1);
+      if (e.refCount === 0) {
+        await this.detach(e);
+        this.hub.delete(varName);
+      }
     };
-    this.table.addEventListener(EVENT, this.sub);
   }
 
-  private async snapshotTo(
-    onRows: (rows: any[]) => void,
-    cols: string[],
-    resolver?: () => Promise<any>
-  ) {
-    try {
-      const snap = await this.table!.snapshot(cols);
-      const rows = snap.toObjects?.() ?? snap;
-      onRows(rows);
-    } catch (e: any) {
-      const msg = (e?.message ?? String(e)).toLowerCase();
-      const isClosed = msg.includes('closed');
-      if (!isClosed || !resolver || this.rebinding || this.destroyed) {
-        // ignore non-closed errors / no resolver / already rebinding / destroyed
-        return;
-      }
-      // self-heal: reacquire and rebind viewport + snapshot
-      this.rebinding = true;
+  // ---------- internals ----------
+
+  private isClosed(e: any): boolean {
+    const m = (e?.message ?? String(e)).toLowerCase();
+    return m.includes('closed') || m.includes('table already closed');
+  }
+
+  private toRows(entry: HubEntry, objects: any[]): any[] {
+    return objects.map(o => (Array.isArray(o) ? o : entry.cols.map(c => o?.[c])));
+  }
+
+  private eventNames() {
+    const ns = this.getDhNs();
+    return {
+      EVU: ns?.Table?.EVENT_UPDATED ?? 'update',
+      EVS: ns?.Table?.EVENT_SCHEMA_CHANGED ?? 'schema_changed',
+    };
+  }
+
+  private async attach(entry: HubEntry, opts?: { offset?: number; size?: number }) {
+    const { EVU, EVS } = this.eventNames();
+    const myGen = ++entry.generation;
+    const offset = opts?.offset ?? 0;
+    const size = opts?.size ?? 300;
+
+    // (Re)acquire table
+    entry.table = await this.getTableHandle(entry.varName);
+    entry.cols = (entry.table.columns ?? []).map((c: any) => c.name);
+
+    // Open viewport
+    entry.viewport = await entry.table.setViewport(offset, offset + size - 1, entry.cols);
+
+    // First snapshot & broadcast
+    await this.broadcastSnapshot(entry).catch(async (e) => {
+      if (this.isClosed(e)) await this.reattach(entry);
+    });
+
+    // Bind listeners (single instance per varName)
+    const onUpdate = async () => {
+      if (entry.destroyed || myGen !== entry.generation) return;
       try {
-        const fresh = await resolver();
-        if (this.destroyed) return;
-        // detach old listener
-        try {
-          if (this.sub && this.table) {
-            const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
-            this.table.removeEventListener?.(EVENT, this.sub);
-          }
-        } catch {}
-        // switch table
-        this.table = fresh;
-        // reopen viewport
-        try { await this.viewport?.close?.(); } catch {}
-        this.viewport = await this.table.setViewport(0, 10000, cols);
-
-        // reattach listener
-        const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
-        this.sub = async () => {
-          if (this.destroyed) return;
-          await this.snapshotTo(onRows, cols, resolver);
-        };
-        this.table.addEventListener(EVENT, this.sub);
-
-        // take snapshot now
-        const snap = await this.table.snapshot(cols);
-        const rows = snap.toObjects?.() ?? snap;
-        onRows(rows);
-      } finally {
-        this.rebinding = false;
+        await this.broadcastSnapshot(entry);
+      } catch (e) {
+        if (this.isClosed(e)) await this.reattach(entry);
       }
+    };
+    const onSchema = async () => {
+      if (entry.destroyed || myGen !== entry.generation) return;
+      try {
+        entry.cols = (entry.table!.columns ?? []).map((c: any) => c.name);
+        await entry.table!.setViewport(offset, offset + size - 1, entry.cols);
+        await this.broadcastSnapshot(entry);
+      } catch (e) {
+        if (this.isClosed(e)) await this.reattach(entry);
+      }
+    };
+
+    // Store so we can remove later
+    (entry as any)._onUpdate = onUpdate;
+    (entry as any)._onSchema = onSchema;
+
+    entry.table.addEventListener(EVU, onUpdate);
+    entry.table.addEventListener(EVS, onSchema);
+  }
+
+  private async detach(entry: HubEntry) {
+    entry.destroyed = true;
+    try {
+      const { EVU, EVS } = this.eventNames();
+      if (entry.table && (entry as any)._onUpdate) {
+        entry.table.removeEventListener?.(EVU, (entry as any)._onUpdate);
+      }
+      if (entry.table && (entry as any)._onSchema) {
+        entry.table.removeEventListener?.(EVS, (entry as any)._onSchema);
+      }
+    } catch {}
+    try { await entry.viewport?.close?.(); } catch {}
+    entry.viewport = undefined;
+    // Do NOT call table.close(); it's a server global.
+    entry.table = undefined;
+  }
+
+  private async reattach(entry: HubEntry) {
+    if (entry.reconnecting || entry.destroyed) return;
+    entry.reconnecting = true;
+    try {
+      await this.detach(entry);
+      await new Promise(r => setTimeout(r, 150)); // let DH finish swapping globals
+      await this.attach(entry);
+    } finally {
+      entry.reconnecting = false;
     }
   }
 
-  async unbind() {
-    this.destroyed = true;
-    try {
-      if (this.table && this.sub) {
-        const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
-        this.table.removeEventListener?.(EVENT, this.sub);
-      }
-    } catch {}
-    try { await this.viewport?.close?.(); } catch {}
-    this.sub = undefined;
-    this.viewport = undefined;
-    this.table = undefined;
+  private async pushSnapshot(entry: HubEntry, toOne?: RowsListener) {
+    if (!entry.table) return;
+    const snap = await entry.table.snapshot(entry.cols);
+    const objs = snap.toObjects?.() ?? snap;
+    const rows = this.toRows(entry, objs);
+    if (toOne) toOne(rows);
+  }
+
+  private async broadcastSnapshot(entry: HubEntry) {
+    if (!entry.table || entry.listeners.size === 0) return;
+    const snap = await entry.table.snapshot(entry.cols);
+    const objs = snap.toObjects?.() ?? snap;
+    const rows = this.toRows(entry, objs);
+    entry.listeners.forEach(l => l(rows));
+  }
+
+  private async setWindow(entry: HubEntry, offset: number, size: number, toOne?: RowsListener) {
+    if (!entry.table) return;
+    await entry.table.setViewport(offset, offset + size - 1, entry.cols);
+    if (toOne) await this.pushSnapshot(entry, toOne);
   }
 }
 ```
 
-# 2) Component: pass a resolver so the adapter can reacquire
+**Why this stops the error flood**
 
-Update how you bind each grid — pass a lambda that fetches a **fresh** handle by name. You don’t need any close/release logic at all.
-
-```ts
-// join-tables.component.ts (relevant bits)
-async ngOnInit() {
-  await this.dh.connect();
-
-  this.userHandle    = await this.dh.getTableHandle('user');
-  this.accountHandle = await this.dh.getTableHandle('account');
-  this.joinedHandle  = await this.dh.getTableHandle('user_account');
-
-  this.userCols    = this.makeCols(this.userHandle);
-  this.accountCols = this.makeCols(this.accountHandle);
-  this.joinedCols  = this.makeCols(this.joinedHandle);
-
-  this.userAdapter    = this.dh.createLiveAdapter();
-  this.accountAdapter = this.dh.createLiveAdapter();
-  this.joinedAdapter  = this.dh.createLiveAdapter();
-
-  await this.userAdapter.bind(
-    this.userHandle,
-    rows => { this.userRows = rows; },
-    undefined,
-    () => this.dh.getTableHandle('user')               // <-- resolver
-  );
-  await this.accountAdapter.bind(
-    this.accountHandle,
-    rows => { this.accountRows = rows; },
-    undefined,
-    () => this.dh.getTableHandle('account')            // <-- resolver
-  );
-  await this.joinedAdapter.bind(
-    this.joinedHandle,
-    rows => { this.joinedRows = rows; },
-    undefined,
-    () => this.dh.getTableHandle('user_account')       // <-- resolver
-  );
-}
-
-async ngOnDestroy() {
-  await this.userAdapter?.unbind();
-  await this.accountAdapter?.unbind();
-  await this.joinedAdapter?.unbind();
-  // no close/release calls; these are long-lived server tables
-}
-```
-
-# 3) Deephaven (server) reminders
-
-- Define `user`, `account`, `user_account` once and keep them alive.
+- Each table variable (`'user'`, `'account'`, `'user_account'`) has **one** viewport and **one** set of listeners in the hub, regardless of how many components subscribe.
     
-- If you re-run the Python cell, the adapter will now auto-rebind using the resolver, so the UI won’t crash.
+- On DH cell re-run, stale handles throw “closed” once → hub **reattaches once** and resumes.
     
-- For your append-only requirement, `aj` with `on=["userId","ts"]` is correct, where `ts` exists on both sides.
+- Late events from old generations are ignored.
     
 
 ---
 
-This version fixes the exception you’re seeing because, when the **safeSnapshot** hits a closed handle, it **reacquires a new handle by name** and **reopens the viewport** automatically. No more “already closed” loops, and no more dead grids.
+## 2) Live component (simple consumer of the hub)
+
+`src/app/live-table/live-table.component.ts`
+
+```ts
+import { Component, Input, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { DeephavenService } from '../deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <section class="card">
+      <header class="bar">
+        <h3><span class="mono">{{ varName }}</span></h3>
+        <div *ngIf="error" class="error">{{ error }}</div>
+      </header>
+
+      <div class="grid" *ngIf="!error">
+        <div class="thead" *ngIf="cols.length">
+          <div class="th" *ngFor="let c of cols; trackBy: trackCol">{{ c }}</div>
+        </div>
+        <div class="tbody">
+          <div class="tr" *ngFor="let r of rows; trackBy: trackRow">
+            <div class="td" *ngFor="let v of r; trackBy: trackCell">{{ v }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  `,
+  styles: [`
+    :host{display:block}.card{border:1px solid #2a2a2a;border-radius:.75rem;background:#0f0f0f;color:#fff}
+    .bar{display:flex;justify-content:space-between;align-items:center;padding:.75rem 1rem;border-bottom:1px solid #242424}
+    .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace}
+    .grid{display:grid;grid-template-rows:auto 1fr;gap:.5rem}
+    .thead,.tr{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(140px,1fr)}
+    .th{position:sticky;top:0;background:#111;font-weight:600;padding:.5rem;z-index:1}
+    .tbody{max-height:40dvh;overflow:auto}
+    .td{padding:.25rem .5rem;border-top:1px solid #242424;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .error{color:#ff6b6b}
+  `]
+})
+export class LiveTableComponent implements OnInit, OnDestroy {
+  /** DH globals() variable name */
+  @Input({ required: true }) varName!: string;
+  @Input() pageSize = 300;
+
+  cols: string[] = [];
+  rows: any[] = [];
+  error: string | null = null;
+
+  private unsub?: () => Promise<void>;
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  async ngOnInit() {
+    try {
+      await this.dh.connect();
+      // Pull columns once (optional)
+      const t = await this.dh.getTableHandle(this.varName);
+      this.cols = (t.columns ?? []).map((c: any) => c.name);
+
+      // Subscribe via the hub (single viewport per table)
+      this.unsub = await this.dh.subscribe(this.varName, rows => {
+        this.rows = rows; this.cdr.markForCheck();
+      }, { offset: 0, size: this.pageSize });
+    } catch (e: any) {
+      this.error = e?.message ?? String(e);
+      this.cdr.markForCheck();
+    }
+  }
+
+  async ngOnDestroy() { try { await this.unsub?.(); } catch {} }
+
+  trackCol = (_: number, c: string) => c;
+  trackRow = (_: number, r: any[]) => r?.[0] ?? _;
+  trackCell = (_: number, _v: any) => _;
+}
+```
+
+Use it three times in your page:
+
+```html
+<app-live-table varName="user"></app-live-table>
+<app-live-table varName="account"></app-live-table>
+<app-live-table varName="user_account"></app-live-table>
+```
+
+No ag-grid needed for this test; once stable, you can feed `rows`/`cols` into ag-grid as before – the hub makes the data flow identical (just remove any direct `snapshot()` calls from components).
+
+---
+
+## 3) Deephaven Python cell (top-level, unconditional)
+
+Keep using the **single top-level** cell you now have (no helper functions, no `if in globals()` guards), e.g.:
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# Clean old names
+for _n in ("user_account","users_hist","user","account","user_raw","account_raw"):
+    try: globals().pop(_n, None) and _.close()
+    except: pass
+
+# Configs...
+# USER_VALUE_SPEC = kc.json_spec({...})
+# ACCOUNT_VALUE_SPEC = kc.json_spec({...})
+
+user_raw = kc.consume(KAFKA_CONFIG, TOPIC_USERS,  key_spec=kc.KeyValueSpec.IGNORE,
+                      value_spec=USER_VALUE_SPEC,  table_type=kc.TableType.append)
+account_raw = kc.consume(KAFKA_CONFIG, TOPIC_ACCTS, key_spec=kc.KeyValueSpec.IGNORE,
+                         value_spec=ACCOUNT_VALUE_SPEC, table_type=kc.TableType.append)
+
+user    = user_raw.rename_columns(["ts = KafkaTimestamp"])
+account = account_raw.rename_columns(["ts = KafkaTimestamp"])
+users_hist   = user.sort_descending("ts")
+user_account = account.aj(users_hist, on=["userId","ts"], joins=["name","email","age"])
+```
+
+Re-running this cell will briefly swap the globals; the **hub** will see a single “closed” and reattach once. No flood.
+
+---
+
+## Why you were seeing “multiple attach … dh-core.js … ClassCastException”
+
+- Each call to your old `bind()` opened **another** viewport and listeners.
+    
+- With Angular dev server/HMR, components can mount twice; with retries, you ended up with many viewports on the same table.
+    
+- When the Python cell re-ran, all those old viewers attempted to snapshot → multiple errors per tick.
+    
+- The hub removes that multiplicity; one viewport, one set of listeners, fan-out to any number of subscribers.
+    
+
+---
+
+If anything still throws, check that **every** consumer component calls the returned `unsubscribe()` in `ngOnDestroy` (the example does). That, plus the hub, eliminates the attach storm and the “table already closed” spam.
