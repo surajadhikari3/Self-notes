@@ -1752,3 +1752,231 @@ Then your existing loader that hits `http://localhost:10000/jsapi/dh-core.js` wi
     
 
 Pick one route and you’ll be streaming again. If you want, paste your current `DeephavenService.ensureConnected()` and I’ll drop in the exact lines for your chosen option.
+
+---------------------------------
+
+update-here
+
+You’ve got two different issues mixed together:
+
+1. your Angular app is still fetching `dh-core.js` cross-origin (or the proxy isn’t actually active), so the browser is blocking it, and
+    
+2. your Deephaven is currently running with `DEEPHAVEN_AUTH_TYPE=anonymous` (your screenshot shows that), while your Angular code is trying PSK login.
+    
+
+Here’s a clean, working setup that avoids CORS entirely and fixes auth. Copy these steps exactly.
+
+---
+
+## Step 1 — Start Deephaven with PSK and allow your Angular origin (if you ever call it directly)
+
+Pick the way you start DH and set these env vars (no trailing slashes in the origin):
+
+### Windows PowerShell
+
+```powershell
+$env:DEEPHAVEN_AUTH_TYPE = "psk"
+$env:DEEPHAVEN_PSKS = "dev=your-psk-here"
+$env:DEEPHAVEN_SERVER_ALLOWED_ORIGINS = "http://localhost:4200,http://127.0.0.1:4200"
+.\start-deephaven.ps1
+```
+
+### Docker (if you use it)
+
+```bash
+docker run --rm -p 10000:10000 ^
+  -e DEEPHAVEN_AUTH_TYPE=psk ^
+  -e DEEPHAVEN_PSKS="dev=your-psk-here" ^
+  -e DEEPHAVEN_SERVER_ALLOWED_ORIGINS="http://localhost:4200,http://127.0.0.1:4200" ^
+  ghcr.io/deephaven/server:latest
+```
+
+> Your earlier terminal showed `DEEPHAVEN_AUTH_TYPE=anonymous`. Fix that first.
+
+---
+
+## Step 2 — Use an Angular **proxy** so everything is same-origin during dev
+
+Create `proxy.conf.json` at the project root (same folder as `angular.json`):
+
+```json
+{
+  "/jsapi":  { "target": "http://localhost:10000", "secure": false, "changeOrigin": true, "logLevel": "debug" },
+  "/socket": { "target": "http://localhost:10000", "ws": true, "secure": false, "changeOrigin": true, "logLevel": "debug" },
+  "/api":    { "target": "http://localhost:10000", "secure": false, "changeOrigin": true, "logLevel": "debug" }
+}
+```
+
+Run your app **with** the proxy:
+
+```bash
+ng serve --proxy-config proxy.conf.json
+```
+
+(Or add `"proxyConfig": "proxy.conf.json"` under the `serve.options` of your project in `angular.json` and just `ng serve`.)
+
+**Verify the proxy is active:**
+
+- In DevTools → Network, request `/jsapi/dh-core.js`. It should show **200** (or 304) and **Initiator** is your page, **Remote Address** is `localhost:10000`.
+    
+- If you still see a request going straight to `http://localhost:10000/jsapi/dh-core.js` from the browser (not via the dev server), the proxy isn’t being used. Re-check the `ng serve` flag/setting.
+    
+
+---
+
+## Step 3 — Load `dh-core.js` from the **same origin** and connect with PSK
+
+Update your service to load `/jsapi/dh-core.js` (no host), and connect to the same origin (`window.location.origin`). This keeps both HTTP and WebSocket traffic behind the proxy.
+
+`src/app/services/deephaven.service.ts` (minimal, working version)
+
+```ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { BehaviorSubject, Observable } from 'rxjs';
+
+type DhNS = any;
+type DhTable = any;
+type DhViewportSub = any;
+
+export interface LiveTableState {
+  cols: string[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+
+function loadDhSameOrigin(): Promise<DhNS> {
+  return new Promise((resolve, reject) => {
+    const w = window as any;
+    if (w.dh) return resolve(w.dh);
+
+    const script = document.createElement('script');
+    script.src = '/jsapi/dh-core.js';       // <-- same-origin path, via proxy
+    script.async = true;
+    script.crossOrigin = 'anonymous';       // ok for proxied script
+    script.onload = () => w.dh ? resolve(w.dh) : reject(new Error('window.dh missing after load'));
+    script.onerror = () => reject(new Error('Failed to load /jsapi/dh-core.js (is proxy on?)'));
+    document.head.appendChild(script);
+  });
+}
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService implements OnDestroy {
+  private dh!: DhNS;
+  private client: any;
+  private ide: any;
+  private connected = false;
+
+  private tables = new Map<string, DhTable>();
+  private viewSubs = new Map<string, DhViewportSub>();
+  private streams = new Map<string, BehaviorSubject<LiveTableState>>();
+
+  async ensureConnected(psk: string): Promise<void> {
+    if (this.connected) return;
+
+    // 1) load JS API from same origin (dev server proxies it)
+    this.dh = await loadDhSameOrigin();
+
+    // 2) client base = same origin → all HTTP+WS go through proxy to :10000
+    const BASE = window.location.origin;
+
+    this.client = new this.dh.CoreClient(BASE);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,                                 // pass your PSK here
+    });
+
+    const ideConn = await this.client.getAsIdeConnection();
+    this.ide = await ideConn.startSession('python');
+
+    this.connected = true;
+  }
+
+  async streamTable(tableName: string, top = 0, bottom = 9999): Promise<Observable<LiveTableState>> {
+    await this.ensureConnected('your-psk-here'); // <-- set from env service if you wish
+
+    if (this.streams.has(tableName)) {
+      return this.streams.get(tableName)!.asObservable();
+    }
+
+    const subject = new BehaviorSubject<LiveTableState>({ cols: [], rows: [], ready: false });
+    this.streams.set(tableName, subject);
+
+    try {
+      const table: DhTable = await this.ide.getTable(tableName);
+      this.tables.set(tableName, table);
+
+      table.setViewport(top, bottom);
+      const sub: DhViewportSub = table.subscribe();
+
+      const onUpdated = async () => {
+        try {
+          const v = await sub.getViewportData();
+          const cols = table.columns.map((c: any) => c.name);
+          const rows = v.rows.map((r: any) => {
+            const o: any = {};
+            for (const c of cols) o[c] = r.get(c);
+            return o;
+          });
+          subject.next({ cols, rows, ready: true });
+        } catch (e: any) {
+          subject.next({ cols: [], rows: [], ready: false, error: String(e?.message ?? e) });
+        }
+      };
+
+      await onUpdated();
+      sub.addEventListener('updated', onUpdated);
+      this.viewSubs.set(tableName, sub);
+    } catch (e: any) {
+      subject.next({ cols: [], rows: [], ready: false, error: String(e?.message ?? e) });
+    }
+
+    return subject.asObservable();
+  }
+
+  ngOnDestroy(): void {
+    for (const [, sub] of this.viewSubs) { try { sub.close?.(); } catch {} }
+    this.viewSubs.clear();
+    this.tables.clear();
+  }
+}
+```
+
+> Key points:
+> 
+> - We load `/jsapi/dh-core.js` **without** `http://localhost:10000` → the Angular dev server proxies it → **no CORS**.
+>     
+> - We construct `CoreClient(window.location.origin)` so all subsequent calls + WebSocket go through `/api` & `/socket` via the proxy.
+>     
+> - We authenticate with PSK (make sure DH is not in anonymous mode).
+>     
+
+---
+
+## Step 4 — Common pitfalls to double-check
+
+- You **really** ran `ng serve --proxy-config proxy.conf.json` (or set it in `angular.json`). If you don’t, the browser will hit port `10000` directly and you’ll see CORS/COEP errors again.
+    
+- Your **DH env** is PSK now (show it):  
+    `echo $env:DEEPHAVEN_AUTH_TYPE` → `psk`  
+    `echo $env:DEEPHAVEN_PSKS` → includes your key  
+    Restart the server after changing vars.
+    
+- Your **tables exist** in the same session you’re connecting to (publish them in an Application script or fetch by the correct names).
+    
+
+---
+
+## If you prefer direct (no proxy)
+
+Keep your previous loader pointing to `http://localhost:10000/jsapi/dh-core.js`, and ensure DH responds with:
+
+```
+Access-Control-Allow-Origin: http://localhost:4200
+```
+
+If it doesn’t, re-check `DEEPHAVEN_SERVER_ALLOWED_ORIGINS` and restart DH.
+
+---
+
+Follow the steps exactly and the empty grids should fill, and updates will stream with no page refresh. If you still see a blank grid after this, open Network → check `/jsapi/dh-core.js` is 200 via the dev server, and paste any error text from the **first** failing request (status code + response headers) and I’ll pinpoint it.
