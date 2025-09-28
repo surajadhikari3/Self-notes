@@ -3094,3 +3094,105 @@ print(probe.head(3).to_string())
     
 
 Try the snippet exactly as-is in a **fresh** DH script tab (new session). Then point your Angular “live table” at the exported `user`, `account`, or `user_account`. This removes the “invalid column” and the subsequent class-cast/closed noise.
+
+
+-----------------------
+
+You’re right: in your Deephaven build there isn’t a `kc.ValueSpec.STRING`. Use a **simple spec** to read the Kafka value as a single string column, then parse the JSON yourself. That completely avoids the “invalid column `userId`” error because we create those columns explicitly after parsing.
+
+Below is a self-contained script you can paste into a fresh DH Python tab. It works whether your producers send only a JSON string in the value, or you just want to force that path.
+
+```python
+# --- imports
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# --- your Kafka config & topics (keep your existing values)
+KAFKA_CONFIG = {  # << fill in as you already have >>
+    # "bootstrap.servers": "...",
+    # "...": "..."
+}
+TOPIC_USERS  = "..."     # e.g. "cccd01_sb_its_esp_tap3597_bishowcaseraw"
+TOPIC_ACCTS  = "..."     # e.g. "cccd01_sb_its_esp_tap3597_bishowcasesecurated"
+
+# ---------- helpers
+
+def list_cols(t):  # quick debugger
+    return [c.name for c in t.columns]
+
+def parse_json_value_to_cols(t, json_col, fields):
+    """
+    t: table with a string column (json_col) containing JSON text.
+    fields: list of JSON field names to extract; values are extracted as text.
+    """
+    j = t.update_view([f"_node = io.deephaven.json.jackson.JsonTools.parseJson({json_col})"])
+    exprs = [f"`{f}` = ((_node.get('{f}') == null) ? null : _node.get('{f}').asText())"
+            for f in fields]
+    return j.update_view(exprs).drop_columns("_node")
+
+# ---------- consume the value as ONE string column named 'Value'
+
+STRING_VALUE = kc.simple_spec([("Value", dt.string)])
+
+user_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=STRING_VALUE,
+    table_type=kc.TableType.append,
+)
+
+account_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=STRING_VALUE,
+    table_type=kc.TableType.append,
+)
+
+print("USER_RAW COLUMNS   :", list_cols(user_raw))
+print("ACCOUNT_RAW COLUMNS:", list_cols(account_raw))
+
+# ---------- parse JSON -> real columns
+
+user = parse_json_value_to_cols(
+    user_raw, "Value", ["userId", "name", "email"]
+).drop_columns("Value").coalesce()
+
+# If your JSON has different casing (e.g., "UserId"), change the field list above.
+# If balance is numeric in JSON, keep it as text or convert later as needed.
+
+account = parse_json_value_to_cols(
+    account_raw, "Value", ["userId", "accountType", "balance"]
+).drop_columns("Value").coalesce()
+
+print("USER COLUMNS   :", list_cols(user))
+print("ACCOUNT COLUMNS:", list_cols(account))
+
+# ---------- optional: account-driven append result enriched with user at that time
+
+# If you have a Kafka record time column, prefer it here.
+# Otherwise, skip the sort; append tables will still stream.
+# users_hist = user.sort_descending("KafkaTimestamp")
+# user_account = account.aj(users_hist, on=["userId"], joins=["name", "email"]).coalesce()
+
+# Export the tables you want Angular to show
+user, account = user, account
+# user_account = user_account
+```
+
+**Why this fixes it**
+
+- Before, your `update_view("userId=...")` failed because `userId` didn’t exist yet. Here we **always** read the Kafka value as a string column (`Value`) using `kc.simple_spec`, then create the `userId/name/email/...` columns ourselves with `JsonTools.parseJson`. So there’s no chance of “invalid column”.
+    
+- No reliance on `ValueSpec.STRING` (which your version doesn’t expose).
+    
+- This pattern also avoids the later cascade of `ClassCastException` and “table already closed” caused by the first failure during your Angular viewport binding.
+    
+
+If you still see “invalid column”, run:
+
+```python
+print("RAW USER SAMPLE:")
+print(user_raw.head(3).to_string())
+```
+
+to confirm the payload really is JSON text in `Value`. If your producer sends Avro/Protobuf instead of JSON, switch the spec to the appropriate `kc.avro_spec(...)` / `kc.protostream_spec(...)` and skip manual parsing.
