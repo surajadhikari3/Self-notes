@@ -2851,3 +2851,110 @@ If anything still trips after this:
     
 - Tell me the Deephaven server version and your `@deephaven/jsapi-bootstrap` version.  
     I’ll zero in on the remaining mismatch (sometimes older servers name Kafka columns slightly differently).
+
+-------------
+pity
+
+You’re right—on the Deephaven build you’re running, `kc.json_spec(...)` **does not** take a `mapping=` parameter. That arg exists only in newer nightlies. Use the older signature and let Deephaven read the Kafka **value bytes** as JSON (StringSerializer also produces bytes, so it still works).
+
+Here’s the minimal, **working** pattern you should use:
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# 1) Define JSON specs (no mapping= in this version)
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name":   dt.string,
+    "email":  dt.string,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId":      dt.string,
+    "accountType": dt.string,
+    "balance":     dt.double,   # if balance is text, just make it dt.string
+})
+
+# 2) Create append (ticking) tables from Kafka
+user = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=USER_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+account = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=ACCOUNT_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+# sanity check – you should see the value columns now
+print([c.name for c in user.columns])
+print([c.name for c in account.columns])
+```
+
+If you still only see `KafkaPartition / KafkaOffset / KafkaTimestamp`, the payload is not being parsed as JSON. Do this quick probe to confirm what’s coming over the wire:
+
+```python
+probe = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=kc.ValueSpec.STRING,   # expose raw value as a string column named 'Value'
+    table_type=kc.TableType.append,
+)
+print(probe.head(3).to_string())      # inspect 'Value'
+```
+
+Interpret the probe:
+
+- Looks like normal JSON (e.g., `{"userId":"...","name":"..."}`) → your existing `kc.json_spec(...)` will work; double-check you restarted the **session** after changing specs.
+    
+- Looks like binary or base64-ish / not JSON → your messages aren’t JSON (Avro/Proto/etc.). You must use the **matching** value spec (e.g., `kc.avro_spec(...)`) or change the producer to send JSON.
+    
+- Looks like JSON but wrapped/escaped (e.g., the string contains quotes and backslashes) → your producer double-encoded; fix the producer or temporarily treat it as string in DH and parse upstream.
+    
+
+### Why the “invalid column ‘userId’” & class cast/closed errors happened
+
+- The value columns (`userId`, etc.) never existed because the consumer didn’t parse JSON → any `update_view("userId=...")` blew up with “invalid column”.
+    
+- The Angular app kept opening/tearing down viewports on an invalid table → you then saw “table already closed” after the first failure.
+    
+
+### After value columns exist
+
+You can safely do your string-safe view / join:
+
+```python
+def to_wire_strings(t, keep=None):
+    have = [c.name for c in t.columns]
+    keep = [c for c in (keep or have) if c in have]
+    exprs = [f'`{c}` = (((Object){c}) == null ? null : "" + {c})' for c in keep]
+    return t.update_view(exprs).view(*keep).coalesce()
+
+user    = to_wire_strings(user,    ["userId","name","email"])
+account = to_wire_strings(account, ["userId","accountType","balance"])
+
+# If you want account-driven append with user enrichment:
+users_hist   = user.sort_descending("KafkaTimestamp")  # or your event time column
+user_account = account.aj(users_hist, on=["userId"], joins=["name","email"])
+user_account = to_wire_strings(user_account)
+
+# Expose for Angular
+user, account, user_account = user, account, user_account
+```
+
+### Important operational notes
+
+- **Restart the DH session** (or run in a fresh notebook tab) whenever you change `consume(...)` specs. Old handles can linger and cause the “already closed” cascade.
+    
+- If your producer uses Confluent’s StringSerializer, you don’t need any special `mapping=` or deserializer in DH; `kc.json_spec(...)` will parse the bytes as JSON in this version.
+    
+
+Get the `probe` result first; once `user.columns` actually shows `userId/name/email`, your Angular bind will stop throwing and live updates will flow.
