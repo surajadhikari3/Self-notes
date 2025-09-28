@@ -922,3 +922,73 @@ import loadDhCore from '@deephaven/jsapi-bootstrap';
 and ensure `allowSyntheticDefaultImports` (and ideally `esModuleInterop`) are enabled in `tsconfig.json`.
 
 Need me to flip this to `deltaRowDataMode` with a stable row ID for very large/fast tables? Tell me your key field and I’ll drop in the changes.
+
+
+------------------------------
+
+
+Good catch—that TS error happens because `@deephaven/jsapi-bootstrap`’s typing sometimes doesn’t expose a `default` field even though the runtime export is effectively “default”. Easiest fix: use a **runtime-safe dynamic import with a fallback** (and cast to `any`) so it works whether the module exposes `default` or not.
+
+Replace just the `ensureConnected()` import bit in your `DeephavenService` with this:
+
+```ts
+// Deephaven service: fix the bootstrap import to be runtime-safe
+async ensureConnected(): Promise<void> {
+  if (this.connected) return;
+
+  // ✅ Robust dynamic import: works whether the package exposes .default or not
+  const mod: any = await import('@deephaven/jsapi-bootstrap');
+  const loadDhCore = (mod?.default ?? mod) as (opts: { baseUrl: string }) => Promise<any>;
+
+  // 1) Load dh-core.js from your server
+  this.dh = await loadDhCore({ baseUrl: `${environment.DEEPHAVEN_URL}/jsapi` });
+
+  // 2) Create client & PSK login
+  this.client = new this.dh.CoreClient(environment.DEEPHAVEN_URL);
+  await this.client.login({
+    type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+    token: environment.DEEPHAVEN_PSK,
+  });
+
+  // 3) Start an IDE session to fetch tables by name
+  const asIde = await this.client.getAsIdeConnection();
+  this.ide = await asIde.startSession('python');
+
+  this.connected = true;
+}
+```
+
+That’s the only change you need to clear the “Property 'default' does not exist…” error.
+
+### (Optional but nice) TS config
+
+If you prefer a static default import later, add these to `tsconfig.json` and you can write `import loadDhCore from '@deephaven/jsapi-bootstrap';`:
+
+```json
+{
+  "compilerOptions": {
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  }
+}
+```
+
+### (Optional) Local typing shim
+
+If your editor still nags, you can also add a tiny shim so TypeScript knows there’s a default export:
+
+`src/types/jsapi-bootstrap.d.ts`
+
+```ts
+declare module '@deephaven/jsapi-bootstrap' {
+  const loadDhCore: (opts: { baseUrl: string }) => Promise<any>;
+  export default loadDhCore;
+}
+```
+
+(Then ensure `"typeRoots"` includes `"src/types"` or just rely on TS’s default include.)
+
+---
+
+If anything else pops up (e.g., bundler vs node module resolution), tell me your exact `tsconfig.json` and I’ll tune it.
