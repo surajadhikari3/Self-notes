@@ -480,3 +480,142 @@ And keep your AG Grid v34 bindings:
     
 
 Do the two changes above and the stream will stay stable on the same viewport/port with continuous updates.
+
+-----------------------------
+
+You’ve got it: the crashes are from the **server variables getting rebound** (closed + replaced) while your Angular viewport is still attached. Fix it in two places:
+
+---
+
+# 1) Guard the Deephaven pipeline (define _once_, never rebind)
+
+Put your Kafka→tables→join in one cell (or one .py file) and wrap it with a guard so re-running the cell won’t replace the globals. Also assign the `.table` from the consumer, and add `ts` at creation time so you never reassign later.
+
+```python
+# ---- run once; safe to re-run without rebinding ----
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+if 'PIPELINE_READY' not in globals():
+    # ---- Kafka config ----
+    KAFKA_CONFIG = {
+        # ... your config ...
+    }
+    TOPIC1 = "user-topic"      # user stream
+    TOPIC2 = "account-topic"   # account stream
+
+    USER_VALUE_SPEC = kc.json_spec({
+        "userId": dt.string,
+        "name":   dt.string,
+        "email":  dt.string,
+        "age":    dt.int_
+    })
+    ACCOUNT_VALUE_SPEC = kc.json_spec({
+        "userId":      dt.string,
+        "accountType": dt.string,
+        "balance":     dt.double
+    })
+
+    # ---- Consume append tables (one-time) ----
+    user_stream = kc.consume(
+        KAFKA_CONFIG, TOPIC1,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append,
+    )
+
+    account_stream = kc.consume(
+        KAFKA_CONFIG, TOPIC2,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append,
+    )
+
+    # IMPORTANT: assign once and include ts here (so we never reassign later)
+    user    = user_stream.table.update   (["ts = now()"])
+    account = account_stream.table.update(["ts = now()"])
+
+    # As-of join driven by account; last key is the as-of timestamp
+    users_hist    = user.sort_descending("ts")  # provide history view
+    user_account  = account.aj(users_hist, on=["userId", "ts"],
+                               joins=["name", "email", "age"])
+
+    # mark pipeline as initialized
+    PIPELINE_READY = True
+
+# From here on, DO NOT reassign:
+#   user = user.update(...)
+#   account = account.update(...)
+#   user_account = ...
+# Doing so closes the old tables and breaks any existing clients.
+```
+
+**Tips**
+
+- If you need to change the pipeline, **restart the Python session** (kernel) instead of reassigning the same global names, or use _new_ variable names (e.g., `user_v2`) and point your client to them.
+    
+- To verify it’s ticking without Angular:
+    
+    ```python
+    print(user.size())         # should rise over time
+    print(account.size())
+    print(user_account.size())
+    ```
+    
+
+---
+
+# 2) Angular: you’re pulling by table **variable names** (correct)
+
+Yes—you’re doing it right. You fetch by the **exact global names** you created above:
+
+```ts
+await this.dh.connect();
+
+this.userHandle    = await this.dh.getTableHandle('user');
+this.accountHandle = await this.dh.getTableHandle('account');
+this.joinedHandle  = await this.dh.getTableHandle('user_account');
+
+// bind once; let the adapter keep a single viewport open
+this.userAdapter    = this.dh.createLiveAdapter();
+this.accountAdapter = this.dh.createLiveAdapter();
+this.joinedAdapter  = this.dh.createLiveAdapter();
+
+await this.userAdapter.bind(this.userHandle,    rows => this.userRows   = rows);
+await this.accountAdapter.bind(this.accountHandle, rows => this.accountRows = rows);
+await this.joinedAdapter.bind(this.joinedHandle,  rows => this.joinedRows  = rows);
+
+// do NOT call close() on these handles in Angular.
+// optional onDestroy: await adapter.unbind(); (no table close)
+```
+
+**AG Grid v34 reminders**
+
+- Bind rows in the template: `[rowData]="userRows"` (no `setRowData`).
+    
+- Search via `api.setGridOption('quickFilterText', text)` (since `setQuickFilter` was removed).
+    
+- Register modules once in `main.ts`:
+    
+    ```ts
+    import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
+    ModuleRegistry.registerModules([AllCommunityModule]);
+    ```
+    
+
+---
+
+## Quick checklist to stay stable
+
+-  Deephaven globals created **once** behind a guard (`PIPELINE_READY`), **no reassignment**.
+    
+-  `user`, `account`, `user_account` exist and tick; `ts` added at creation time.
+    
+-  Angular fetches by those **same names** (no creating joins in Angular).
+    
+-  Angular opens **one viewport per table** and never closes the DH tables.
+    
+-  In dev, avoid re-running server cells that would rebind those variables. If you must change them, restart the DH session.
+    
+
+Do those, and you’ll have one viewport per grid that streams updates continuously—no open/close churn, no “table already closed”, and no class cast exceptions.
