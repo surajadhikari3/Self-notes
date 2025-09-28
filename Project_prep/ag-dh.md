@@ -751,3 +751,159 @@ globals().pop("PIPELINE_READY", None)
     
 
 This idempotent DH script + the self-healing adapter stops the “table already closed / ClassCastException” loop and gets your rows flowing again.
+
+
+
+
+
+-----------------
+
+
+You’re hitting this because one of the arguments you pass to `kc.consume(...)` is a **Python function (or wrong type)**, and Deephaven’s Kafka bridge expects a Java-backed object with an internal `._object`. When it can’t find that, you get:
+
+```
+AttributeError: 'function' object has no attribute '_object'
+```
+
+In practice, this happens if any of these are wrong:
+
+- `kc` got shadowed (e.g., you defined a function or variable named `kc`).
+    
+- `USER_VALUE_SPEC` / `ACCOUNT_VALUE_SPEC` isn’t a **json spec object** (e.g., you forgot to call `kc.json_spec(...)`).
+    
+- `KAFKA_CONFIG` isn’t the **expected properties map** (e.g., you accidentally turned it into a function/tuple).
+    
+- You re-ran a cell and redefined things in a partial state.
+    
+
+Below is a **minimal, safe, idempotent** Deephaven script you can paste as-is. It avoids functions, guards against re-run, and uses only the supported types for `kc.consume`. It also uses `KafkaTimestamp` directly (falls back to `now()` if not present).
+
+### ✅ Clean Deephaven script (run once; safe to re-run)
+
+```python
+# Deephaven Kafka consumers → append tables → as-of join (account-driven)
+
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# -------------------- CONFIG --------------------
+TOPIC1 = "ccd01_sb_its_esp_tap3507_bishowcaseraw"        # user
+TOPIC2 = "ccd01_sb_its_esp_tap3507_bishowcasescurated"   # account
+
+# IMPORTANT: dict of strings; DO NOT put callables in here.
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "auto.offset.reset": "earliest",   # or "latest"
+    # your oauth settings (strings only):
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.oauthbearer.token.endpoint.url":
+        "https://fdsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.jaas.config":
+        "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required "
+        "oauth.jwks.endpoint.uri=\"https://.../jwks\" "
+        "oauth.token.endpoint.uri=\"https://.../token\" "
+        "oauth.client.id=\"TestScopeClient\" "
+        "oauth.client.secret=\"2Federate\" "
+        "oauth.scope=\"\" ;",
+    # remove any trailing '\' continuations you copied from Java props; above is a single python string
+}
+
+# JSON value specs – MUST be kc.json_spec(...), not a dict or function
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name":   dt.string,
+    "email":  dt.string,
+    "age":    dt.int64,
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId":      dt.string,
+    "accountType": dt.string,
+    "balance":     dt.double,
+})
+
+# -------------------- SAFE (re)RUN GUARDS --------------------
+# only build the consumers once per session
+if "user_raw" not in globals():
+    user_raw = kc.consume(
+        KAFKA_CONFIG,                # dict of strings
+        TOPIC1,                      # string topic
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,  # kc.json_spec(...)
+        table_type=kc.TableType.append,
+    )
+if "account_raw" not in globals():
+    account_raw = kc.consume(
+        KAFKA_CONFIG,
+        TOPIC2,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append,
+    )
+
+# -------------------- TIMESTAMP NORMALIZATION --------------------
+# Create a 'ts' Instant column on both sides. Prefer KafkaTimestamp if available.
+def _with_ts(t):
+    cols = [c.name for c in t.columns]
+    if "KafkaTimestamp" in cols:
+        return t.rename_columns(["ts = KafkaTimestamp"])
+    else:
+        from deephaven.time import now
+        return t.update(["ts = now()"])
+
+user    = _with_ts(user_raw)
+account = _with_ts(account_raw)
+
+# -------------------- JOIN (ACCOUNT-DRIVEN A/J) --------------------
+# As-of join: result only when account rows arrive; user fields frozen "as of" ts.
+# Last item in 'on' is the as-of key.
+users_hist = user.sort_descending("ts")
+user_account = account.aj(users_hist, on=["userId", "ts"], joins=["name", "email", "age"])
+
+PIPELINE_READY = True  # convenience flag
+```
+
+### Quick sanity checks (run right below the cell)
+
+```python
+print("user cols:", [c.name for c in user.columns])
+print("account cols:", [c.name for c in account.columns])
+print("joined cols:", [c.name for c in user_account.columns])
+print("sizes:", user.size(), account.size(), user_account.size())
+```
+
+If any of those `print`s throw, the table variables aren’t defined as expected.
+
+---
+
+## What likely went wrong in your version
+
+- A helper **function** or name accidentally **shadowed** one of the Kafka objects (e.g., `KAFKA_CONFIG` became a function, or `USER_VALUE_SPEC` wasn’t created with `kc.json_spec`).
+    
+- Multiline Java-style property strings with `\` got pasted directly—Python treated those as **line continuations** that swallowed the next line or created an invalid object. In the script above, each property is a **single Python string**.
+    
+- Re-running the cell **recreated** consumers; your Angular app still had the old handles. The guards above (“`if 'user_raw' not in globals()`”) make the script **idempotent**.
+    
+
+---
+
+## Angular (just to close the loop)
+
+Keep using the self-healing adapter I gave you previously with resolvers:
+
+```ts
+await this.userAdapter.bind(
+  await this.dh.getTableHandle('user'),
+  rows => this.userRows = rows,
+  undefined,
+  () => this.dh.getTableHandle('user')
+);
+```
+
+Same for `account` and `user_account`. No close/release calls from Angular.
+
+---
+
+If you still hit an error after pasting the **exact** script above, copy the **first 5–6 lines of the traceback** and the **line number** it points to in your cell—I’ll pinpoint the exact field that’s off.
