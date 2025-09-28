@@ -1980,3 +1980,209 @@ If it doesn’t, re-check `DEEPHAVEN_SERVER_ALLOWED_ORIGINS` and restart DH.
 ---
 
 Follow the steps exactly and the empty grids should fill, and updates will stream with no page refresh. If you still see a blank grid after this, open Network → check `/jsapi/dh-core.js` is 200 via the dev server, and paste any error text from the **first** failing request (status code + response headers) and I’ll pinpoint it.
+-------------------
+
+
+You’re loading `dh-core.js` as a classic script. That file is an **ES module**, so the browser throws:
+
+> SyntaxError: Cannot use import statement outside a module
+
+Fix: **load it as a module** (or use `import()`), and keep everything same-origin via your Angular proxy.
+
+Below is a drop-in Deephaven service that:
+
+- loads `/jsapi/dh-core.js` with **dynamic import** (no CORS, no global `window.dh`),
+    
+- connects to Deephaven through the **proxy** (`CoreClient(window.location.origin)`),
+    
+- logs in with **PSK**, and
+    
+- streams table updates.
+    
+
+Use this with the proxy you already set (`/jsapi`, `/socket`, `/api` → `http://localhost:10000`) and start Angular with `ng serve --proxy-config proxy.conf.json`.
+
+---
+
+### `src/app/services/deephaven.service.ts` (replace your file)
+
+```ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { BehaviorSubject, Observable } from 'rxjs';
+
+type DhNS = any;
+type DhTable = any;
+type DhViewportSub = any;
+
+export interface LiveTableState {
+  cols: string[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+
+/**
+ * Load Deephaven JS API from the same origin using a dynamic ES-module import.
+ * IMPORTANT: This relies on Angular dev proxying /jsapi to the DH server.
+ */
+async function loadDhModule(): Promise<DhNS> {
+  // Some bundlers may try to pre-bundle; the magic comment keeps it dynamic.
+  const mod: any = await import(/* webpackIgnore: true */ '/jsapi/dh-core.js');
+  // dh-core.js is an ES module; grab the default export or the module namespace
+  const dh = mod?.default ?? mod;
+  if (!dh?.CoreClient) throw new Error('Loaded /jsapi/dh-core.js but did not find CoreClient export');
+  return dh;
+}
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService implements OnDestroy {
+  private dh!: DhNS;
+  private client: any;
+  private ide: any;
+  private connected = false;
+
+  private tables = new Map<string, DhTable>();
+  private viewSubs = new Map<string, DhViewportSub>();
+  private streams = new Map<string, BehaviorSubject<LiveTableState>>();
+
+  /**
+   * Connect once. NOTE: pass your PSK string here.
+   * Ensure DH is started with DEEPHAVEN_AUTH_TYPE=psk and your PSK configured.
+   */
+  async ensureConnected(psk: string): Promise<void> {
+    if (this.connected) return;
+
+    // 1) Load JS API as an ES module from same origin (dev server proxies it)
+    this.dh = await loadDhModule();
+
+    // 2) All HTTP + WebSocket calls go through the proxy via same-origin base
+    const BASE = window.location.origin;
+
+    // 3) Create client & PSK login
+    this.client = new this.dh.CoreClient(BASE);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    // 4) Start an IDE session (python) so we can fetch tables by name
+    const asIde = await this.client.getAsIdeConnection();
+    this.ide = await asIde.startSession('python');
+
+    this.connected = true;
+  }
+
+  /** Subscribe to a DH table by name and stream viewport updates. */
+  async streamTable(tableName: string, top = 0, bottom = 9999): Promise<Observable<LiveTableState>> {
+    // TODO: inject PSK from your env service or config
+    await this.ensureConnected('your-psk-here');
+
+    if (this.streams.has(tableName)) return this.streams.get(tableName)!.asObservable();
+
+    const subject = new BehaviorSubject<LiveTableState>({ cols: [], rows: [], ready: false });
+    this.streams.set(tableName, subject);
+
+    try {
+      const table: DhTable = await this.ide.getTable(tableName);
+      this.tables.set(tableName, table);
+
+      table.setViewport(top, bottom);
+      const sub: DhViewportSub = table.subscribe();
+
+      const onUpdated = async () => {
+        try {
+          const v = await sub.getViewportData();
+          const cols = table.columns.map((c: any) => c.name);
+          const rows = v.rows.map((r: any) => {
+            const o: any = {};
+            for (const c of cols) o[c] = r.get(c);
+            return o;
+          });
+          subject.next({ cols, rows, ready: true });
+        } catch (err: any) {
+          subject.next({ cols: [], rows: [], ready: false, error: String(err?.message ?? err) });
+        }
+      };
+
+      await onUpdated();
+      sub.addEventListener('updated', onUpdated);
+      this.viewSubs.set(tableName, sub);
+    } catch (e: any) {
+      subject.next({ cols: [], rows: [], ready: false, error: String(e?.message ?? e) });
+    }
+
+    return subject.asObservable();
+  }
+
+  ngOnDestroy(): void {
+    for (const [, sub] of this.viewSubs) { try { sub.close?.(); } catch {} }
+    this.viewSubs.clear();
+    this.tables.clear();
+  }
+}
+```
+
+---
+
+### Why this fixes your error
+
+- Your previous loader appended `<script src="/jsapi/dh-core.js">` **without** `type="module"`. Since `dh-core.js` contains `import ...` statements, the browser rejected it. Using `import('/jsapi/dh-core.js')` loads it as an **ES module** (no “Cannot use import statement outside a module”).
+    
+- Because we load from `/jsapi/...` **same origin**, the Angular dev server **proxies** it to port 10000, so the browser never sees a cross-origin request (no CORS headaches).
+    
+- `CoreClient(window.location.origin)` ensures both HTTP and **WebSocket** (`/socket`) go through the proxy too.
+    
+
+---
+
+### Quick checklist (do these now)
+
+1. **Start Angular with the proxy**
+    
+    ```bash
+    ng serve --proxy-config proxy.conf.json
+    ```
+    
+    Your `proxy.conf.json` should have:
+    
+    ```json
+    {
+      "/jsapi":  { "target": "http://localhost:10000", "secure": false, "changeOrigin": true },
+      "/socket": { "target": "http://localhost:10000", "ws": true, "secure": false, "changeOrigin": true },
+      "/api":    { "target": "http://localhost:10000", "secure": false, "changeOrigin": true }
+    }
+    ```
+    
+2. **Start Deephaven in PSK mode**, not anonymous:
+    
+    - PowerShell example:
+        
+        ```powershell
+        $env:DEEPHAVEN_AUTH_TYPE = "psk"
+        $env:DEEPHAVEN_PSKS = "dev=your-psk-here"
+        .\start-deephaven.ps1
+        ```
+        
+    - Make sure the PSK you pass in `ensureConnected('your-psk-here')` matches.
+        
+3. **Verify in DevTools → Network**:
+    
+    - Request for `/jsapi/dh-core.js` is **200** and the **Initiator** is your app (no `http://localhost:10000` URL in the address bar — it should be `/jsapi/dh-core.js`).
+        
+    - WebSocket connects to `ws://localhost:4200/socket/...` (proxied to 10000).
+        
+
+---
+
+### About the AG Grid warnings
+
+They’re harmless:
+
+- The theming warning appears when both the CSS file theme and API theme are detected—fine if you use the CSS import only (we are).
+    
+- The `rowSelection` deprecation is just a note; `rowSelection: 'single'` is already set.
+    
+
+---
+
+If you still see a blank grid after this change, copy the **first** red error line from the console (not warnings) and the **status/headers** for `/jsapi/dh-core.js` and I’ll zero in further.
