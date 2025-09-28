@@ -92,7 +92,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 309.50271224975586
+    "width": 309.50271224975586,
+    "collapsed": true
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -194,7 +195,7 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "2c21ca8d70617dda",
+  "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
     "Project_prep/pls-goddd...md",
     "Project_prep/dhhh--ngag.md",
