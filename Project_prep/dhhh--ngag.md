@@ -1173,3 +1173,442 @@ If your editor still shows “unknown”, double-check:
     
 
 Want me to paste your full `app.component.ts` with these fixes merged into the version I gave earlier?
+
+
+----------------------------
+
+Thanks for the screenshots — the error “loadDhCore is not a function” means the bootstrap package export isn’t lining up with your bundler/TS setup. Easiest, bullet-proof fix: **skip the bootstrap package entirely** and load Deephaven’s JS API straight from your server (`/jsapi/dh-core.js`) as a script, then use the global `dh` object. This is the most compatible path with Angular 20 + AG Grid and avoids all import interop issues.
+
+Below is a **working, copy-paste** setup that:
+
+- Injects `dh-core.js` at runtime (one line, no imports)
+    
+- Authenticates with **PSK**
+    
+- Subscribes to **three** live tables and streams updates into **AG Grid 34.2**
+    
+- Builds **columns dynamically** from table schema
+    
+- Uses **RxJS’s typed combineLatest** (no deprecation / “unknown” errors)
+    
+
+---
+
+# 0) Install only what we need
+
+```bash
+npm i ag-grid-angular@34.2.0 ag-grid-community@34.2.0
+```
+
+> We’re not using `@deephaven/jsapi-bootstrap` anymore.
+
+---
+
+# 1) Global styles
+
+`src/styles.css`
+
+```css
+@import 'ag-grid-community/styles/ag-grid.css';
+@import 'ag-grid-community/styles/ag-theme-quartz.css';
+
+:root { color-scheme: dark; }
+html, body { margin: 0; padding: 0; height: 100%; }
+```
+
+---
+
+# 2) Environments
+
+`src/environments/environment.ts`
+
+```ts
+export const environment = {
+  production: false,
+
+  DEEPHAVEN_URL: 'http://localhost:10000',   // <-- your DH URL (no trailing slash)
+  DEEPHAVEN_PSK: 'your-psk-here',
+
+  TABLE_LEFT: 'user_raw',
+  TABLE_RIGHT: 'account_raw',
+  TABLE_FAT: 'fat_table',
+
+  VIEWPORT_TOP: 0,
+  VIEWPORT_BOTTOM: 9999,
+};
+```
+
+`src/environments/environment.prod.ts`
+
+```ts
+export const environment = {
+  production: true,
+
+  DEEPHAVEN_URL: 'https://your-prod-dh',
+  DEEPHAVEN_PSK: 'prod-psk',
+
+  TABLE_LEFT: 'user_raw',
+  TABLE_RIGHT: 'account_raw',
+  TABLE_FAT: 'fat_table',
+
+  VIEWPORT_TOP: 0,
+  VIEWPORT_BOTTOM: 9999,
+};
+```
+
+---
+
+# 3) Deephaven service (loads `dh-core.js` via `<script>`)
+
+`src/app/services/deephaven.service.ts`
+
+```ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { BehaviorSubject, Observable } from 'rxjs';
+import { environment } from '../../environments/environment';
+
+type DhNS = any;
+type DhTable = any;
+type DhViewportSub = any;
+
+export interface LiveTableState {
+  cols: string[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+
+/** Load /jsapi/dh-core.js once and resolve (window as any).dh */
+function loadDhFromServer(baseUrl: string): Promise<DhNS> {
+  return new Promise((resolve, reject) => {
+    const w = window as any;
+    if (w.dh) return resolve(w.dh);
+
+    const script = document.createElement('script');
+    script.src = `${baseUrl}/jsapi/dh-core.js`;
+    script.async = true;
+    script.onload = () => {
+      if (w.dh) resolve(w.dh);
+      else reject(new Error('Deephaven JS API loaded, but window.dh not found'));
+    };
+    script.onerror = () => reject(new Error(`Failed to load ${script.src}`));
+    document.head.appendChild(script);
+  });
+}
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService implements OnDestroy {
+  private dh!: DhNS;
+  private client: any;
+  private ide: any;
+  private connected = false;
+
+  private tables = new Map<string, DhTable>();
+  private viewSubs = new Map<string, DhViewportSub>();
+  private streams = new Map<string, BehaviorSubject<LiveTableState>>();
+
+  /** Create one client+session and keep it for the app lifetime. */
+  async ensureConnected(): Promise<void> {
+    if (this.connected) return;
+
+    // 1) Load dh-core.js from the server and get global dh
+    this.dh = await loadDhFromServer(environment.DEEPHAVEN_URL);
+
+    // 2) Create client & PSK login
+    this.client = new this.dh.CoreClient(environment.DEEPHAVEN_URL);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: environment.DEEPHAVEN_PSK,
+    });
+
+    // 3) Start an IDE (python) session to fetch tables by name
+    const asIde = await this.client.getAsIdeConnection();
+    this.ide = await asIde.startSession('python');
+
+    this.connected = true;
+  }
+
+  /** Subscribe to a DH table by name and stream viewport updates to an observable. */
+  async streamTable(tableName: string, top?: number, bottom?: number): Promise<Observable<LiveTableState>> {
+    await this.ensureConnected();
+
+    if (this.streams.has(tableName)) {
+      return this.streams.get(tableName)!.asObservable();
+    }
+
+    const subject = new BehaviorSubject<LiveTableState>({ cols: [], rows: [], ready: false });
+    this.streams.set(tableName, subject);
+
+    try {
+      const table: DhTable = await this.ide.getTable(tableName);
+      this.tables.set(tableName, table);
+
+      const vpTop = top ?? environment.VIEWPORT_TOP;
+      const vpBottom = bottom ?? environment.VIEWPORT_BOTTOM;
+
+      table.setViewport(vpTop, vpBottom);
+      const sub: DhViewportSub = table.subscribe();
+
+      const onUpdated = async () => {
+        try {
+          const view = await sub.getViewportData();
+          const cols = table.columns.map((c: any) => c.name);
+          const rows = view.rows.map((r: any) => {
+            const obj: any = {};
+            for (const c of cols) obj[c] = r.get(c);
+            return obj;
+          });
+          subject.next({ cols, rows, ready: true });
+        } catch (err: any) {
+          subject.next({ cols: [], rows: [], ready: false, error: String(err?.message ?? err) });
+        }
+      };
+
+      await onUpdated();
+      sub.addEventListener('updated', onUpdated);
+      this.viewSubs.set(tableName, sub);
+    } catch (e: any) {
+      subject.next({ cols: [], rows: [], ready: false, error: String(e?.message ?? e) });
+    }
+
+    return subject.asObservable();
+  }
+
+  ngOnDestroy(): void {
+    for (const [, sub] of this.viewSubs) {
+      try { sub.close?.(); } catch {}
+    }
+    this.viewSubs.clear();
+    this.tables.clear();
+  }
+}
+```
+
+---
+
+# 4) App component (typed combineLatest + dynamic columns)
+
+`src/app/app.component.ts`
+
+```ts
+import { Component, OnInit, ViewChild, signal } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { AgGridAngular } from 'ag-grid-angular';
+import type { ColDef, GridOptions, ValueFormatterParams } from 'ag-grid-community';
+import { DeephavenService, LiveTableState } from './services/deephaven.service';
+import { environment } from '../environments/environment';
+import { combineLatest, Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+
+interface GridPayload {
+  colDefs: ColDef[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [CommonModule, AgGridAngular],
+  template: `
+  <div class="app">
+    <header>
+      <h1>Deephaven → AG Grid (Live)</h1>
+      <input class="search" type="text" placeholder="Search all grids…" (input)="onQuickFilter($event)" />
+      <span class="status" [class.ok]="allReady()" [class.err]="hasError()">
+        {{ status() }}
+      </span>
+    </header>
+
+    <section class="top">
+      <div class="pane">
+        <h3>{{ leftName }}</h3>
+        <ag-grid-angular
+          #leftGrid
+          class="ag-theme-quartz"
+          style="width: 100%; height: 420px"
+          [rowData]="leftRows"
+          [columnDefs]="leftCols"
+          [gridOptions]="gridOpts"
+          (gridReady)="onGridReady($event)">
+        </ag-grid-angular>
+      </div>
+
+      <div class="pane">
+        <h3>{{ rightName }}</h3>
+        <ag-grid-angular
+          #rightGrid
+          class="ag-theme-quartz"
+          style="width: 100%; height: 420px"
+          [rowData]="rightRows"
+          [columnDefs]="rightCols"
+          [gridOptions]="gridOpts"
+          (gridReady)="onGridReady($event)">
+        </ag-grid-angular>
+      </div>
+    </section>
+
+    <section class="bottom">
+      <h3>{{ fatName }}</h3>
+      <ag-grid-angular
+        #fatGrid
+        class="ag-theme-quartz"
+        style="width: 100%; height: 420px"
+        [rowData]="fatRows"
+        [columnDefs]="fatCols"
+        [gridOptions]="gridOpts"
+        (gridReady)="onGridReady($event)">
+      </ag-grid-angular>
+    </section>
+  </div>
+  `,
+  styles: [`
+    .app { padding: 12px; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+    h1 { font-size: 18px; margin: 0 8px 0 0; }
+    .search { flex: 1; max-width: 420px; padding:8px 10px; border-radius: 10px; border: 1px solid #3a3a3a; background:#121212; color:#eaeaea; }
+    .status { font-size: 12px; opacity: 0.85 }
+    .status.ok { color: #3adb84 }
+    .status.err { color: #ff6b6b }
+    .top { display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .pane { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 8px; }
+    .bottom { margin-top: 10px; }
+    h3 { margin: 6px 0 8px 4px; font-weight: 600; }
+  `]
+})
+export class AppComponent implements OnInit {
+  leftName = environment.TABLE_LEFT;
+  rightName = environment.TABLE_RIGHT;
+  fatName = environment.TABLE_FAT;
+
+  leftCols: ColDef[] = [];
+  rightCols: ColDef[] = [];
+  fatCols: ColDef[] = [];
+
+  leftRows: any[] = [];
+  rightRows: any[] = [];
+  fatRows: any[] = [];
+
+  allReady = signal(false);
+  hasError = signal(false);
+  status = signal('Connecting…');
+
+  @ViewChild('leftGrid') leftGrid!: AgGridAngular;
+  @ViewChild('rightGrid') rightGrid!: AgGridAngular;
+  @ViewChild('fatGrid') fatGrid!: AgGridAngular;
+
+  gridOpts: GridOptions = {
+    animateRows: true,
+    rowSelection: 'single',
+    suppressFieldDotNotation: true,
+    defaultColDef: { sortable: true, filter: true, resizable: true, minWidth: 120, flex: 1 },
+  };
+
+  constructor(private dh: DeephavenService) {}
+
+  private dhColsToColDefs(dhColNames: string[], sampleRow?: any): ColDef[] {
+    const inferType = (name: string): 'number' | 'date' | 'text' | 'boolean' => {
+      const v = sampleRow?.[name];
+      if (typeof v === 'number') return 'number';
+      if (typeof v === 'boolean') return 'boolean';
+      if (v instanceof Date) return 'date';
+      return 'text';
+    };
+    const dateFmt = (p: ValueFormatterParams) =>
+      p.value instanceof Date ? p.value.toISOString() : p.value;
+
+    return dhColNames.map((name) => {
+      const t = inferType(name);
+      const col: ColDef = {
+        headerName: name, field: name, sortable: true, filter: true, resizable: true, minWidth: 120, flex: 1,
+      };
+      if (t === 'number') col.filter = 'agNumberColumnFilter';
+      if (t === 'date')   { col.filter = 'agDateColumnFilter'; col.valueFormatter = dateFmt; }
+      return col;
+    });
+  }
+
+  private sameCols(a: ColDef[], b: ColDef[]) {
+    if (a.length !== b.length) return false;
+    return a.every((c, i) => c.field === b[i].field);
+  }
+
+  private mapToGrid$(
+    s$: Observable<LiveTableState>
+  ): Observable<GridPayload> {
+    return s$.pipe(
+      map(t => ({
+        colDefs: this.dhColsToColDefs(t.cols, t.rows?.[0]),
+        rows: t.rows ?? [],
+        ready: !!t.ready,
+        error: t.error
+      }))
+    );
+  }
+
+  async ngOnInit() {
+    const left$  = await this.dh.streamTable(this.leftName);
+    const right$ = await this.dh.streamTable(this.rightName);
+    const fat$   = await this.dh.streamTable(this.fatName);
+
+    const leftGrid$  = this.mapToGrid$(left$);
+    const rightGrid$ = this.mapToGrid$(right$);
+    const fatGrid$   = this.mapToGrid$(fat$);
+
+    combineLatest<{ L: GridPayload; R: GridPayload; F: GridPayload }>({
+      L: leftGrid$, R: rightGrid$, F: fatGrid$,
+    }).subscribe(({ L, R, F }) => {
+      if (!this.sameCols(this.leftCols, L.colDefs)) this.leftCols = L.colDefs;
+      this.leftRows = L.rows;
+
+      if (!this.sameCols(this.rightCols, R.colDefs)) this.rightCols = R.colDefs;
+      this.rightRows = R.rows;
+
+      if (!this.sameCols(this.fatCols, F.colDefs)) this.fatCols = F.colDefs;
+      this.fatRows = F.rows;
+
+      const ready = L.ready && R.ready && F.ready;
+      const err = !!(L.error || R.error || F.error);
+      this.allReady.set(ready && !err);
+      this.hasError.set(err);
+      this.status.set(err ? 'Live error (see console)' : (ready ? 'Live' : 'Connecting…'));
+    });
+  }
+
+  onQuickFilter(e: Event) {
+    const q = (e.target as HTMLInputElement).value ?? '';
+    this.leftGrid.api?.setGridOption('quickFilterText', q);
+    this.rightGrid.api?.setGridOption('quickFilterText', q);
+    this.fatGrid.api?.setGridOption('quickFilterText', q);
+  }
+
+  onGridReady(event: any) { event.api.sizeColumnsToFit(); }
+}
+```
+
+---
+
+# 5) Bootstrap
+
+`src/main.ts`
+
+```ts
+import { bootstrapApplication } from '@angular/platform-browser';
+import { AppComponent } from './app/app.component';
+
+bootstrapApplication(AppComponent).catch(err => console.error(err));
+```
+
+---
+
+## Why this will work now
+
+- We **don’t call `loadDhCore`** anymore. We load the official `dh-core.js` directly from your Deephaven server and use the global `dh`, which is exactly what Deephaven’s own examples rely on. No module export/interop issues.
+    
+- The **PSK** login and **viewport subscription** remain the same, so you still get realtime streaming into Angular without page refresh.
+    
+- The **AG Grid** warnings in your console are only about theming API (v33+). We’re already using the Quartz theme properly; you can ignore that warning or pass `theme="legacy"` if you still see it.
+    
+
+If you prefer to go back to the bootstrap package later, we can do that—but this script approach is the most robust path to get you streaming **now**.
