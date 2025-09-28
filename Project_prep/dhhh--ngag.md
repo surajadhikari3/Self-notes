@@ -992,3 +992,86 @@ declare module '@deephaven/jsapi-bootstrap' {
 ---
 
 If anything else pops up (e.g., bundler vs node module resolution), tell me your exact `tsconfig.json` and I’ll tune it.
+
+----------------------------------
+
+
+Thanks for the screenshots — two things are happening:
+
+1. **RxJS deprecation warning**: you accidentally hit the deprecated _rest-args_ overload of `combineLatest`.
+    
+2. **“R is possibly undefined”**: TypeScript can’t infer the tuple types from your `combineLatest` call, so it widens them to `any | undefined`.
+    
+
+Below is a drop-in fix that makes both go away by:
+
+- Using the **object overload** of `combineLatest` (not deprecated), and
+    
+- Giving the stream a precise **type** so `L`, `R`, and `F` are never `undefined`.
+    
+
+### What to change (in your `app.component.ts`)
+
+**A) Add a payload interface once near the top**
+
+```ts
+import type { ColDef } from 'ag-grid-community';
+import { combineLatest, map } from 'rxjs';
+
+interface GridPayload {
+  colDefs: ColDef[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+```
+
+**B) Make `mapToGrid` return that type**
+
+```ts
+const mapToGrid = (s$: any) =>
+  s$.pipe(
+    map((t: any): GridPayload => ({
+      colDefs: this.dhColsToColDefs(t.cols, t.rows?.[0]),
+      rows: t.rows ?? [],
+      ready: !!t.ready,
+      error: t.error,
+    }))
+  );
+```
+
+**C) Use the _object_ form of `combineLatest` (no deprecation), and typed values**
+
+```ts
+const leftGrid$  = mapToGrid(left$);
+const rightGrid$ = mapToGrid(right$);
+const fatGrid$   = mapToGrid(fat$);
+
+combineLatest({
+  L: leftGrid$,
+  R: rightGrid$,
+  F: fatGrid$,
+}).subscribe(({ L, R, F }) => {
+  // left
+  if (!this.sameCols(this.leftCols, L.colDefs)) this.leftCols = L.colDefs;
+  this.leftRows = L.rows;
+
+  // right
+  if (!this.sameCols(this.rightCols, R.colDefs)) this.rightCols = R.colDefs;
+  this.rightRows = R.rows;
+
+  // fat
+  if (!this.sameCols(this.fatCols, F.colDefs)) this.fatCols = F.colDefs;
+  this.fatRows = F.rows;
+
+  const ready = L.ready && R.ready && F.ready;
+  const err = !!(L.error || R.error || F.error);
+  this.allReady.set(ready && !err);
+  this.hasError.set(err);
+  this.status.set(err ? 'Live error (see console)' : (ready ? 'Live' : 'Connecting…'));
+});
+```
+
+That’s it. The object overload of `combineLatest` is the recommended path in RxJS 7→8, and the explicit `GridPayload` typing stops the `possibly undefined` errors.
+
+If you still see a deprecation message, double-check you’re importing `combineLatest` from **'rxjs'** (not from `'rxjs/operators'`).
