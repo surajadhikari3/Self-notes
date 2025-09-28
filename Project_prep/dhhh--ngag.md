@@ -2186,3 +2186,203 @@ They’re harmless:
 ---
 
 If you still see a blank grid after this change, copy the **first** red error line from the console (not warnings) and the **status/headers** for `/jsapi/dh-core.js` and I’ll zero in further.
+
+-----------------
+
+Right — `dh-core.js` does **not** live in `node_modules`. It’s served by your **Deephaven server** at `/jsapi/dh-core.js`. So don’t try to `import '/jsapi/dh-core.js'` at the top of a TS file — Angular will treat that like an npm module and fail (the error you’re seeing).
+
+Use a **runtime loader** that imports the ES module in the **browser** (not at compile time) and expose it as `window.dh`. Below is a working, copy-paste Deephaven service that:
+
+- loads `/jsapi/dh-core.js` as a **module** via the Angular **dev proxy** (no CORS),
+    
+- connects with **PSK** to your DH server,
+    
+- streams tables in real time.
+    
+
+### 1) Make sure your proxy is on
+
+`proxy.conf.json` at project root:
+
+```json
+{
+  "/jsapi":  { "target": "http://localhost:10000", "secure": false, "changeOrigin": true },
+  "/socket": { "target": "http://localhost:10000", "ws": true, "secure": false, "changeOrigin": true },
+  "/api":    { "target": "http://localhost:10000", "secure": false, "changeOrigin": true }
+}
+```
+
+Run dev server with the proxy:
+
+```bash
+ng serve --proxy-config proxy.conf.json
+```
+
+### 2) Start Deephaven in **PSK** mode (not anonymous)
+
+Set envs and restart DH (PowerShell example):
+
+```powershell
+$env:DEEPHAVEN_AUTH_TYPE = "psk"
+$env:DEEPHAVEN_PSKS = "dev=your-psk-here"
+.\start-deephaven.ps1
+```
+
+### 3) Replace your Deephaven service with this
+
+> Important: **Remove** any `import '/jsapi/dh-core.js'` or `@deephaven/jsapi-bootstrap` imports from your code. Use this loader only.
+
+`src/app/services/deephaven.service.ts`
+
+```ts
+import { Injectable, OnDestroy } from '@angular/core';
+import { BehaviorSubject, Observable } from 'rxjs';
+
+type DhNS = any;
+type DhTable = any;
+type DhViewportSub = any;
+
+export interface LiveTableState {
+  cols: string[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+
+/** Load DH JS API from same origin using a module script via Blob (bypasses TS resolver). */
+function loadDhViaModuleScript(): Promise<DhNS> {
+  return new Promise((resolve, reject) => {
+    const w = window as any;
+    if (w.dh?.CoreClient) return resolve(w.dh);
+
+    const moduleCode = `
+      import * as mod from '/jsapi/dh-core.js';
+      window.dh = (mod && (mod.default ?? mod));
+    `;
+    const blob = new Blob([moduleCode], { type: 'text/javascript' });
+    const url = URL.createObjectURL(blob);
+
+    const s = document.createElement('script');
+    s.type = 'module';
+    s.src = url;
+    s.onload = () => {
+      URL.revokeObjectURL(url);
+      if ((window as any).dh?.CoreClient) resolve((window as any).dh);
+      else reject(new Error('Loaded /jsapi/dh-core.js but CoreClient not found'));
+    };
+    s.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Failed to load /jsapi/dh-core.js. Is the Angular proxy active?'));
+    };
+    document.head.appendChild(s);
+  });
+}
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService implements OnDestroy {
+  private dh!: DhNS;
+  private client: any;
+  private ide: any;
+  private connected = false;
+
+  private tables = new Map<string, DhTable>();
+  private viewSubs = new Map<string, DhViewportSub>();
+  private streams = new Map<string, BehaviorSubject<LiveTableState>>();
+
+  /** Call once; pass your PSK string. */
+  async ensureConnected(psk: string): Promise<void> {
+    if (this.connected) return;
+
+    // 1) Load DH JS API from same origin (proxied to :10000)
+    this.dh = await loadDhViaModuleScript();
+
+    // 2) Use same-origin base so HTTP + WS go through the proxy
+    const BASE = window.location.origin;
+
+    // 3) Login with PSK
+    this.client = new this.dh.CoreClient(BASE);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    // 4) Start IDE (python) session to retrieve tables by name
+    const asIde = await this.client.getAsIdeConnection();
+    this.ide = await asIde.startSession('python');
+
+    this.connected = true;
+  }
+
+  /** Subscribe to a DH table by name and stream viewport updates. */
+  async streamTable(tableName: string, top = 0, bottom = 9999): Promise<Observable<LiveTableState>> {
+    // TODO: read PSK from a safer place; hardcoded here for clarity
+    await this.ensureConnected('your-psk-here');
+
+    if (this.streams.has(tableName)) return this.streams.get(tableName)!.asObservable();
+
+    const subject = new BehaviorSubject<LiveTableState>({ cols: [], rows: [], ready: false });
+    this.streams.set(tableName, subject);
+
+    try {
+      const table: DhTable = await this.ide.getTable(tableName);
+      this.tables.set(tableName, table);
+
+      table.setViewport(top, bottom);
+      const sub: DhViewportSub = table.subscribe();
+
+      const onUpdated = async () => {
+        try {
+          const v = await sub.getViewportData();
+          const cols = table.columns.map((c: any) => c.name);
+          const rows = v.rows.map((r: any) => {
+            const o: any = {};
+            for (const c of cols) o[c] = r.get(c);
+            return o;
+          });
+          subject.next({ cols, rows, ready: true });
+        } catch (err: any) {
+          subject.next({ cols: [], rows: [], ready: false, error: String(err?.message ?? err) });
+        }
+      };
+
+      await onUpdated();
+      sub.addEventListener('updated', onUpdated);
+      this.viewSubs.set(tableName, sub);
+    } catch (e: any) {
+      subject.next({ cols: [], rows: [], ready: false, error: String(e?.message ?? e) });
+    }
+
+    return subject.asObservable();
+  }
+
+  ngOnDestroy(): void {
+    for (const [, sub] of this.viewSubs) { try { sub.close?.(); } catch {} }
+    this.viewSubs.clear();
+    this.tables.clear();
+  }
+}
+```
+
+### 4) In your component, keep using the service as before
+
+No changes needed to the component logic we already built (dynamic columns + combineLatest object overload). Just make sure you removed any stray `import('/jsapi/dh-core.js')` lines in **any** file — they trigger the “Cannot find module '/jsapi/dh-core.js'” compile error you’re seeing.
+
+---
+
+### Why this works
+
+- We **don’t** reference `/jsapi/dh-core.js` in TypeScript at build time (so Angular/TS won’t try to resolve it as an npm module).
+    
+- We load the ES module **in the browser** using a `<script type="module">` built from a **Blob** that imports `/jsapi/dh-core.js` → the Angular **proxy** serves it from port `10000` with no CORS.
+    
+- We then use `window.dh` (the module’s default/namespace export) to create `CoreClient` and log in with PSK.
+    
+
+If it still fails, open DevTools → Network:
+
+- Confirm `/jsapi/dh-core.js` is requested (status 200/304) and the **URL** is exactly `/jsapi/dh-core.js` (no `http://localhost:10000` in the address bar — that would mean the proxy isn’t active).
+    
+- Confirm a WebSocket connects to `/socket/...` with code 101.
+    
+
+Send me the **first red error line** from the console if anything else pops.
