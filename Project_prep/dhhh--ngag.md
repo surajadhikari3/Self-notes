@@ -2958,3 +2958,139 @@ user, account, user_account = user, account, user_account
     
 
 Get the `probe` result first; once `user.columns` actually shows `userId/name/email`, your Angular bind will stop throwing and live updates will flow.
+
+-------------
+
+Got it — you’re still getting “invalid column ‘userId’” inside `update_view`, even though the Deephaven UI shows values. That means the table you’re operating on **doesn’t actually have `userId/name/email` columns** at that point; most likely you’re consuming as a raw string (or bytes) and the JSON fields are still inside a single column (usually named `Value`). When you then call `update_view("userId=...")`, the name validator throws.
+
+Below is a drop-in, defensive way to make this work no matter which form you’re getting from Kafka:
+
+- If the table already has columns `userId`, `name`, `email` → use them.
+    
+- Else, if there’s a `Value` column with JSON text → parse it to those columns.
+    
+- Else → raise a clear error so you know what’s missing.
+    
+
+### 1) Robust helpers (paste once in your DH script)
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+def list_cols(t):
+    return [c.name for c in t.columns]
+
+def parse_json_value_to_cols(t, want):
+    """
+    If table `t` has a string column `Value` containing JSON,
+    parse it and materialize columns in `want` (strings).
+    """
+    cols = list_cols(t)
+    if "Value" not in cols:
+        raise RuntimeError(f"No 'Value' column to parse; columns = {cols}")
+
+    # Parse JSON string -> JsonNode, then extract wanted fields as text
+    j = t.update_view(["_node = io.deephaven.json.jackson.JsonTools.parseJson(Value)"])
+    exprs = [f"`{c}` = ((_node.get('{c}') == null) ? null : _node.get('{c}').asText())" for c in want]
+    out = j.update_view(exprs).drop_columns("_node")
+    return out
+
+def ensure_columns(t, want):
+    """Return a table that has at least the columns in `want` (as strings)."""
+    have = set(list_cols(t))
+    need = [c for c in want if c not in have]
+    if not need:
+        # Coerce to strings to be safe for web
+        exprs = [f"`{c}` = ((Object){c}) == null ? null : '' + {c}" for c in want]
+        return t.update_view(exprs).view(*want).coalesce()
+    # Try to parse from JSON string payload
+    return parse_json_value_to_cols(t, want).view(*want).coalesce()
+```
+
+### 2) Define your specs (no `mapping=`)
+
+```python
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name":   dt.string,
+    "email":  dt.string,
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId":      dt.string,
+    "accountType": dt.string,
+    "balance":     dt.double,   # if your producer sends text -> use dt.string
+})
+```
+
+### 3) Consume & normalize (works whether JSON was parsed or not)
+
+```python
+user_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=USER_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+account_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=ACCOUNT_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+# Normalize to the columns we want, regardless of how Kafka payload arrives
+user    = ensure_columns(user_raw,    ["userId", "name", "email"])
+account = ensure_columns(account_raw, ["userId", "accountType", "balance"])
+
+print("USER COLUMNS :", list_cols(user))
+print("ACCT COLUMNS :", list_cols(account))
+```
+
+If the consumer already produced `userId/name/email`, `ensure_columns` leaves them as string columns. If it only produced `Value`, it parses that JSON text and creates the columns, avoiding the “invalid column” error.
+
+### 4) (Optional) Your append-only, account-driven join
+
+```python
+# If you want account-driven stream with user enrichment at that time
+users_hist   = user.sort_descending("KafkaTimestamp")  # or whichever event time you rely on
+user_account = account.aj(users_hist, on=["userId"], joins=["name","email"])
+
+# Coalesce & keep columns friendly for the web
+user         = user.coalesce()
+account      = account.coalesce()
+user_account = user_account.coalesce()
+
+# Export for Angular
+user, account, user_account = user, account, user_account
+```
+
+### Why this fixes your error
+
+- Your error log shows only `KafkaPartition/KafkaOffset/KafkaTimestamp` being printed right before `update_view("userId=...")`. That means `userId` didn’t exist (hence “invalid column”). The helper inspects the current table shape and either uses the existing JSON-spec columns or parses `Value` into columns when necessary.
+    
+- This also prevents follow-on “table already closed” errors: those were cascading after the first failure in your JS viewport binding.
+    
+
+### If it still fails
+
+Run this quick probe to confirm the payload:
+
+```python
+probe = kc.consume(
+    KAFKA_CONFIG, TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=kc.ValueSpec.STRING,  # raw text into 'Value'
+    table_type=kc.TableType.append,
+)
+print(list_cols(probe))
+print(probe.head(3).to_string())
+```
+
+- If `Value` shows proper JSON → the helpers above will parse it.
+    
+- If it isn’t JSON (Avro/Proto, or double-encoded) → switch to the corresponding Deephaven spec (e.g., `kc.avro_spec(...)`) or fix the producer to emit straight JSON.
+    
+
+Try the snippet exactly as-is in a **fresh** DH script tab (new session). Then point your Angular “live table” at the exported `user`, `account`, or `user_account`. This removes the “invalid column” and the subsequent class-cast/closed noise.
