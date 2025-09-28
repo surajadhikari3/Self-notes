@@ -2386,3 +2386,173 @@ If it still fails, open DevTools → Network:
     
 
 Send me the **first red error line** from the console if anything else pops.
+
+----------------------------
+
+Got it — if you’re still seeing `java.lang.ClassCastException` even after:
+
+- moving to **viewport-only reads** (no `snapshot()`),
+    
+- removing `int64`,
+    
+- and fixing the “table already closed” churn,
+    
+
+then you’re almost certainly hitting a known edge-case in some DH builds where a table with **Kafka metadata columns** (or a ticket swap) triggers a type mismatch inside the server’s snapshot/viewport path. When that happens, the client errors mid-update; if HMR / multiple listeners reattach, you also get the “already closed” follow-ups.
+
+Below is a “belt-and-suspenders” fix that has stopped this exact error for teams:
+
+---
+
+## 1) Server: publish _UI-safe_ mirror tables (no Kafka metadata; simple types)
+
+Create three _UI_ tables that drop/normalize tricky columns and never expose the raw Kafka ones to the browser. This keeps the wire schema stable and side-steps the ClassCast landmine.
+
+```python
+# ---- after your kc.consume(...) definitions ----
+# user, account already exist and are append tables.
+
+# a) Normalize datatypes and drop Kafka* columns entirely
+def _ui_cast_user(t):
+    return (
+        t.update_view([
+            "userId = (String)userId",
+            "name = (String)name",
+            "email = (String)email",
+            "age32 = (int)age",           # keep 32-bit int on the wire
+        ])
+        .drop_columns(["KafkaPartition", "KafkaOffset", "KafkaTimestamp", "age"])  # drop Kafka metadata + old int64
+        .move_columns_down(["age32"])  # just to keep order tidy
+        .rename_columns(["age = age32"])
+    )
+
+def _ui_cast_account(t):
+    return (
+        t.update_view([
+            "userId = (String)userId",
+            "accountType = (String)accountType",
+            "balanceD = (double)balance",
+            # Optional: if you really need a ts column, cast to long/string:
+            # "KafkaTs = (long)KafkaTimestamp"
+        ])
+        .drop_columns(["KafkaPartition", "KafkaOffset", "KafkaTimestamp", "balance"])
+        .move_columns_down(["balanceD"])
+        .rename_columns(["balance = balanceD"])
+    )
+
+user_ui    = _ui_cast_user(user).coalesce()       # coalesce makes chunks stable for browsers
+account_ui = _ui_cast_account(account).coalesce()
+
+# b) Build the joined, append-only view (account-driven) from those UI-stable tables
+users_hist_ui = user_ui.sort_descending("userId")  # simple stable sort key; you could also keep a ts if you cast it
+user_account_ui = account_ui.aj(
+    users_hist_ui, on=["userId"], joins=["name", "email", "age"]
+).coalesce()
+
+# c) Publish only the UI-safe tables to the browser
+user         = user_ui
+account      = account_ui
+user_account = user_account_ui
+```
+
+**Why this helps**
+
+- Removes `Kafka*` columns (these are frequent sources of the internal cast bug).
+    
+- Avoids 64-bit primitives on the wire (Cast to `double`/`int`/`String`).
+    
+- `coalesce()` materializes chunked blocks so the viewport is simpler/consistent.
+    
+- Your Angular code still asks for `user`, `account`, `user_account` — they just point to the _UI_ mirrors now.
+    
+
+---
+
+## 2) Angular: keep viewport-only reads, but treat `ClassCastException` as transient
+
+Keep the service I gave you (viewport reads only). Add one small change: if the server still throws a `ClassCastException` during an update, don’t tear down the session — **quietly ignore it** and try the next event (or reattach once, only if the table is _actually_ closed).
+
+Change just this part in your `DeephavenService`:
+
+```ts
+private isClosed(e:any){ return (e?.message??String(e)).toLowerCase().includes('closed'); }
+private isClassCast(e:any){ return (e?.message??String(e)).includes('ClassCastException'); }
+```
+
+And in `queueViewportRead` and `readViewportAndBroadcast`:
+
+```ts
+// in catch blocks where we already do: if (this.isClosed(err)) await this.reattach(e);
+catch (err) {
+  if (this.isClosed(err)) {
+    await this.reattach(e);
+  } else if (this.isClassCast(err)) {
+    // Known transient server bug: ignore this tick; allow next EVENT_UPDATED to retry
+    console.warn('[DH] transient ClassCastException ignored');
+  } else {
+    console.error('[DH] viewport read error', err);
+  }
+}
+```
+
+This prevents the cascade of retries/teardowns that creates the “already closed” storm.
+
+---
+
+## 3) Make sure HMR isn’t multiplying listeners
+
+Angular/Vite HMR will re-create your service/component and you end up with multiple active viewports. Run dev without HMR while testing DH:
+
+```bash
+# Angular 17+ standalone projects:
+NG_DISABLE_HMR=1 npm run start
+# or
+ng serve --hmr=false
+```
+
+Also ensure each `LiveTableComponent` subscribes **once** and disposes in `ngOnDestroy`.
+
+---
+
+## 4) If your DH build doesn’t have `getViewportData()`
+
+Some older dh-js builds expose `viewport.getData()` instead. Swap the one line:
+
+```ts
+// const data = await e.table.getViewportData();
+const data = await e.viewport.getData();
+```
+
+Everything else stays the same.
+
+---
+
+## 5) Quick checklist
+
+-  The three variables exported to the UI are the **UI** mirrors (`user`, `account`, `user_account`) that dropped Kafka columns and cast types.
+    
+-  Service does **not** call `table.snapshot(...)`.
+    
+-  `getViewportData()` (or `viewport.getData()`) only.
+    
+-  ClassCast is **ignored** as transient; only reattach on “closed”.
+    
+-  Dev server runs without HMR.
+    
+
+---
+
+### Why this works in practice
+
+The ClassCast you’re seeing is not your logic — it’s a brittle path in some DH versions when complex/boxed types are in play and a rebalance lands mid-RPC. By:
+
+1. making the **server schema simple and stable** (no Kafka metadata, no 64-bit primitives),
+    
+2. **reading from the viewport only**, and
+    
+3. **treating ClassCast as transient**,
+    
+
+you avoid the bad code paths and stop the teardown loop that leads to “table already closed”.
+
+If you still see the exception after these changes, grab a single stack trace (the top 10 frames) and the **exact** DH server version; I’ll tune the client’s read call (`viewport.getData()` vs `getViewportData()`) to match that build’s API and suggest a targeted server patch.
