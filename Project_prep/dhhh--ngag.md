@@ -2707,3 +2707,147 @@ If you still see a `ClassCastException` after sending **only Strings** over the 
     
 
 and I’ll tailor the client call (`viewport.getData` vs `getViewportData`) and, if needed, suggest a tiny server hotfix (e.g., `flatten()` in one place) that matches your build.
+-----------
+
+
+That “invalid column name ‘userId’” is coming from Deephaven’s validator while evaluating the `update_view(...)` expressions. In plain English: the table you’re feeding into the transform doesn’t actually have a column called `userId` (matching case). That’s why it fails before we ever get to the viewport logic.
+
+This can happen if:
+
+- The JSON spec produced different names (e.g., `userid`, `user_id`, or nested fields), or
+    
+- You renamed/dropped something earlier, or
+    
+- Kafka value arrives with a different schema during dev.
+    
+
+Below is a **defensive Deephaven script** that:
+
+1. Prints the real column names so you can see what you have.
+    
+2. Optionally normalizes a few common aliases to our canonical names.
+    
+3. Builds the wire-safe String mirrors **only for columns that actually exist** (auto-intersection).
+    
+4. Publishes `user`, `account`, `user_account` for your Angular app.
+    
+
+Run this in the same DH session where your `kc.consume(...)` tables already exist.
+
+```python
+# --- prerequisites: you already created these append tables ---
+# user    = kc.consume(... value_spec=USER_VALUE_SPEC, ...)
+# account = kc.consume(... value_spec=ACCOUNT_VALUE_SPEC, ...)
+
+from deephaven.table import Table
+
+# 0) Inspect what columns really exist
+def list_cols(t: Table, label: str):
+    try:
+        print(label, [c.name for c in t.columns])
+    except Exception as e:
+        print(label, '<<no cols>>', e)
+
+list_cols(user,    "USER COLUMNS:")
+list_cols(account, "ACCOUNT COLUMNS:")
+
+# 1) (Optional) normalize a few common aliases (case-insensitive) to canonical
+def normalize_aliases(t: Table, alias_map: dict[str, str]) -> Table:
+    # alias_map: {canonicalName: list_of_possible_aliases_lowercase}
+    lc = {c.name.lower(): c.name for c in t.columns}
+    renames = []
+    for canon, aliases in alias_map.items():
+        for a in aliases:
+            if a in lc and lc[a] != canon and canon not in [c.name for c in t.columns]:
+                renames.append(f"`{canon}`=`{lc[a]}`")  # syntax: new=old
+                break
+    return t.rename_columns(renames) if renames else t
+
+ALIAS_MAP_USER = {
+    "userId":    ["userid", "user_id", "user-id"],
+    "name":      ["username"],
+    "email":     ["useremail", "e_mail"],
+    "age":       ["age64", "age_int", "userage"],
+}
+ALIAS_MAP_ACCT = {
+    "userId":       ["userid", "user_id", "user-id"],
+    "accountType":  ["account_type", "acctType", "acct_type"],
+    "balance":      ["bal", "acct_balance"],
+}
+
+user    = normalize_aliases(user,    ALIAS_MAP_USER)
+account = normalize_aliases(account, ALIAS_MAP_ACCT)
+
+list_cols(user,    "USER (after alias) COLUMNS:")
+list_cols(account, "ACCOUNT (after alias) COLUMNS:")
+
+# 2) build wire-safe (all-String) mirrors using only columns that actually exist
+def to_wire_strings(t: Table, desired_keep: list[str] | None = None) -> Table:
+    have = [c.name for c in t.columns]
+    keep = [c for c in (desired_keep or have) if c in have]   # intersect
+    if not keep:
+        # Produce a one-column empty view if nothing intersects so UI can still bind
+        return t.view("dummy = `no_columns_found`").coalesce()
+
+    # For each column X: X = (((Object)X) == null ? null : "" + X)
+    exprs = [f'`{c}` = (((Object){c}) == null ? null : "" + {c})' for c in keep]
+    return t.update_view(exprs).view(*keep).coalesce()
+
+USER_KEEP    = ["userId", "name", "email", "age"]           # canonical target names
+ACCOUNT_KEEP = ["userId", "accountType", "balance"]
+
+user_ui    = to_wire_strings(user,    USER_KEEP)
+account_ui = to_wire_strings(account, ACCOUNT_KEEP)
+
+# 3) (Optional) account-driven append join, then stringify
+try:
+    # If you have a true event-time column, sort on it instead.
+    users_hist = user.sort_descending("userId")
+    user_account_raw = account.aj(users_hist, on=["userId"], joins=["name","email","age"])
+    user_account_ui  = to_wire_strings(user_account_raw)
+except Exception as e:
+    print("JOIN not ready yet:", e)
+    # Make a minimal placeholder
+    user_account_ui = to_wire_strings(account.view("userId"))
+
+# 4) publish stable, UI-safe tables
+user         = user_ui
+account      = account_ui
+user_account = user_account_ui
+
+print("UI tables ready:")
+list_cols(user,         "user     ->")
+list_cols(account,      "account  ->")
+list_cols(user_account, "user_account ->")
+```
+
+### What changed vs. your previous attempt
+
+- We **don’t assume** `userId` exists; we compute `keep` = intersection of desired and actual columns.
+    
+- We optionally **rename aliases** (e.g., `userid` → `userId`) so your Angular code and join logic can keep using a consistent name.
+    
+- We stringify values, which avoids the `ClassCastException` path entirely.
+    
+- We `coalesce()` so the viewport stays stable.
+    
+
+### How to proceed
+
+1. Run the script. Watch the console lines that print column lists — they’ll tell you whether your raw tables actually contain `userId`, `name`, etc., or if they appeared under different names.
+    
+2. If the names are different, either:
+    
+    - Extend `ALIAS_MAP_*` to map them to your canonical names, **or**
+        
+    - Change `USER_KEEP` / `ACCOUNT_KEEP` to the real names you want to expose to Angular.
+        
+
+Once the server side stops failing on `userId` and exposes the **wire** tables, your Angular component that binds to `user`, `account`, `user_account` should stream without the `ClassCastException`.
+
+If anything still trips after this:
+
+- Paste the “USER COLUMNS:” / “ACCOUNT COLUMNS:” lines from the script output.
+    
+- Tell me the Deephaven server version and your `@deephaven/jsapi-bootstrap` version.  
+    I’ll zero in on the remaining mismatch (sometimes older servers name Kafka columns slightly differently).
