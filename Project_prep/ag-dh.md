@@ -1846,3 +1846,158 @@ export const environment = {
     
 
 If anything still squeaks, tell me the **exact** line shown in the new stack (it should now be inside the guarded retry path), and I’ll tailor the last 1% for your repo.
+
+
+
+-----------------------------
+
+
+I understand your pain — this type of error happens when the **table handle gets closed under your feet**. Let’s approach this like a senior engineer debugging a production streaming issue:
+
+---
+
+## Why you see “`Table already closed` / `ClassCastException`”
+
+1. **Append tables from Kafka** (`kc.consume(..., TableType.append)`):
+    
+    - These are _ticking_ tables; they never stop. They don’t need to be `close()`d by Angular.
+        
+    - If Angular closes or reuses the same handle incorrectly, the backend complains: “already closed”.
+        
+2. **Angular side**:
+    
+    - When your component reinitializes (HMR/dev hot reload, or navigation), Angular re-runs `ngOnInit`, so it requests the same table name again.
+        
+    - If the old adapter still has a viewport open but you already `close()`d the handle, you get exactly this exception.
+        
+3. **Deephaven Java backend**:
+    
+    - The `ClassCastException` you see is just DH’s engine throwing when a dead handle is accessed.
+        
+
+---
+
+## Correct architecture for your case
+
+- **Server (Python)**:
+    
+    - Define global variables once: `user`, `account`, `user_account`.
+        
+    - Don’t wrap them in `expose_data_to_angular(...)` unless you want renames.
+        
+    - Make sure you _don’t recreate the same variable on every re-run_ of the Python script (that kills the old handle).
+        
+    - Example (safe global init):
+        
+        ```python
+        if 'user' not in globals():
+            user_stream_data = kc.consume(
+                KAFKA_CONFIG, TOPIC1,
+                key_spec=kc.KeyValueSpec.IGNORE,
+                value_spec=USER_VALUE_SPEC,
+                table_type=kc.TableType.append,
+            )
+            user = user_stream_data
+        
+        if 'account' not in globals():
+            account_stream_data = kc.consume(
+                KAFKA_CONFIG, TOPIC2,
+                key_spec=kc.KeyValueSpec.IGNORE,
+                value_spec=ACCOUNT_VALUE_SPEC,
+                table_type=kc.TableType.append,
+            )
+            account = account_stream_data
+        
+        if 'user_account' not in globals():
+            user = user.update(["ts = now()"])
+            account = account.update(["ts = now()"])
+            users_hist = user.sort_descending("ts")
+            user_account = account.aj(users_hist, on=["userId","ts"], joins=["name","email","age"])
+        ```
+        
+- **Angular service**:
+    
+    - Never `close()` these tables. They are global append streams.
+        
+    - Only **acquire once** and keep reusing.
+        
+    - In dev mode, disable `releaseTable` logic completely.
+        
+
+---
+
+## Minimal **fix for your Angular service**
+
+Change your `releaseTable` to **no-op** for append streams.
+
+```ts
+async releaseTable(name: string): Promise<void> {
+  // For append streams: never close on frontend
+  return;
+}
+```
+
+Or simpler: **remove all release/close logic** in Angular. Just leave the viewport unbound in `ngOnDestroy`.
+
+---
+
+## Minimal **fix for LiveTableAdapter**
+
+Don’t auto-unbind on “closed” — instead, just ignore the update.
+
+```ts
+this.sub = async () => {
+  try {
+    const snap = await table.snapshot(cols);
+    onRows(snap.toObjects?.() ?? snap);
+  } catch (e: any) {
+    const msg = (e?.message ?? String(e)).toLowerCase();
+    if (msg.includes("closed")) {
+      console.warn("Ignoring closed snapshot (table is global append stream)");
+      return;
+    }
+    console.error("Snapshot error", e);
+  }
+};
+```
+
+---
+
+## Step-by-step to get rid of your issue
+
+1. **In Deephaven IDE**:
+    
+    - Run your Kafka→append code once.
+        
+    - Verify `user.size()` and `account.size()` increase as Kafka produces.
+        
+    - Keep `user`, `account`, `user_account` alive in globals.
+        
+2. **In Angular**:
+    
+    - Only call `getTableHandle('user')`, `getTableHandle('account')`, `getTableHandle('user_account')`.
+        
+    - Bind to them; **do not close** them.
+        
+    - On `ngOnDestroy`, just unbind your viewport, nothing else.
+        
+3. **Result**:
+    
+    - No more “table already closed”.
+        
+    - Columns already show → now rows will stream in as Kafka sends.
+        
+
+---
+
+✅ So the solution is: **don’t close global append tables from the frontend.** They are long-lived. Just open a viewport, snapshot, and leave them ticking.
+
+Do you want me to give you a **final cleaned DeephavenService** with:
+
+- PSK login,
+    
+- `getTableHandle`,
+    
+- `createLiveAdapter`,
+    
+- and _no_ close/release logic at all (safe for append streams)?
