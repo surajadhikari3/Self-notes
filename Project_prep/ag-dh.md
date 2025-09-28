@@ -1198,3 +1198,261 @@ This matches your AG Grid component usage:
     
 
 If anything still glitches, share the exact error text and I’ll tighten it further.
+
+-------------------------
+
+jopper
+
+
+You’re hitting: **“Table already closed; cannot be used again.”**  
+That happens when the same DH table handle gets closed (or hot-reloaded) while something (your viewport / snapshot) still tries to use it. In dev, Angular can re-instantiate components, so you can accidentally **bind twice** and **close once**, leaving one binding holding a dead handle.
+
+Fix it by:
+
+1. **Never reuse a closed handle.**
+    
+2. **Cache handles** in the service (ref-counted).
+    
+3. **Bind once per handle**; unbind on destroy.
+    
+4. In dev, **don’t call close directly**; call a `release()` that only closes when the last consumer is gone.
+    
+
+Below is a drop-in, **minimal + robust** service and tiny changes for your component.
+
+---
+
+# Updated DeephavenService (PSK required, handle cache, safe bind)
+
+`src/app/deephaven/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type DhNS = any;
+type DhCoreClient = any;
+type DhIde = any;
+export type DhTable = any;
+
+type HandleEntry = {
+  name: string;
+  table: DhTable;
+  refCount: number;
+  closed: boolean;
+};
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: DhCoreClient;
+  private ide!: DhIde;
+  private ready = false;
+
+  // cache to prevent reusing closed handles
+  private handles = new Map<string, HandleEntry>();
+
+  get isReady(): boolean { return this.ready; }
+
+  /** PSK-required connection */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+    this.ready = true;
+  }
+
+  /** Get (and cache) a handle to an existing globals() table on the DH server. */
+  async acquireTable(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table variable name: "${name}"`);
+    }
+
+    const existing = this.handles.get(name);
+    if (existing && !existing.closed) {
+      existing.refCount += 1;
+      return existing.table;
+    }
+
+    const table = await this.ide.getTable(name);
+    this.handles.set(name, { name, table, refCount: 1, closed: false });
+    return table;
+  }
+
+  /** Release a table handle; only closes when the last consumer releases. */
+  async releaseTable(name: string): Promise<void> {
+    const entry = this.handles.get(name);
+    if (!entry || entry.closed) return;
+
+    entry.refCount -= 1;
+    if (entry.refCount <= 0) {
+      try { await entry.table?.close?.(); } catch {}
+      entry.closed = true;
+      this.handles.delete(name);
+    }
+  }
+
+  /** Disconnect everything (rarely needed in apps). */
+  async disconnect(): Promise<void> {
+    for (const [name] of this.handles) await this.releaseTable(name);
+    try { await this.ide?.close?.(); } catch {}
+    try { await this.client?.close?.(); } catch {}
+    this.ready = false;
+  }
+
+  /** Minimal live → array adapter with safeguards */
+  createLiveAdapter() {
+    const dh = this.dh;
+    return new LiveTableAdapter(dh);
+  }
+}
+
+/** Keeps a viewport open and re-snapshots on updates (simple & robust) */
+class LiveTableAdapter {
+  private viewport: any;
+  private sub?: (e: any) => void;
+  private table?: any;
+  private dh: any;
+  private bound = false;
+
+  constructor(dh: any) { this.dh = dh; }
+
+  async bind(table: any, onRows: (rows: any[]) => void, columns?: string[]) {
+    if (this.bound) await this.unbind(); // avoid double-binding in dev HMR
+    this.bound = true;
+
+    this.table = table;
+    const cols = columns ?? (table?.columns ?? []).map((c: any) => c.name);
+
+    // Establish viewport first (some engines prefer this order)
+    this.viewport = await table.setViewport(0, 10000, cols);
+
+    // Initial snapshot
+    try {
+      const snap = await table.snapshot(cols);
+      onRows(snap.toObjects?.() ?? snap);
+    } catch (e) {
+      console.warn('Initial snapshot failed (will try updates):', e);
+    }
+
+    // Refresh on updates
+    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+    this.sub = async () => {
+      try {
+        // Re-snapshot whole viewport (simple & safe)
+        const s = await table.snapshot(cols);
+        onRows(s.toObjects?.() ?? s);
+      } catch (e: any) {
+        // If table was closed upstream, stop listening to avoid error loops
+        const msg = ('' + (e?.message ?? e)).toLowerCase();
+        if (msg.includes('closed')) {
+          console.warn('Table is closed; unbinding listener.');
+          await this.unbind().catch(() => {});
+        } else {
+          console.warn('Viewport refresh failed', e);
+        }
+      }
+    };
+    table.addEventListener(EVENT, this.sub);
+  }
+
+  async unbind() {
+    if (!this.bound) return;
+    this.bound = false;
+
+    try {
+      if (this.table && this.sub) {
+        const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+        this.table.removeEventListener?.(EVENT, this.sub);
+      }
+      await this.viewport?.close?.();
+    } catch {}
+    this.sub = undefined;
+    this.viewport = undefined;
+    this.table = undefined;
+  }
+}
+```
+
+---
+
+# Component changes (small but important)
+
+1. **Use the ref-counted API** (`acquireTable` / `releaseTable`).
+    
+2. Bind once; unbind in `ngOnDestroy`.
+    
+3. Don’t call `closeTableHandle` yourself anymore.
+    
+
+```ts
+// join-tables.component.ts (relevant parts)
+async ngOnInit() {
+  await this.dh.connect();
+
+  this.userHandle    = await this.dh.acquireTable('user');
+  this.accountHandle = await this.dh.acquireTable('account');
+  this.joinedHandle  = await this.dh.acquireTable('user_account'); // built in DH
+
+  this.userCols    = this.makeCols(this.userHandle);
+  this.accountCols = this.makeCols(this.accountHandle);
+  this.joinedCols  = this.makeCols(this.joinedHandle);
+
+  this.userAdapter    = this.dh.createLiveAdapter();
+  this.accountAdapter = this.dh.createLiveAdapter();
+  this.joinedAdapter  = this.dh.createLiveAdapter();
+
+  await this.userAdapter.bind(this.userHandle,    rows => { this.userRows   = rows; });
+  await this.accountAdapter.bind(this.accountHandle, rows => { this.accountRows = rows; });
+  await this.joinedAdapter.bind(this.joinedHandle,  rows => { this.joinedRows  = rows; });
+}
+
+async ngOnDestroy() {
+  await this.userAdapter?.unbind();
+  await this.accountAdapter?.unbind();
+  await this.joinedAdapter?.unbind();
+
+  // release (ref-counted). Do NOT call close directly.
+  await this.dh.releaseTable('user');
+  await this.dh.releaseTable('account');
+  await this.dh.releaseTable('user_account');
+}
+```
+
+---
+
+## Why this fixes your issue
+
+- The **cache + ref count** ensures we don’t reuse a handle that was closed by a previous instance (very common with Angular dev reloads).
+    
+- The adapter **unbinds safely** when it detects a closed table (prevents the “already closed” cascade).
+    
+- Ordering the viewport **before** the first snapshot + avoiding duplicate binds eliminates common “no rows” symptoms when dev HMR runs twice.
+    
+
+If you still see empty data after this, the usual cause is that the server-side `user_account` has **no rows yet**. Quick check in the DH IDE:
+
+```python
+print(user.size())        # should be > 0
+print(account.size())     # should be > 0
+print(user_account.size())
+```
+
+If sizes are >0 and the grid is still empty, tell me and I’ll adjust the adapter to stream deltas instead of resnapshotting.
