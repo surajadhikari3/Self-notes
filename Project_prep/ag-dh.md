@@ -619,3 +619,135 @@ await this.joinedAdapter.bind(this.joinedHandle,  rows => this.joinedRows  = row
     
 
 Do those, and you’ll have one viewport per grid that streams updates continuously—no open/close churn, no “table already closed”, and no class cast exceptions.
+
+
+------------------------------
+
+
+You’re getting that stack trace because the Python cell is **re-creating the Kafka consumers and tables each time you run it**. When a new `kc.consume(...)` is created, Deephaven tears down the old one; your Angular app still has a viewport on the **old** handle → “table already closed / ClassCastException” on the next snapshot.
+
+Let’s fix this properly with an **idempotent** DH script that:
+
+- Creates the consumers only once.
+    
+- Exposes **stable global** table names: `user`, `account`, `user_account`.
+    
+- Uses `KafkaTimestamp` as the as-of key (or `now()` fallback).
+    
+- Can be safely re-run without closing/replacing tables (unless you explicitly reset).
+    
+
+### Drop-in Deephaven Python (run in the IDE once)
+
+```python
+# ---- imports ----
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# ---- one-time config ----
+TOPIC1 = "ccd01_sb_its_esp_tap3507_bishowcaseraw"        # user
+TOPIC2 = "ccd01_sb_its_esp_tap3507_bishowcasescurated"   # account
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "auto.offset.reset": "earliest",   # or "latest" depending on your need
+    # ... your other SASL/OAuth props exactly as you already have ...
+}
+
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name":   dt.string,
+    "email":  dt.string,
+    "age":    dt.int64,     # int64 plays nice; change if you need int32
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId":      dt.string,
+    "accountType": dt.string,
+    "balance":     dt.double,
+})
+
+# ---- helpers ----
+def _ensure_consumer(var_name: str, topic: str, value_spec):
+    """Create a consumer only if it doesn't already exist in globals()."""
+    if var_name in globals():
+        return globals()[var_name]
+    tbl = kc.consume(
+        KAFKA_CONFIG,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append,
+    )
+    globals()[var_name] = tbl
+    return tbl
+
+def _with_ts(t, fallback_now: bool = True):
+    """Ensure a 'ts' Instant column on table t."""
+    names = [c.name for c in t.columns]
+    if "KafkaTimestamp" in names:
+        return t.rename_columns(["ts = KafkaTimestamp"])
+    elif fallback_now:
+        # if your broker doesn't provide KafkaTimestamp, use ingest time
+        from deephaven.time import now
+        return t.update(["ts = now()"])
+    else:
+        raise RuntimeError("No KafkaTimestamp column and fallback_now=False")
+
+# ---- idempotent pipeline build ----
+# These variable *names* are the ones your Angular app fetches
+# (stable, do not recreate on re-run)
+user_raw    = _ensure_consumer("user_raw", TOPIC1, USER_VALUE_SPEC)
+account_raw = _ensure_consumer("account_raw", TOPIC2, ACCOUNT_VALUE_SPEC)
+
+# Add ts (Instant) on both sides
+user    = _with_ts(user_raw)
+account = _with_ts(account_raw)
+
+# User "dimension" history - latest by time helps with as-of semantics
+# (aj uses <= on the last 'on' key; sort isn't required but is common)
+users_hist = user.sort_descending("ts")
+
+# Account-driven append result; emits row only when account arrives,
+# enriches with user fields as-of that time. (Left = account)
+user_account = account.aj(
+    users_hist,
+    on=["userId", "ts"],                      # last item is the as-of key
+    joins=["name", "email", "age"],
+)
+
+# Export a guard so you know pipeline is alive
+PIPELINE_READY = True
+
+# (Optional) quick visibility checks:
+# print(user.size(), account.size(), user_account.size())
+```
+
+#### To reset everything (only if you really need to):
+
+Run this once, then re-run the cell above.
+
+```python
+for n in ["user_account", "users_hist", "user", "account", "user_raw", "account_raw"]:
+    try:
+        globals()[n].close()
+    except Exception:
+        pass
+    globals().pop(n, None)
+globals().pop("PIPELINE_READY", None)
+```
+
+---
+
+## Angular side (final notes)
+
+- Keep using the **self-healing LiveTableAdapter** I gave you last message (with the resolver lambdas). That adapter will reacquire a new handle if DH ever does close one.
+    
+- Do **not** close these globals from Angular. Just `unbind()` the viewport in `ngOnDestroy()`.
+    
+- Ensure you’re fetching exactly these names: `user`, `account`, `user_account`.
+    
+
+This idempotent DH script + the self-healing adapter stops the “table already closed / ClassCastException” loop and gets your rows flowing again.
