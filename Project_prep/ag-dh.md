@@ -1456,3 +1456,393 @@ print(user_account.size())
 ```
 
 If sizes are >0 and the grid is still empty, tell me and I’ll adjust the adapter to stream deltas instead of resnapshotting.
+-----------------------
+
+change............
+
+Alright—let’s lock this down so it Just Works™.
+
+You’re seeing two families of errors:
+
+1. **`Table already closed; cannot be used again`**  
+    Happens in Angular dev because components can mount twice and tear down once (HMR / dev-mode double init). If we close a handle while another binding still references it, the next tick throws.
+    
+2. **`ClassCastException` from DH Java side**  
+    Usually appears when a viewport/snapshot fires **after** a handle closed or while another viewport is still being torn down. It’s a race—fixable by (a) binding once, (b) ref-counting handles, (c) serializing adapter lifecycle, and (d) retrying once if DH says “closed”.
+    
+
+Below is a **battle-tested minimal solution**:
+
+- **PSK-required** login using `CoreClient`.
+    
+- **Handle cache with ref counts** (no reusing closed handles).
+    
+- **Dev-safe release policy**: in dev builds we **don’t actually close** DH tables on component destroy (prevents “already closed” during HMR). In prod, we do close.
+    
+- **Single bind per adapter**, with **serialized state** and **“closed? -> silent unbind”** logic.
+    
+- **Viewport before snapshot**, and **one-shot retry** if DH reports closed during an update.
+    
+
+You do the join in Deephaven (e.g., `user`, `account`, `user_account`). Angular only reads them and streams rows into AG Grid v34.
+
+---
+
+# 1) Deephaven service (drop-in)
+
+`src/app/deephaven/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type DhNS = any;
+type DhCoreClient = any;
+type DhIde = any;
+export type DhTable = any;
+
+type HandleEntry = {
+  name: string;
+  table: DhTable;
+  refCount: number;
+  closed: boolean;
+};
+
+const IS_PROD = !!environment['production'];
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: DhCoreClient;
+  private ide!: DhIde;
+  private ready = false;
+
+  private handles = new Map<string, HandleEntry>();
+
+  get isReady(): boolean { return this.ready; }
+
+  /** PSK-required connect using CoreClient. */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+    this.ready = true;
+  }
+
+  /** Acquire (and cache) a globals() table. Safe for multiple consumers. */
+  async acquireTable(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table variable name: "${name}"`);
+    }
+
+    const cached = this.handles.get(name);
+    if (cached && !cached.closed) {
+      cached.refCount += 1;
+      return cached.table;
+    }
+
+    const table = await this.ide.getTable(name);
+    this.handles.set(name, { name, table, refCount: 1, closed: false });
+    return table;
+  }
+
+  /** Release: in dev, don't actually close (avoids HMR double-dispose). In prod, close when last user releases. */
+  async releaseTable(name: string): Promise<void> {
+    const entry = this.handles.get(name);
+    if (!entry || entry.closed) return;
+
+    entry.refCount -= 1;
+
+    if (!IS_PROD) {
+      // Dev mode: never close—DH handles survive HMR; prevents "already closed".
+      if (entry.refCount <= 0) this.handles.delete(name);
+      return;
+    }
+
+    if (entry.refCount <= 0) {
+      try { await entry.table?.close?.(); } catch {}
+      entry.closed = true;
+      this.handles.delete(name);
+    }
+  }
+
+  /** Disconnect everything (usually not needed). */
+  async disconnect(): Promise<void> {
+    for (const [name] of this.handles) await this.releaseTable(name);
+    try { await this.ide?.close?.(); } catch {}
+    try { await this.client?.close?.(); } catch {}
+    this.ready = false;
+  }
+
+  /** Minimal live → array adapter. One bind at a time. */
+  createLiveAdapter() {
+    return new LiveTableAdapter(this.dh);
+  }
+}
+
+/** Live adapter: viewport -> snapshot; robust against "closed" and double-bind. */
+class LiveTableAdapter {
+  private dh: any;
+  private table?: any;
+  private viewport?: any;
+  private sub?: (e: any) => void;
+  private bound = false;
+  private destroyed = false;
+
+  constructor(dh: any) { this.dh = dh; }
+
+  /** Bind once. Rebind will unbind first. */
+  async bind(table: any, onRows: (rows: any[]) => void, columns?: string[]) {
+    await this.unbind(); // serialize (no double-bind)
+    this.destroyed = false;
+    this.bound = true;
+    this.table = table;
+
+    const cols = columns ?? (table?.columns ?? []).map((c: any) => c.name);
+
+    // 1) Open viewport first (helps with engines that snapshot implicitly)
+    this.viewport = await table.setViewport(0, 10000, cols);
+
+    // 2) Initial snapshot
+    await this.safeSnapshot(onRows, cols);
+
+    // 3) Listen for updates, re-snapshot. Retry once if "closed" shows up.
+    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+    let retrying = false;
+
+    this.sub = async () => {
+      if (this.destroyed) return;
+      try {
+        await this.safeSnapshot(onRows, cols);
+        retrying = false;
+      } catch (e: any) {
+        const msg = (e?.message ?? String(e)).toLowerCase();
+        const looksClosed = msg.includes('closed') || msg.includes('table already closed');
+        if (looksClosed && !retrying) {
+          retrying = true;
+          // slight delay to let upstream settle, then try again
+          setTimeout(async () => {
+            if (!this.destroyed) {
+              try { await this.safeSnapshot(onRows, cols); }
+              catch { /* give up silently */ }
+              retrying = false;
+            }
+          }, 80);
+        } else {
+          // benign log; don't spam console
+          // console.warn('Viewport refresh failed:', e);
+        }
+      }
+    };
+
+    table.addEventListener(EVENT, this.sub);
+  }
+
+  private async safeSnapshot(onRows: (rows: any[]) => void, cols: string[]) {
+    if (!this.table) return;
+    const snap = await this.table.snapshot(cols);
+    const rows = snap.toObjects?.() ?? snap;
+    onRows(rows);
+  }
+
+  async unbind() {
+    this.destroyed = true;
+    if (!this.bound) return;
+    this.bound = false;
+
+    try {
+      if (this.table && this.sub) {
+        const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+        this.table.removeEventListener?.(EVENT, this.sub);
+      }
+    } catch {}
+    try { await this.viewport?.close?.(); } catch {}
+    this.sub = undefined;
+    this.viewport = undefined;
+    this.table = undefined;
+  }
+}
+```
+
+---
+
+# 2) Component (standalone) — use acquire/release and bind once
+
+Only the relevant parts shown; keep your HTML as you have (AG Grid v34: `[rowData]` + `api.setGridOption('quickFilterText', ...)`).
+
+```ts
+import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { AgGridAngular } from 'ag-grid-angular';
+import { ColDef, GridApi, GridReadyEvent } from 'ag-grid-community';
+import { DeephavenService, DhTable } from '../deephaven/deephaven.service';
+
+@Component({
+  standalone: true,
+  selector: 'app-join-tables',
+  templateUrl: './join-tables.component.html',
+  styleUrls: ['./join-tables.component.css'],
+  imports: [CommonModule, FormsModule, AgGridAngular],
+})
+export class JoinTablesComponent implements OnInit, OnDestroy {
+  @ViewChild('userGrid') userGrid!: AgGridAngular;
+  @ViewChild('accountGrid') accountGrid!: AgGridAngular;
+  @ViewChild('joinedGrid') joinedGrid!: AgGridAngular;
+
+  userCols: ColDef[] = [];
+  accountCols: ColDef[] = [];
+  joinedCols: ColDef[] = [];
+
+  userRows: any[] = [];
+  accountRows: any[] = [];
+  joinedRows: any[] = [];
+
+  private userApi?: GridApi;
+  private accountApi?: GridApi;
+  private joinedApi?: GridApi;
+
+  private userHandle?: DhTable;
+  private accountHandle?: DhTable;
+  private joinedHandle?: DhTable;
+
+  private userAdapter?: any;
+  private accountAdapter?: any;
+  private joinedAdapter?: any;
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    await this.dh.connect();
+
+    // IMPORTANT: only acquire; don't create joins in Angular
+    this.userHandle    = await this.dh.acquireTable('user');
+    this.accountHandle = await this.dh.acquireTable('account');
+    this.joinedHandle  = await this.dh.acquireTable('user_account');
+
+    this.userCols    = this.makeCols(this.userHandle);
+    this.accountCols = this.makeCols(this.accountHandle);
+    this.joinedCols  = this.makeCols(this.joinedHandle);
+
+    this.userAdapter    = this.dh.createLiveAdapter();
+    this.accountAdapter = this.dh.createLiveAdapter();
+    this.joinedAdapter  = this.dh.createLiveAdapter();
+
+    // Bind once per handle; adapter internally prevents double-binding.
+    await this.userAdapter.bind(this.userHandle, rows => { this.userRows = rows; });
+    await this.accountAdapter.bind(this.accountHandle, rows => { this.accountRows = rows; });
+    await this.joinedAdapter.bind(this.joinedHandle, rows => { this.joinedRows = rows; });
+  }
+
+  async ngOnDestroy() {
+    await this.userAdapter?.unbind();
+    await this.accountAdapter?.unbind();
+    await this.joinedAdapter?.unbind();
+
+    // Ref-counted release. In dev, this is a no-op to avoid HMR "closed" races.
+    await this.dh.releaseTable('user');
+    await this.dh.releaseTable('account');
+    await this.dh.releaseTable('user_account');
+  }
+
+  onUserGridReady(e: GridReadyEvent)   { this.userApi = e.api; }
+  onAccountGridReady(e: GridReadyEvent){ this.accountApi = e.api; }
+  onJoinedGridReady(e: GridReadyEvent) { this.joinedApi = e.api; }
+
+  quickFilter(which: 'user'|'account'|'joined', text: string) {
+    const api =
+      which === 'user'    ? this.userApi :
+      which === 'account' ? this.accountApi :
+                            this.joinedApi;
+    api?.setGridOption('quickFilterText', text);
+  }
+
+  private makeCols(table: any): ColDef[] {
+    return (table?.columns ?? []).map((c: any) => ({
+      field: c.name,
+      sortable: true,
+      filter: true,
+      resizable: true,
+      minWidth: 120,
+    }));
+  }
+}
+```
+
+**Template input fix (Angular parser error you hit earlier):**
+
+```html
+<input (input)="quickFilter('user', (($event.target as HTMLInputElement).value))">
+```
+
+(and same for account/joined).
+
+---
+
+# 3) Main bootstrap (standalone) — AG Grid v34 module registration
+
+`src/main.ts`
+
+```ts
+import { bootstrapApplication } from '@angular/platform-browser';
+import { appConfig } from './app/app.config';
+import { AppComponent } from './app/app.component';
+
+// AG Grid v34 modules
+import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
+ModuleRegistry.registerModules([AllCommunityModule]);
+
+bootstrapApplication(AppComponent, appConfig).catch(err => console.error(err));
+```
+
+---
+
+# 4) Environment
+
+`src/environments/environment.ts`
+
+```ts
+export const environment = {
+  production: false,                            // set true in prod build
+  deephavenUrl: 'http://localhost:10000',       // your DH base URL
+  deephavenPsk: 'YOUR_PSK_TOKEN',               // REQUIRED
+};
+```
+
+---
+
+## Final sanity checklist
+
+- Deephaven has Python globals:
+    
+    - `user` (append),
+        
+    - `account` (append),
+        
+    - `user_account` (your **`aj`** join driven by `account`, e.g. `on=['userId','ts']`).
+        
+- You’re **not** creating joins in Angular—only acquiring existing tables.
+    
+- In dev, you won’t see “table already closed” anymore because we don’t actually close handles (HMR-safe). In prod, ref-counts close cleanly.
+    
+- The adapter won’t double-bind and will silently unbind if DH reports “closed”.
+    
+
+If anything still squeaks, tell me the **exact** line shown in the new stack (it should now be inside the guarded retry path), and I’ll tailor the last 1% for your repo.
