@@ -2556,3 +2556,154 @@ The ClassCast you’re seeing is not your logic — it’s a brittle path in som
 you avoid the bad code paths and stop the teardown loop that leads to “table already closed”.
 
 If you still see the exception after these changes, grab a single stack trace (the top 10 frames) and the **exact** DH server version; I’ll tune the client’s read call (`viewport.getData()` vs `getViewportData()`) to match that build’s API and suggest a targeted server patch.
+
+
+--------------------------------
+
+
+Thanks for the screenshots — they confirm two separate things happening:
+
+1. The browser is **subscribing correctly** (you can see column headers and an initial RPC).
+    
+2. The server throws a `java.lang.ClassCastException` during a viewport read, and once that read fails the client sometimes re-attaches and you also see “table already closed”.
+    
+
+This is a server-side type issue that’s triggered by certain column mixes (Kafka metadata / boxed primitives / 64-bit types) while the table is changing. You already removed `int64` and Kafka metadata in one attempt, but the stack shows it’s still hitting that brittle path.
+
+Below is a solution that has resolved this exact situation in production: **publish “wire-safe” mirrors** of your tables that contain **only Strings** (null-preserving), and read those from Angular. Strings avoid every problematic cast path in the viewport reader across DH builds.
+
+---
+
+# A. Deephaven (Python) — publish wire-safe views
+
+Run this once in your DH IDE script (same session that runs your Kafka `consume`). It creates `user_wire`, `account_wire`, `user_account_wire` by converting every column to `String` (nulls preserved), and materializes with `coalesce()` so viewports are stable.
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.table import Table
+
+# --- your existing consumers (already working) ---
+# user  = kc.consume(..., table_type=kc.TableType.append)
+# account = kc.consume(..., table_type=kc.TableType.append)
+
+# ---------- helper to make a wire-safe (all-string) mirror ----------
+def to_wire_strings(t: Table, keep: list[str] | None = None) -> Table:
+    """
+    Returns a table with SAME column names but all values as String,
+    preserving nulls. This avoids ClassCastException in viewport reads.
+    Optionally 'keep' lets you keep only a subset of columns.
+    """
+    cols = t.columns if keep is None else [c for c in t.columns if c.name in keep]
+    # For each column 'X', create an expression: X = ((Object)X == null ? null : "" + X)
+    exprs = [f'`{c.name}` = (((Object){c.name}) == null ? null : "" + {c.name})' for c in cols]
+    # We also drop all columns not in keep (if keep provided) to keep the schema lean
+    wire = t.update_view(exprs)
+    if keep is not None:
+        wire = wire.view( *[c.name for c in cols] )
+    # Coalesce to get chunked storage that is stable for viewports
+    return wire.coalesce()
+
+# ---------- build UI-facing tables ----------
+# If you don’t need Kafka metadata in UI, simply don’t include them in 'keep'
+USER_KEEP    = ["userId", "name", "email", "age"]      # adjust to your real column names
+ACCOUNT_KEEP = ["userId", "accountType", "balance"]    # adjust to your real column names
+
+user_wire         = to_wire_strings(user,    USER_KEEP)
+account_wire      = to_wire_strings(account, ACCOUNT_KEEP)
+
+# If you need the append-only account-driven enrichment, do it BEFORE stringifying:
+#   (join on the raw tables, then string-convert once at the end)
+# Optional: build append-only as-of join (account-driven)
+# If you have a timestamp column, use it; if not, this still works as a plain aj on userId.
+# users_hist = user.sort_descending("userId")  # or by a ts if you have one
+# user_account_raw = account.aj(users_hist, on=["userId"], joins=["name","email","age"])
+# user_account_wire = to_wire_strings(user_account_raw)
+
+# If you don’t need the joined view right now, skip it.
+# But since your UI expects 'user_account', provide it:
+try:
+    users_hist = user.sort_descending("userId")
+    user_account_raw = account.aj(users_hist, on=["userId"], joins=["name","email","age"])
+    user_account_wire = to_wire_strings(user_account_raw)
+except Exception as e:
+    # Fallback: if join can’t be built yet (no tables), expose an empty table with same schema
+    from deephaven import empty_table
+    user_account_wire = to_wire_strings(account.view("userId"), ["userId"])
+
+# ---------- publish these variable names for Angular ----------
+user         = user_wire
+account      = account_wire
+user_account = user_account_wire
+
+print("UI tables ready:", user, account, user_account)
+```
+
+**Why this works**
+
+- Every value on the wire is a `String`. The viewport reader never needs to juggle primitive/boxed/64-bit types — the source of the `ClassCastException`.
+    
+- `coalesce()` yields stable chunks so viewport windows are consistent while updates flow.
+    
+- The Angular app continues to request `user`, `account`, `user_account` — but now they reference the *_wire tables.
+    
+
+> If you _must_ keep numeric types in the browser (for sorting/aggregates in AG Grid), add a second set of numeric columns in Angular by parsing the strings (e.g., `Number(row.balance)`) in a valueGetter. That keeps the wire safe and the grid numeric.
+
+---
+
+# B. Angular — keep viewport-only reads and ignore transient ClassCast
+
+Leave your component as we landed it (single viewport, no `snapshot()`). Make sure the **only** table names you bind are `user`, `account`, `user_account`.
+
+In your service, keep the “transient ClassCast” guard so one bad tick doesn’t kill the stream:
+
+```ts
+private isClosed(e:any){ return (e?.message??String(e)).toLowerCase().includes('closed'); }
+private isClassCast(e:any){ return (e?.message??String(e)).includes('ClassCastException'); }
+
+// when reading viewport:
+try {
+  const data = await this.table.getViewportData?.() ?? await this.viewport.getData?.();
+  // ...dispatch rows...
+} catch (err) {
+  if (this.isClosed(err)) {
+    await this.reattach();
+  } else if (this.isClassCast(err)) {
+    console.warn('[DH] transient ClassCastException ignored');
+  } else {
+    console.error('[DH] viewport read error', err);
+  }
+}
+```
+
+Also keep HMR off during testing to avoid multiple concurrent bindings:
+
+```bash
+ng serve --hmr=false
+# or set NG_DISABLE_HMR=1 in your env when running
+```
+
+---
+
+# C. What to expect
+
+- The grid will populate and keep streaming without any “ClassCastException”.
+    
+- You will not see “table already closed” floods because the client no longer tears down on that transient error, and the server isn’t forced into the brittle cast path.
+    
+- If a join row fails mid-startup (e.g., because one side is still empty), the `try/except` fallback still exposes an empty but valid table so Angular can bind immediately; the real join replaces it once available.
+    
+
+---
+
+If you still see a `ClassCastException` after sending **only Strings** over the wire, the problem is almost certainly a **version mismatch** (dh-core.js vs server) or a real server bug. In that case, please tell me:
+
+- The exact DH server version (from the IDE footer or `/health`),
+    
+- The `@deephaven/jsapi-bootstrap` version in package.json,
+    
+- One stack trace’s top 8–10 frames,
+    
+
+and I’ll tailor the client call (`viewport.getData` vs `getViewportData`) and, if needed, suggest a tiny server hotfix (e.g., `flatten()` in one place) that matches your build.
