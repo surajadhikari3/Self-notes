@@ -1612,3 +1612,143 @@ bootstrapApplication(AppComponent).catch(err => console.error(err));
     
 
 If you prefer to go back to the bootstrap package later, we can do that—but this script approach is the most robust path to get you streaming **now**.
+
+---------------------------------
+
+ganesh.............
+
+
+You’re almost there. Two fixes:
+
+## A) Your `curl -SI` shows `405 Method Not Allowed`
+
+`-I` sends a **HEAD** request. Deephaven’s Jetty doesn’t serve `HEAD` for that resource → 405 is expected. Use a normal **GET** to verify CORS:
+
+```bash
+# Use GET, and show headers
+curl -i http://localhost:10000/jsapi/dh-core.js
+```
+
+If CORS is allowed you’ll see:
+
+```
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: http://localhost:4200
+...
+```
+
+If you don’t see that header, your server isn’t allowing your Angular origin yet.
+
+---
+
+## B) Two solid ways to resolve CORS
+
+Pick **one** (the proxy way is easiest for dev).
+
+### Option 1 (recommended for dev): Proxy through Angular (no CORS needed)
+
+1. Create `proxy.conf.json` in the Angular root:
+    
+
+```json
+{
+  "/jsapi":  { "target": "http://localhost:10000", "secure": false, "changeOrigin": true },
+  "/socket": { "target": "http://localhost:10000", "ws": true, "secure": false, "changeOrigin": true },
+  "/api":    { "target": "http://localhost:10000", "secure": false, "changeOrigin": true }
+}
+```
+
+2. Update your start script (or run with flag):
+    
+
+```bash
+ng serve --proxy-config proxy.conf.json
+```
+
+3. Change your Angular Deephaven loader to hit the **same origin** (so the dev server proxies it):
+    
+
+```ts
+// DeephavenService.ts (script loader)
+function loadDhFromServerViaProxy(): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const w = window as any;
+    if (w.dh) return resolve(w.dh);
+
+    // same-origin path (dev server proxies /jsapi to DH)
+    const url = `/jsapi/dh-core.js`;
+    const s = document.createElement('script');
+    s.src = url;
+    s.async = true;
+    s.onload = () => w.dh ? resolve(w.dh) : reject(new Error('window.dh missing after load'));
+    s.onerror = () => reject(new Error(`Failed to load ${url} (proxy).`));
+    document.head.appendChild(s);
+  });
+}
+
+// use same-origin base so all HTTP + WS go through the proxy
+const BASE = window.location.origin;
+
+// in ensureConnected():
+this.dh = await loadDhFromServerViaProxy();
+this.client = new this.dh.CoreClient(BASE);
+await this.client.login({
+  type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+  token: environment.DEEPHAVEN_PSK,
+});
+const asIde = await this.client.getAsIdeConnection();
+this.ide = await asIde.startSession('python');
+```
+
+That’s it—your browser thinks everything is from the same origin (`http://localhost:4200`), and the dev server forwards to `http://localhost:10000` (including WebSockets on `/socket`). No CORS headers required.
+
+---
+
+### Option 2: Enable CORS on Deephaven
+
+If you prefer to call DH directly from the browser:
+
+Set env vars when starting Deephaven and **restart** it. Include both localhost forms:
+
+**Linux/macOS (bash):**
+
+```bash
+export DEEPHAVEN_AUTH_TYPE=psk
+export DEEPHAVEN_PSKS='dev=your-psk-here'
+export DEEPHAVEN_SERVER_ALLOWED_ORIGINS='http://localhost:4200,http://127.0.0.1:4200'
+./start-deephaven.sh
+```
+
+**Windows PowerShell:**
+
+```powershell
+$env:DEEPHAVEN_AUTH_TYPE = "psk"
+$env:DEEPHAVEN_PSKS = "dev=your-psk-here"
+$env:DEEPHAVEN_SERVER_ALLOWED_ORIGINS = "http://localhost:4200,http://127.0.0.1:4200"
+.\start-deephaven.ps1
+```
+
+**Docker CLI:**
+
+```bash
+docker run --rm -p 10000:10000 \
+  -e DEEPHAVEN_AUTH_TYPE=psk \
+  -e DEEPHAVEN_PSKS='dev=your-psk-here' \
+  -e DEEPHAVEN_SERVER_ALLOWED_ORIGINS='http://localhost:4200,http://127.0.0.1:4200' \
+  ghcr.io/deephaven/server:latest
+```
+
+Then your existing loader that hits `http://localhost:10000/jsapi/dh-core.js` will succeed, and your Angular app can connect directly (no proxy).
+
+---
+
+## Quick sanity checklist
+
+- Use **GET** in `curl` when checking headers (HEAD will show 405).
+    
+- If using **proxy**, your Angular code should reference `/jsapi/dh-core.js` and `new CoreClient(window.location.origin)`.
+    
+- If using **CORS**, your Angular code can keep `http://localhost:10000` as the base, and the server must include `Access-Control-Allow-Origin: http://localhost:4200` in responses.
+    
+
+Pick one route and you’ll be streaming again. If you want, paste your current `DeephavenService.ensureConnected()` and I’ll drop in the exact lines for your chosen option.
