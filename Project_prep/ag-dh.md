@@ -907,3 +907,149 @@ Same for `account` and `user_account`. No close/release calls from Angular.
 ---
 
 If you still hit an error after pasting the **exact** script above, copy the **first 5–6 lines of the traceback** and the **line number** it points to in your cell—I’ll pinpoint the exact field that’s off.
+
+
+---------
+
+Good news: that error is almost certainly from **one bad argument** you’re passing to `kc.consume(...)`. Deephaven’s Kafka bridge expects specific **objects**, and if any one of them is the wrong type (often a Python function or plain dict), it crashes with:
+
+> `AttributeError: 'function' object has no attribute '_object'`
+
+Here’s how to fix it quickly and _prove_ it’s correct.
+
+---
+
+## 1) Restart the Python session (clears any shadowed names)
+
+In the DH IDE: Session ▸ **Restart Python**. This avoids old variables (e.g., something named `kc` or a half-made spec) from polluting the run.
+
+---
+
+## 2) Paste this exact, minimal, type-checked script
+
+This version:
+
+- Uses only the supported types for every param.
+    
+- Verifies the types **before** calling `consume`.
+    
+- Builds the join exactly as you wanted (account-driven, append-only, as-of on `ts`).
+    
+
+```python
+# ---- Imports (do not rename) ----
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# ---- Config (plain dict of strings; no callables) ----
+TOPIC1 = "ccd01_sb_its_esp_tap3507_bishowcaseraw"        # user
+TOPIC2 = "ccd01_sb_its_esp_tap3507_bishowcasescurated"   # account
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "auto.offset.reset": "earliest",
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.oauthbearer.token.endpoint.url":
+        "https://fdsit.rastest.tdbank.ca/as/token.oauth2",
+    # keep your other SASL/OAuth properties here as **single python strings**
+    # (no Python lambdas / functions / objects that aren’t strings)
+}
+
+# ---- JSON specs (MUST be kc.json_spec(...), not a dict) ----
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name":   dt.string,
+    "email":  dt.string,
+    "age":    dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId":      dt.string,
+    "accountType": dt.string,
+    "balance":     dt.double,
+})
+
+# ---- Sanity checks (these MUST print True/OK) ----
+print("KAFKA_CONFIG is dict:", isinstance(KAFKA_CONFIG, dict))
+print("USER_VALUE_SPEC ok:", hasattr(USER_VALUE_SPEC, "_object"))
+print("ACCOUNT_VALUE_SPEC ok:", hasattr(ACCOUNT_VALUE_SPEC, "_object"))
+print("KeyValueSpec.IGNORE ok:", hasattr(kc.KeyValueSpec.IGNORE, "_object"))
+print("TableType.append ok:", hasattr(kc.TableType.append, "_object"))
+
+# ---- Create/ensure consumers ONCE (idempotent) ----
+if "user_raw" not in globals():
+    user_raw = kc.consume(
+        KAFKA_CONFIG,
+        TOPIC1,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append,
+    )
+
+if "account_raw" not in globals():
+    account_raw = kc.consume(
+        KAFKA_CONFIG,
+        TOPIC2,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append,
+    )
+
+# ---- Add 'ts' Instant column (prefer KafkaTimestamp; fallback now()) ----
+def _with_ts(t):
+    names = [c.name for c in t.columns]
+    if "KafkaTimestamp" in names:
+        return t.rename_columns(["ts = KafkaTimestamp"])
+    else:
+        from deephaven.time import now
+        return t.update(["ts = now()"])
+
+user    = _with_ts(user_raw)
+account = _with_ts(account_raw)
+
+# ---- As-of join (account-driven) ----
+users_hist = user.sort_descending("ts")
+user_account = account.aj(users_hist, on=["userId", "ts"], joins=["name", "email", "age"])
+
+print("OK: tables ready.",
+      "user cols:", [c.name for c in user.columns],
+      "account cols:", [c.name for c in account.columns],
+      "joined cols:", [c.name for c in user_account.columns])
+```
+
+### If any of the sanity prints show `False`
+
+That’s the culprit:
+
+- `USER_VALUE_SPEC ok: False` → you didn’t call `kc.json_spec(...)` correctly. Recreate it exactly as above.
+    
+- `KeyValueSpec.IGNORE ok: False` → you imported/aliased `kc` incorrectly. Ensure `from deephaven.stream.kafka import consumer as kc`.
+    
+- `KAFKA_CONFIG is dict: False` → something turned `KAFKA_CONFIG` into a function or other type (e.g., by accidentally giving it the same name as a function). Rename it and recreate as a dict of strings.
+    
+
+---
+
+## 3) Common pitfalls that trigger **`'function' object has no attribute '_object'`**
+
+- A variable accidentally named the same as an import, e.g., declaring your own `def consumer(...):` or `def kc(...):` earlier.
+    
+- `USER_VALUE_SPEC` defined as a plain dict instead of `kc.json_spec({...})`.
+    
+- Mixing Java-style `\` line continuations in ways that break Python parsing of the dict (keep each value a single Python string).
+    
+- Re-running the cell partially so half the objects are old and half are new — restarting the session avoids this.
+    
+
+---
+
+## 4) Angular side (unchanged)
+
+Keep the self-healing adapter with resolvers (so if you ever re-run this cell, the UI reconnects automatically), and **do not close** these global tables from Angular.
+
+---
+
+If this still throws, copy just the 5 sanity lines’ outputs and the **exact line** where the traceback points inside your cell (the `kc.consume` call number). That will tell us which argument is wrong in your environment.
