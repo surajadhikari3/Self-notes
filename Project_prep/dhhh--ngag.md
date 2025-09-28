@@ -1075,3 +1075,101 @@ combineLatest({
 That’s it. The object overload of `combineLatest` is the recommended path in RxJS 7→8, and the explicit `GridPayload` typing stops the `possibly undefined` errors.
 
 If you still see a deprecation message, double-check you’re importing `combineLatest` from **'rxjs'** (not from `'rxjs/operators'`).
+
+
+----------------------------
+
+You’re super close—the issue is just TypeScript not inferring the types flowing through `combineLatest`. Fix it by:
+
+1. Making `mapToGrid` strongly typed.
+    
+2. Typing each stream as `Observable<GridPayload>`.
+    
+3. Supplying a generic type to `combineLatest` (object overload) so `{ L, R, F }` are known.
+    
+
+Here’s the **drop-in replacement** for the relevant parts of your component.
+
+---
+
+### 1) Imports + payload interface
+
+```ts
+import { combineLatest, Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
+import type { ColDef, GridOptions, ValueFormatterParams } from 'ag-grid-community';
+
+interface GridPayload {
+  colDefs: ColDef[];
+  rows: any[];
+  ready: boolean;
+  error?: string;
+}
+```
+
+### 2) Typed mapper
+
+```ts
+private mapToGrid$(
+  s$: Observable<{ cols: string[]; rows: any[]; ready: boolean; error?: string }>
+): Observable<GridPayload> {
+  return s$.pipe(
+    map(t => ({
+      colDefs: this.dhColsToColDefs(t.cols, t.rows?.[0]),
+      rows: t.rows ?? [],
+      ready: !!t.ready,
+      error: t.error
+    }))
+  );
+}
+```
+
+### 3) Use it with explicit types + generic `combineLatest`
+
+```ts
+async ngOnInit() {
+  const left$  = await this.dh.streamTable(this.leftName);
+  const right$ = await this.dh.streamTable(this.rightName);
+  const fat$   = await this.dh.streamTable(this.fatName);
+
+  // Make the streams explicitly typed
+  const leftGrid$ : Observable<GridPayload> = this.mapToGrid$(left$);
+  const rightGrid$: Observable<GridPayload> = this.mapToGrid$(right$);
+  const fatGrid$  : Observable<GridPayload> = this.mapToGrid$(fat$);
+
+  // Generic ensures {L,R,F} are strongly typed (not 'unknown')
+  combineLatest<{ L: GridPayload; R: GridPayload; F: GridPayload }>({
+    L: leftGrid$,
+    R: rightGrid$,
+    F: fatGrid$,
+  }).subscribe(({ L, R, F }) => {
+    // left
+    if (!this.sameCols(this.leftCols, L.colDefs)) this.leftCols = L.colDefs;
+    this.leftRows = L.rows;
+
+    // right
+    if (!this.sameCols(this.rightCols, R.colDefs)) this.rightCols = R.colDefs;
+    this.rightRows = R.rows;
+
+    // fat
+    if (!this.sameCols(this.fatCols, F.colDefs)) this.fatCols = F.colDefs;
+    this.fatRows = F.rows;
+
+    const ready = L.ready && R.ready && F.ready;
+    const err = !!(L.error || R.error || F.error);
+    this.allReady.set(ready && !err);
+    this.hasError.set(err);
+    this.status.set(err ? 'Live error (see console)' : (ready ? 'Live' : 'Connecting…'));
+  });
+}
+```
+
+That’s all you need—no other changes.  
+If your editor still shows “unknown”, double-check:
+
+- `combineLatest` is imported from **'rxjs'** (not `'rxjs/operators'`).
+    
+- Your `tsconfig.json` has `"strict": true` (fine) and `"skipLibCheck": true` (optional but helps with 3rd-party types).
+    
+
+Want me to paste your full `app.component.ts` with these fixes merged into the version I gave earlier?
