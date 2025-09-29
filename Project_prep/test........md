@@ -2070,3 +2070,130 @@ class ViewportBinder {
     
 
 Keep your component exactly as you have it (supplying explicit column names to `bind()`), and you should see rows flow without the earlier exception. If anything still throws, share the **first** error line only and I’ll adjust further.
+
+------------------
+
+ccc
+
+You’re right—on your build the object returned by `setViewport(...)` is a `TableViewportSubscription` and it doesn’t expose `getViewportData()`. That’s why your code never hits the `console.log` and then blows up when trying to call a missing method.
+
+Given you’ve already normalized the server schema (all strings; `balance` is `double`), the simplest, reliable path is to **use `table.snapshot(columns)`** to fetch the rows on each update. `snapshot()` returns a stable, JS-friendly payload and works across DH versions.
+
+Below is a drop-in replacement for the binder that:
+
+- opens a viewport (so you can control row range)
+    
+- listens for updates
+    
+- uses **`table.snapshot(cols)`** for both the first paint and every update
+    
+- self-heals on “closed” (or transient `BackingJsObjectError/ClassCastException`) by reacquiring a fresh handle and re-opening the viewport
+    
+
+### Patch for your `DeephavenService` binder
+
+```ts
+class ViewportBinder {
+  private dh: any;
+  private resolver: (name: string) => Promise<any>;
+  private table?: any;
+  private sub?: any; // TableViewportSubscription
+  private destroyed = false;
+  private rebinding = false;
+
+  constructor(dh: any, resolver: (name: string) => Promise<any>) {
+    this.dh = dh;
+    this.resolver = resolver;
+  }
+
+  async bind(
+    tableName: string,
+    columns: string[] | undefined,
+    onRows: (rows: any[]) => void
+  ) {
+    await this.unbind();
+    this.destroyed = false;
+
+    this.table = await this.resolver(tableName);
+    const cols =
+      columns ?? (this.table?.columns ?? []).map((c: any) => c.name) ?? [];
+
+    // Open the viewport (limits server work / rows delivered)
+    this.sub = this.table.setViewport(0, 10000, cols);
+
+    // Initial paint using snapshot()
+    await this.safeSnapshot(cols, onRows, tableName);
+
+    // Live updates
+    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+    const onUpdate = async () => {
+      if (!this.destroyed) await this.safeSnapshot(cols, onRows, tableName);
+    };
+    this.sub.addEventListener(EVENT, onUpdate);
+  }
+
+  private async safeSnapshot(
+    cols: string[],
+    onRows: (rows: any[]) => void,
+    tableName: string
+  ) {
+    try {
+      const snap = await this.table!.snapshot(cols);
+      const rows = snap?.toObjects?.() ?? snap ?? [];
+      onRows(rows);
+    } catch (e: any) {
+      const msg = (e?.message ?? String(e)).toLowerCase();
+      if (
+        msg.includes('closed') ||
+        msg.includes('classcastexception') ||
+        msg.includes('backingjsobjecterror')
+      ) {
+        await this.rebind(tableName, cols, onRows);
+      } else {
+        console.warn('snapshot error:', e);
+      }
+    }
+  }
+
+  private async rebind(
+    tableName: string,
+    cols: string[],
+    onRows: (rows: any[]) => void
+  ) {
+    if (this.rebinding || this.destroyed) return;
+    this.rebinding = true;
+    try {
+      try { this.sub?.close?.(); } catch {}
+      this.table = await this.resolver(tableName);
+      this.sub = this.table.setViewport(0, 10000, cols);
+
+      const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+      this.sub.addEventListener(EVENT, async () => {
+        if (!this.destroyed) await this.safeSnapshot(cols, onRows, tableName);
+      });
+
+      await this.safeSnapshot(cols, onRows, tableName);
+    } finally {
+      this.rebinding = false;
+    }
+  }
+
+  async unbind() {
+    this.destroyed = true;
+    try { this.sub?.close?.(); } catch {}
+    this.sub = undefined;
+    this.table = undefined;
+  }
+}
+```
+
+### Why this resolves your breakage
+
+- Your current DH jsapi **doesn’t** have `subscription.getViewportData()`; using `table.snapshot(cols)` is the version-agnostic way to get a full object array for AG Grid.
+    
+- Now that the DH tables are normalized (`users_ui`, `accounts_ui`, `user_accounts_ui` with strings + double), `snapshot()` won’t hit the server-side `ClassCastException`.
+    
+- If the server ever does close/recreate the table, the binder reacquires the handle and **continues streaming** without flooding the console.
+    
+
+Keep your component exactly as you have it (supplying explicit column names to `bind()`), and you should see rows flow without the earlier exception. If anything still throws, share the **first** error line only and I’ll adjust further.
