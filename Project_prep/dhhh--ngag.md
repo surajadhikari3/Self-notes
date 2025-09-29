@@ -4323,3 +4323,56 @@ export class LiveTableComponent implements OnInit, OnDestroy {
     
 
 If you still see “Cannot read … client”, check the browser **Network** tab for a failed request to `/jsapi/dh-core.js`. Fix the URL or CORS, and the rest will come alive.
+
+
+-----------------------
+
+That error means your dynamic import isn’t returning the namespace you expect. When you load **`/jsapi/dh-core.js`** directly from the Deephaven server, the module’s **default export** is the `dh` namespace. In other words:
+
+- `await import('@deephaven/jsapi')` → you get a namespace object that you can use directly (package build).
+    
+- `await import('http://<dh>/jsapi/dh-core.js')` → you must read **`module.default`** to get that namespace.
+    
+
+Because we were doing `new this.dh.Client(...)` on the module itself, you see “Client is not a constructor”.
+
+## Fix (small patch)
+
+Update just the import/initialization part of your `connect()`:
+
+```ts
+// ...
+const jsapiUrl = `${serverUrl.replace(/\/+$/, '')}/jsapi/dh-core.js?ts=${Date.now()}`;
+
+// IMPORTANT: dh-core.js exports the dh namespace as *default*
+const mod: any = await import(/* @vite-ignore */ jsapiUrl);
+this.dh = mod?.default ?? mod;         // support both shapes
+
+// Safety net: if Client isn't there, surface a helpful error
+if (!this.dh?.Client) {
+  console.error('Loaded dh-core keys:', Object.keys(mod || {}), 'default keys:', Object.keys(mod?.default || {}));
+  throw new Error('Deephaven JSAPI did not expose Client. Are you loading /jsapi/dh-core.js from the DH server?');
+}
+
+this.client = new this.dh.Client(serverUrl);
+await this.client.login({
+  type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+  token: psk,
+});
+
+this.ide = await this.client.getAsIdeConnection();
+await this.ide.startSession('python');
+```
+
+That’s the only change you need. Everything else you already have (auto-rebind, snapshotting, etc.) can stay the same.
+
+### Quick checklist
+
+- Open `http://localhost:10000/jsapi/dh-core.js` in the browser; it must load (no proxy/CORS errors).
+    
+- `environment.deephavenUrl` must include protocol (`http://`) and the correct port.
+    
+- You _don’t_ need `allowSyntheticDefaultImports` for this dynamic import; we’re reading `default` explicitly.
+    
+
+After this patch, `new this.dh.Client(...)` will succeed and your component should render rows as soon as the server tables change.
