@@ -620,3 +620,213 @@ If you still see a server `ClassCastException`, it usually means the _producer_ 
 ---
 
 If you want, I can paste an `environment.ts` sample and a minimal HTML template next.
+
+
+-----------------------------
+
+
+Nice catch — that TS error is because you were creating the binders with `this.dh...` **before** the DI constructor runs. Move binder creation to the constructor (or to `ngOnInit` after `connect()`), then wire the template.
+
+Here’s a clean, working pair (component + HTML) that matches your service and AG Grid 34.x.
+
+---
+
+### `join-tables.component.ts` (fixed)
+
+```ts
+import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { AgGridAngular } from 'ag-grid-angular';
+import type { ColDef, GridApi, GridReadyEvent } from 'ag-grid-community';
+import { DeephavenService } from '../deephaven/deephaven.service';
+
+@Component({
+  standalone: true,
+  selector: 'app-join-tables',
+  templateUrl: './join-tables.component.html',
+  styleUrls: ['./join-tables.component.scss'],
+  imports: [CommonModule, AgGridAngular],
+})
+export class JoinTablesComponent implements OnInit, OnDestroy {
+  @ViewChild('userGrid') userGrid!: AgGridAngular;
+  @ViewChild('accountGrid') accountGrid!: AgGridAngular;
+  @ViewChild('joinedGrid') joinedGrid!: AgGridAngular;
+
+  userCols: ColDef[] = [];
+  accountCols: ColDef[] = [];
+  joinedCols: ColDef[] = [];
+
+  userRows: any[] = [];
+  accountRows: any[] = [];
+  joinedRows: any[] = [];
+
+  private userApi?: GridApi;
+  private accountApi?: GridApi;
+  private joinedApi?: GridApi;
+
+  // Declare, don't create yet (to avoid “used before initialization”)
+  private userBinder!: ReturnType<DeephavenService['createViewportBinder']>;
+  private accountBinder!: ReturnType<DeephavenService['createViewportBinder']>;
+  private joinedBinder!: ReturnType<DeephavenService['createViewportBinder']>;
+
+  constructor(private dh: DeephavenService) {
+    // Create binders AFTER DI made `dh` available
+    this.userBinder = this.dh.createViewportBinder();
+    this.accountBinder = this.dh.createViewportBinder();
+    this.joinedBinder = this.dh.createViewportBinder();
+  }
+
+  async ngOnInit() {
+    await this.dh.connect();
+
+    // Get handles once to build stable column defs
+    const userHandle    = await this.dh.getTableHandle('user');
+    const accountHandle = await this.dh.getTableHandle('account');
+    const joinedHandle  = await this.dh.getTableHandle('user_account');
+
+    this.userCols    = this.makeCols(userHandle);
+    this.accountCols = this.makeCols(accountHandle);
+    this.joinedCols  = this.makeCols(joinedHandle);
+
+    // Start live streaming (self-healing binders)
+    await this.userBinder.bind(
+      'user',
+      this.userCols.map(c => String(c.field)),
+      rows => (this.userRows = rows)
+    );
+
+    await this.accountBinder.bind(
+      'account',
+      this.accountCols.map(c => String(c.field)),
+      rows => (this.accountRows = rows)
+    );
+
+    await this.joinedBinder.bind(
+      'user_account',
+      this.joinedCols.map(c => String(c.field)),
+      rows => (this.joinedRows = rows)
+    );
+  }
+
+  async ngOnDestroy() {
+    await this.userBinder?.unbind();
+    await this.accountBinder?.unbind();
+    await this.joinedBinder?.unbind();
+  }
+
+  onUserGridReady(e: GridReadyEvent)   { this.userApi = e.api; }
+  onAccountGridReady(e: GridReadyEvent){ this.accountApi = e.api; }
+  onJoinedGridReady(e: GridReadyEvent) { this.joinedApi = e.api; }
+
+  quickFilter(which: 'user'|'account'|'joined', text: string) {
+    const api =
+      which === 'user'    ? this.userApi :
+      which === 'account' ? this.accountApi :
+                             this.joinedApi;
+    api?.setGridOption('quickFilterText', text);
+  }
+
+  private makeCols(table: any): ColDef[] {
+    return (table?.columns ?? []).map((c: any) => ({
+      field: c.name,
+      sortable: true,
+      filter: true,
+      resizable: true,
+      minWidth: 120,
+      // Helpful when DH returns wrapper types (BigDecimal/Instant/Long)
+      valueGetter: p => {
+        const v = p.data?.[c.name];
+        return v?.toString ? v.toString() : v;
+      },
+    }));
+  }
+}
+```
+
+---
+
+### `join-tables.component.html` (updated)
+
+```html
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-header">
+      <h3>Users</h3>
+      <input
+        placeholder="Search users…"
+        (input)="quickFilter('user', ($event.target as HTMLInputElement).value)" />
+    </div>
+
+    <ag-grid-angular
+      #userGrid
+      class="ag-theme-alpine grid"
+      [rowData]="userRows"
+      [columnDefs]="userCols"
+      rowSelection="single"
+      [animateRows]="true"
+      (gridReady)="onUserGridReady($event)">
+    </ag-grid-angular>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h3>Account</h3>
+      <input
+        placeholder="Search accounts…"
+        (input)="quickFilter('account', ($event.target as HTMLInputElement).value)" />
+    </div>
+
+    <ag-grid-angular
+      #accountGrid
+      class="ag-theme-alpine grid"
+      [rowData]="accountRows"
+      [columnDefs]="accountCols"
+      rowSelection="single"
+      [animateRows]="true"
+      (gridReady)="onAccountGridReady($event)">
+    </ag-grid-angular>
+  </div>
+
+  <div class="panel full">
+    <div class="panel-header">
+      <h3>User-Account</h3>
+      <input
+        placeholder="Search joined…"
+        (input)="quickFilter('joined', ($event.target as HTMLInputElement).value)" />
+    </div>
+
+    <ag-grid-angular
+      #joinedGrid
+      class="ag-theme-alpine grid"
+      [rowData]="joinedRows"
+      [columnDefs]="joinedCols"
+      rowSelection="single"
+      [animateRows]="true"
+      (gridReady)="onJoinedGridReady($event)">
+    </ag-grid-angular>
+  </div>
+</div>
+```
+
+---
+
+### Quick notes
+
+- The key fix for the TS error: **don’t call `this.dh.createViewportBinder()` in a field initializer**; do it in the constructor (or later).
+    
+- The template now uses the same `quickFilter()` helper you wrote, and passes the correct `HTMLInputElement.value`.
+    
+- Keep your `environment.ts` with:
+    
+    ```ts
+    export const environment = {
+      production: false,
+      deephavenUrl: 'https://<your-dh-host>:<port>',
+      deephavenPsk: '<your-psk>',
+    };
+    ```
+    
+- With your self-healing `ViewportBinder` (in the service you already pasted), the **ClassCast** and **table closed** cases are handled by re-acquiring a fresh handle and re-opening the viewport automatically.
+    
+
+If you want, I can also drop a tiny SCSS to make the three panels responsive.
