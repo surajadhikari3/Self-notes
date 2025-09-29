@@ -2921,5 +2921,186 @@ Then you need **CORS enabled at Deephaven** (allow `http://localhost:4200`) _and
 
 If you want, I can also drop the AG Grid component wired to `rows$` now that the stream is same-origin.
 
+--------------------------------
+
+You’re hitting two things at once:
+
+1. **`Cannot use import statement outside a module`** → your loader added a classic `<script>` (no `type="module"`), but `dh-core.js` is **ESM**.
+    
+2. You previously tried `import(url)` but got weird shapes (e.g., `CoreClient is not a constructor`) because the export shape differs across builds.
+    
+
+Below is a **robust loader** that works with Angular 20.3 + proxy (`/dh → http://localhost:10000`) and handles both cases:
+
+- First, it does a **dynamic ESM import** (with Vite/Webpack ignore so the bundler doesn’t try to bundle it).
+    
+- If that fails, it falls back to injecting a `<script type="module">`.
+    
+- It normalizes the export (`mod.dh || mod.default || mod`) so `CoreClient` is there.
+    
+- Keep using the **relative** baseUrl (`/dh`) so you don’t hit CORS.
+    
+
+---
+
+### `proxy.conf.json` (single rule, HTTP + WS)
+
+```json
+{
+  "/dh": {
+    "target": "http://localhost:10000",
+    "secure": false,
+    "changeOrigin": true,
+    "ws": true,
+    "logLevel": "debug",
+    "pathRewrite": { "^/dh": "" }
+  }
+}
+```
+
+Run: `ng serve --proxy-config proxy.conf.json`
+
+### `src/environments/environment.development.ts`
+
+```ts
+export const environment = {
+  production: false,
+  deephaven: {
+    baseUrl: '/dh',            // IMPORTANT: relative (proxied)
+    psk: 'YOUR_DEV_PSK'
+  }
+};
+```
+
+---
+
+## Angular service (drop-in)
+
+```ts
+// src/app/deephaven.service.ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+import { environment } from '../environments/environment';
+import type { dh as DhNS } from '@deephaven/jsapi-types';
+
+type Dh = typeof DhNS;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: Dh;
+  private client!: any;   // Dh.CoreClient at runtime
+  private ide!: any;      // Dh.IdeConnection at runtime
+
+  private _rows$ = new BehaviorSubject<any[]>([]);
+  readonly rows$ = this._rows$.asObservable();
+
+  private viewportCleanup?: () => void;
+
+  /** Load the ESM dh-core.js and return the dh namespace */
+  private async loadDh(): Promise<Dh> {
+    const url = `${environment.deephaven.baseUrl}/jsapi/dh-core.js`;
+
+    // Prefer dynamic ESM import (works with Angular/Vite + proxy)
+    try {
+      const mod: any = await import(
+        /* @vite-ignore */ /* webpackIgnore: true */ url
+      );
+      const dhNs = (mod?.dh ?? mod?.default ?? mod) as Dh;
+      if (!dhNs?.CoreClient) throw new Error('dh.CoreClient not found on module export');
+      return dhNs;
+    } catch (e) {
+      // Fallback: load as <script type="module">
+      await new Promise<void>((resolve, reject) => {
+        const s = document.createElement('script');
+        s.type = 'module';
+        s.src = `${url}?_=${Date.now()}`; // cache-buster to avoid old blocked responses
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error(`Failed to load ${url}`));
+        document.head.appendChild(s);
+      });
+      const dhNs = (window as any).dh as Dh | undefined;
+      if (!dhNs?.CoreClient) throw new Error('window.dh not set after module load');
+      return dhNs;
+    }
+  }
+
+  /** Connect using baseUrl + PSK (proxied, so no CORS) */
+  async connect(): Promise<void> {
+    if (/^https?:\/\//i.test(environment.deephaven.baseUrl)) {
+      throw new Error('Use a relative baseUrl (e.g., "/dh") in dev to avoid CORS.');
+    }
+
+    this.dh = await this.loadDh();
+
+    this.client = new this.dh.CoreClient(environment.deephaven.baseUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: environment.deephaven.psk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+  }
+
+  /** Subscribe to a viewport on a table and push rows into rows$ */
+  async subscribeViewport(tableName: string, top = 0, bottom = 199): Promise<void> {
+    const getTable = (this.ide.getTable?.length >= 1)
+      ? (name: string) => this.ide.getTable(name)           // newer servers
+      : (name: string) => this.ide.getTable({ tableName: name }); // older servers
+
+    const table = await getTable(tableName);
+    table.setViewport(top, bottom);
+
+    const refresh = async () => {
+      const vp = await table.getViewportData(); // { rows, columns }
+      const out: any[] = [];
+      for (let i = 0; i < vp.rows.length; i++) {
+        const src = vp.rows[i];
+        const rec: any = {};
+        for (const col of table.columns) rec[col.name] = src.get(col);
+        out.push(rec);
+      }
+      this._rows$.next(out);
+    };
+
+    await refresh();
+    table.addEventListener('update', refresh);
+
+    this.viewportCleanup = () => {
+      try { table.removeEventListener('update', refresh); } catch {}
+      try { table.close?.(); } catch {}
+    };
+  }
+
+  async disconnect(): Promise<void> {
+    try { this.viewportCleanup?.(); } finally {
+      try { await this.ide?.close?.(); } catch {}
+      try { await this.client?.close?.(); } catch {}
+    }
+  }
+}
+```
+
+---
+
+### Why this fixes your errors
+
+- **`Cannot use import statement outside a module`**: we now either `import(url)` as an ESM **or** inject `<script type="module">`, which is the correct loader for ESM bundles.
+    
+- **`window.dh missing after load`**: we first try the **module exports** (`mod.dh || mod.default || mod`). Only if that’s unavailable do we fall back to checking `window.dh`.
+    
+- **CORS**: everything goes through **`/dh`** (Angular proxy), so the browser sees a single origin (`localhost:4200`) and doesn’t invoke CORS checks.
+    
+
+If you still see issues, open the **Network** tab and confirm requests are:
+
+- `/dh/jsapi/dh-core.js` (200),
+    
+- `/dh/socket?...` (WebSocket 101),
+    
+- `/dh/api/...` (200s).
+    
+
+Want me to plug this into your AG-Grid component next so you see the live table updating?
+
 
 
