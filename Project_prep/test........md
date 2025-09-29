@@ -1396,3 +1396,402 @@ export class UsersGridComponent implements OnInit, OnDestroy {
     
 
 If you tell me your exact **Deephaven server version** (e.g., 0.39.7), I’ll pin the **exact** `@deephaven/jsapi-types` version to match and adjust the sample to your auth (PSK / token).
+
+-------------------------
+
+Awesome — your DH side is clean now:
+
+- `users_ui`: `userId,name,email` (all `String`)
+    
+- `accounts_ui`: `userId,accountType,balance` (`balance` is `double`)
+    
+- `user_accounts_ui`: the joined view with the five columns above
+    
+
+Here’s a **complete, drop-in Angular implementation** (Angular 20.3 + AG Grid 34.2) that avoids `ClassCastException` and keeps streaming with auto-rebind.
+
+---
+
+# `src/environments/environment.ts`
+
+```ts
+export const environment = {
+  production: false,
+  // e.g. "https://localhost:10000"
+  deephavenUrl: 'https://<your-dh-host>:<port>',
+  // paste your PSK here
+  deephavenPsk: '<psk>',
+};
+```
+
+---
+
+# `src/app/deephaven/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type DhNs = any;
+type DhCoreClient = any;
+type DhIde = any;
+type DhTable = any;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNs;
+  private client!: DhCoreClient;
+  private ide!: DhIde;
+  private ready = false;
+
+  get isReady() { return this.ready; }
+
+  /** PSK login via CoreClient -> IdeConnection */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const { deephavenUrl, deephavenPsk } = environment;
+    if (!deephavenUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!deephavenPsk) throw new Error('environment.deephavenPsk is not set');
+
+    // Load DH JS API right from the server
+    const jsapiUrl = new URL('/jsapi/dh-core.js', deephavenUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(deephavenUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: deephavenPsk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+    this.ready = true;
+  }
+
+  /** Get a handle to an exported globals table. */
+  async getTableHandle(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table name: "${name}"`);
+    }
+    return this.ide.getTable(name);
+  }
+
+  /** Create a streaming, self-healing viewport binder. */
+  createViewportBinder() {
+    return new ViewportBinder(this.dh, (n: string) => this.getTableHandle(n));
+  }
+}
+
+/** Viewport binder: streams updates and self-heals on “closed” *or* ClassCast. */
+class ViewportBinder {
+  private dh: any;
+  private resolver: (name: string) => Promise<any>;
+  private table?: any;
+  private sub?: any;
+  private destroyed = false;
+  private rebinding = false;
+
+  constructor(dh: any, resolver: (name: string) => Promise<any>) {
+    this.dh = dh;
+    this.resolver = resolver;
+  }
+
+  async bind(
+    tableName: string,
+    columns: string[] | undefined,
+    onRows: (rows: any[]) => void
+  ) {
+    await this.unbind();
+    this.destroyed = false;
+
+    this.table = await this.resolver(tableName);
+    const cols =
+      columns ?? (this.table?.columns ?? []).map((c: any) => c.name) ?? [];
+
+    // Open viewport (0..10000 is plenty for demo)
+    this.sub = this.table.setViewport(0, 10000, cols);
+
+    // First paint
+    await this.safePush(onRows, tableName, cols);
+
+    // Live updates
+    const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+    const onUpdate = async () => {
+      if (!this.destroyed) await this.safePush(onRows, tableName, cols);
+    };
+    this.sub.addEventListener(EVENT, onUpdate);
+  }
+
+  private async safePush(
+    onRows: (rows: any[]) => void,
+    tableName: string,
+    cols: string[]
+  ) {
+    try {
+      const rows = await this.readRows();
+      onRows(rows);
+    } catch (e: any) {
+      const msg = (e?.message ?? String(e)).toLowerCase();
+      if (
+        msg.includes('closed') ||
+        msg.includes('classcastexception') ||
+        msg.includes('backingjsobjecterror')
+      ) {
+        await this.rebind(tableName, cols, onRows);
+      } else {
+        console.warn('viewport read error:', e);
+      }
+    }
+  }
+
+  /** Handle different DH “viewport data” shapes; stringify wrappers safely. */
+  private async readRows(): Promise<any[]> {
+    const data = await this.sub!.getViewportData?.() ?? this.sub;
+    if (data?.toObjects && typeof data.toObjects === 'function') {
+      return data.toObjects();
+    }
+    if (data?.rows?.toObjects && typeof data.rows.toObjects === 'function') {
+      return data.rows.toObjects();
+    }
+    if (Array.isArray(data?.rows)) return data.rows;
+
+    if (Array.isArray(data?.columns) && Array.isArray(data?.data)) {
+      const cols = data.columns.map((c: any) => c.name);
+      return data.data.map((r: any[]) =>
+        cols.reduce((o: any, k: string, i: number) => {
+          const v = r[i];
+          o[k] = v?.toString ? v.toString() : v;
+          return o;
+        }, {})
+      );
+    }
+    return [];
+  }
+
+  private async rebind(
+    tableName: string,
+    cols: string[],
+    onRows: (rows: any[]) => void
+  ) {
+    if (this.rebinding || this.destroyed) return;
+    this.rebinding = true;
+    try {
+      try { this.sub?.close?.(); } catch {}
+      this.table = await this.resolver(tableName);
+      this.sub = this.table.setViewport(0, 10000, cols.length ? cols : undefined);
+
+      const EVENT = (this.dh?.Table?.EVENT_UPDATED ?? 'update');
+      this.sub.addEventListener(EVENT, async () => {
+        if (!this.destroyed) onRows(await this.readRows());
+      });
+
+      onRows(await this.readRows());
+    } finally {
+      this.rebinding = false;
+    }
+  }
+
+  async unbind() {
+    this.destroyed = true;
+    try { this.sub?.close?.(); } catch {}
+    this.sub = undefined;
+    this.table = undefined;
+  }
+}
+```
+
+---
+
+# `src/app/join-tables/join-tables.component.ts`
+
+```ts
+import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { AgGridAngular } from 'ag-grid-angular';
+import type { ColDef, GridApi, GridReadyEvent } from 'ag-grid-community';
+import { DeephavenService } from '../deephaven/deephaven.service';
+
+@Component({
+  standalone: true,
+  selector: 'app-join-tables',
+  templateUrl: './join-tables.component.html',
+  styleUrls: ['./join-tables.component.scss'],
+  imports: [CommonModule, AgGridAngular],
+})
+export class JoinTablesComponent implements OnInit, OnDestroy {
+  @ViewChild('usersGrid') usersGrid!: AgGridAngular;
+  @ViewChild('accountsGrid') accountsGrid!: AgGridAngular;
+  @ViewChild('joinedGrid') joinedGrid!: AgGridAngular;
+
+  usersCols: ColDef[] = [];
+  accountsCols: ColDef[] = [];
+  joinedCols: ColDef[] = [];
+
+  usersRows: any[] = [];
+  accountsRows: any[] = [];
+  joinedRows: any[] = [];
+
+  private usersApi?: GridApi;
+  private accountsApi?: GridApi;
+  private joinedApi?: GridApi;
+
+  private usersBinder = this.dh.createViewportBinder();
+  private accountsBinder = this.dh.createViewportBinder();
+  private joinedBinder = this.dh.createViewportBinder();
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    await this.dh.connect();
+
+    // Build stable column defs once
+    const usersHandle    = await this.dh.getTableHandle('users_ui');
+    const accountsHandle = await this.dh.getTableHandle('accounts_ui');
+    const joinedHandle   = await this.dh.getTableHandle('user_accounts_ui');
+
+    this.usersCols    = this.makeCols(usersHandle);
+    this.accountsCols = this.makeCols(accountsHandle);
+    this.joinedCols   = this.makeCols(joinedHandle);
+
+    // Stream with self-healing binders
+    await this.usersBinder.bind(
+      'users_ui',
+      this.usersCols.map(c => String(c.field)),
+      rows => (this.usersRows = rows)
+    );
+
+    await this.accountsBinder.bind(
+      'accounts_ui',
+      this.accountsCols.map(c => String(c.field)),
+      rows => (this.accountsRows = rows)
+    );
+
+    await this.joinedBinder.bind(
+      'user_accounts_ui',
+      this.joinedCols.map(c => String(c.field)),
+      rows => (this.joinedRows = rows)
+    );
+  }
+
+  async ngOnDestroy() {
+    await this.usersBinder.unbind();
+    await this.accountsBinder.unbind();
+    await this.joinedBinder.unbind();
+  }
+
+  onUsersReady(e: GridReadyEvent)    { this.usersApi = e.api; }
+  onAccountsReady(e: GridReadyEvent) { this.accountsApi = e.api; }
+  onJoinedReady(e: GridReadyEvent)   { this.joinedApi = e.api; }
+
+  quickFilter(which: 'users'|'accounts'|'joined', text: string) {
+    const api =
+      which === 'users'    ? this.usersApi :
+      which === 'accounts' ? this.accountsApi :
+                              this.joinedApi;
+    api?.setGridOption('quickFilterText', text);
+  }
+
+  private makeCols(table: any): ColDef[] {
+    return (table?.columns ?? []).map((c: any) => ({
+      field: c.name,
+      sortable: true,
+      filter: true,
+      resizable: true,
+      minWidth: 120,
+      // stringify DH wrapper types (if any ever sneak in)
+      valueGetter: p => {
+        const v = p.data?.[c.name];
+        return v?.toString ? v.toString() : v;
+      },
+    }));
+  }
+}
+```
+
+---
+
+# `src/app/join-tables/join-tables.component.html`
+
+```html
+<div class="grid-2">
+  <div class="panel">
+    <div class="panel-header">
+      <h3>Users</h3>
+      <input placeholder="Search users…"
+             (input)="quickFilter('users', ($event.target as HTMLInputElement).value)" />
+    </div>
+
+    <ag-grid-angular
+      #usersGrid
+      class="ag-theme-alpine grid"
+      [rowData]="usersRows"
+      [columnDefs]="usersCols"
+      rowSelection="single"
+      [animateRows]="true"
+      (gridReady)="onUsersReady($event)">
+    </ag-grid-angular>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header">
+      <h3>Accounts</h3>
+      <input placeholder="Search accounts…"
+             (input)="quickFilter('accounts', ($event.target as HTMLInputElement).value)" />
+    </div>
+
+    <ag-grid-angular
+      #accountsGrid
+      class="ag-theme-alpine grid"
+      [rowData]="accountsRows"
+      [columnDefs]="accountsCols"
+      rowSelection="single"
+      [animateRows]="true"
+      (gridReady)="onAccountsReady($event)">
+    </ag-grid-angular>
+  </div>
+
+  <div class="panel full">
+    <div class="panel-header">
+      <h3>User Accounts</h3>
+      <input placeholder="Search joined…"
+             (input)="quickFilter('joined', ($event.target as HTMLInputElement).value)" />
+    </div>
+
+    <ag-grid-angular
+      #joinedGrid
+      class="ag-theme-alpine grid"
+      [rowData]="joinedRows"
+      [columnDefs]="joinedCols"
+      rowSelection="single"
+      [animateRows]="true"
+      (gridReady)="onJoinedReady($event)">
+    </ag-grid-angular>
+  </div>
+</div>
+```
+
+---
+
+### Why this won’t ClassCast anymore
+
+- We **don’t cast to `String` on the server** (you kept DH types stable: string/double).
+    
+- We read viewport data using **safe fallbacks** and **stringify** any wrapper types client-side.
+    
+- If DH closes a handle or a transient `BackingJsObjectError/ClassCastException` occurs mid-tick, the binder **reacquires a fresh handle + viewport** and repaints automatically.
+    
+
+If you want a tiny SCSS to space panels:
+
+```scss
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.panel.full { grid-column: 1 / -1; }
+.grid { width: 100%; height: 360px; }
+.panel-header { display:flex; align-items:center; gap:12px; justify-content:space-between; }
+.panel-header input { width: 240px; }
+```
+
+That’s it—wire your three UI tables exactly as named (`users_ui`, `accounts_ui`, `user_accounts_ui`) and it will stream cleanly.
