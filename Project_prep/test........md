@@ -1,290 +1,343 @@
+Got it — let’s lock in a clean, minimal, **end-to-end** setup that:
 
+- logs in to Deephaven with **PSK**,
+    
+- opens **stable global tables** (`user`, `account`, `user_account`),
+    
+- subscribes to **ticking updates** via a viewport,
+    
+- **auto-heals** if DH recycles a handle (re-acquires and re-subscribes),
+    
+- does **not** close server tables from Angular,
+    
+- works with Angular **20.3**.
+    
 
-Perfect — PSK auth, Angular **20.3**, and your DH table is named **`user`**. Below is a clean, copy-paste setup that streams that table in real time into an AG Grid.
+Below are the 5 files you need. Replace your current versions with these.
 
 ---
 
-# 1) Dev proxy (fixes CORS + WebSocket)
+## 1) `src/app/deephaven/deephaven.service.ts`
 
-Create `proxy.conf.json` at your Angular project root:
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
 
-```json
-{
-  "/jsapi": {
-    "target": "http://localhost:10000",
-    "secure": false,
-    "ws": true,
-    "changeOrigin": true
-  },
-  "/socket": {
-    "target": "http://localhost:10000",
-    "secure": false,
-    "ws": true,
-    "changeOrigin": true
+type DhNS = any;
+type DhCoreClient = any;
+type DhIde = any;
+export type DhTable = any;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNS;
+  private client!: DhCoreClient;
+  private ide!: DhIde;
+  private ready = false;
+
+  get isReady(): boolean { return this.ready; }
+  getDhNs() { return this.dh; } // expose DH namespace (for event constants)
+
+  /** PSK login + Python IDE session */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+    this.ready = true;
+  }
+
+  /** Fetch a handle to a globals() table by name */
+  async getTableHandle(name: string): Promise<DhTable> {
+    if (!this.ready) await this.connect();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new Error(`Invalid table variable name: "${name}"`);
+    }
+    return this.ide.getTable(name);
   }
 }
 ```
 
-`package.json` → start script:
+---
 
-```json
-{
-  "scripts": {
-    "start": "ng serve --proxy-config proxy.conf.json"
+## 2) `src/app/live-table/live-table.component.ts` (standalone, auto-ticking)
+
+```ts
+import {
+  Component, Input, OnInit, OnDestroy,
+  ChangeDetectionStrategy, ChangeDetectorRef
+} from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { DeephavenService, DhTable } from '../deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+  <section class="card">
+    <header class="bar">
+      <h3><span class="mono">{{ tableName }}</span></h3>
+      <div class="status">
+        <span *ngIf="error" class="error">{{ error }}</span>
+        <span *ngIf="!error && loading">Connecting…</span>
+      </div>
+    </header>
+
+    <div class="grid" *ngIf="!error">
+      <div class="thead" *ngIf="cols.length">
+        <div class="th" *ngFor="let c of cols; trackBy: trackCol">{{ c }}</div>
+      </div>
+
+      <div class="tbody" (scroll)="onScroll($event)">
+        <div class="tr" *ngFor="let r of rows; trackBy: trackRow">
+          <div class="td" *ngFor="let v of r; trackBy: trackCell">{{ v }}</div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="pager" *ngIf="!error">
+      <button (click)="pageFirst()" [disabled]="offset === 0">First</button>
+      <button (click)="pagePrev()"  [disabled]="offset === 0">Prev</button>
+      <span class="mono">rows {{ offset }}–{{ offset + pageSize - 1 }}</span>
+      <button (click)="pageNext()">Next</button>
+      <button (click)="refresh()">Refresh</button>
+    </footer>
+  </section>
+  `,
+  styles: [`
+    :host { display:block }
+    .card { border:1px solid #2a2a2a; border-radius:.75rem; background:#0f0f0f; color:#fff; }
+    .bar { display:flex; justify-content:space-between; align-items:center; padding:.75rem 1rem; border-bottom:1px solid #242424 }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace }
+    .grid{ display:grid; grid-template-rows: auto 1fr; gap:.5rem; }
+    .thead, .tr { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(140px, 1fr) }
+    .th { position:sticky; top:0; background:#111; font-weight:600; padding:.5rem; z-index:1; }
+    .tbody{ max-height:40dvh; overflow:auto; }
+    .td { padding:.25rem .5rem; border-top:1px solid #242424; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+    .pager{ display:flex; gap:.5rem; align-items:center; padding:.5rem 1rem; border-top:1px solid #242424 }
+    .error{ color:#ff6b6b }
+  `],
+})
+export class LiveTableComponent implements OnInit, OnDestroy {
+  /** name of DH globals() table, e.g. "user_account" */
+  @Input({ required: true }) tableName!: string;
+  @Input() pageSize = 300;
+  @Input() initialOffset = 0;
+
+  loading = false;
+  error: string | null = null;
+
+  cols: string[] = [];
+  rows: any[] = [];
+  offset = 0;
+
+  private table: DhTable | null = null;
+  private viewport: any;
+  private onUpdateHandler?: () => void;
+  private onSchemaHandler?: () => void;
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  async ngOnInit(): Promise<void> {
+    this.offset = this.initialOffset;
+    await this.attach();
   }
+  async ngOnDestroy(): Promise<void> { await this.detach(); }
+
+  // ---------- wiring ----------
+  private async attach(): Promise<void> {
+    this.loading = true; this.error = null; this.cdr.markForCheck();
+    try {
+      await this.dh.connect();
+      const dhns = this.dh.getDhNs();
+
+      // fresh handle each attach (survives server-side re-runs)
+      this.table = await this.dh.getTableHandle(this.tableName);
+
+      this.cols = (this.table.columns ?? []).map((c: any) => c.name);
+
+      this.viewport = await this.table.setViewport(
+        this.offset, this.offset + this.pageSize - 1, this.cols
+      );
+
+      await this.refresh(); // initial data
+
+      const EVU = dhns?.Table?.EVENT_UPDATED ?? 'update';
+      const EVS = dhns?.Table?.EVENT_SCHEMA_CHANGED ?? 'schema_changed';
+
+      this.onUpdateHandler = async () => { await this.refresh(); };
+      this.onSchemaHandler = async () => { await this.onSchemaChanged(); };
+
+      this.table.addEventListener(EVU, this.onUpdateHandler);
+      this.table.addEventListener(EVS, this.onSchemaHandler);
+
+      this.loading = false; this.cdr.markForCheck();
+    } catch (e: any) {
+      this.error = e?.message ?? String(e);
+      this.loading = false; this.cdr.markForCheck();
+    }
+  }
+
+  private async detach(): Promise<void> {
+    try {
+      const dhns = this.dh.getDhNs();
+      const EVU = dhns?.Table?.EVENT_UPDATED ?? 'update';
+      const EVS = dhns?.Table?.EVENT_SCHEMA_CHANGED ?? 'schema_changed';
+      if (this.table && this.onUpdateHandler) this.table.removeEventListener?.(EVU, this.onUpdateHandler);
+      if (this.table && this.onSchemaHandler) this.table.removeEventListener?.(EVS, this.onSchemaHandler);
+    } catch {}
+    try { await this.viewport?.close?.(); } catch {}
+    // IMPORTANT: do NOT close the table (it’s a long-lived server global)
+    this.viewport = null;
+    this.table = null;
+  }
+
+  // ---------- data ----------
+  async refresh(): Promise<void> {
+    if (!this.table) return;
+    try {
+      const snap = await this.table.snapshot(this.cols);
+      const objs = snap.toObjects?.() ?? snap;
+      this.rows = (objs as any[]).map(o =>
+        Array.isArray(o) ? o : this.cols.map(c => (o as any)[c])
+      );
+      this.cdr.markForCheck();
+    } catch (e: any) {
+      const msg = (e?.message ?? String(e)).toLowerCase();
+      if (msg.includes('closed')) {
+        // self-heal: server recycled handle; reattach
+        await this.detach();
+        await this.attach();
+      } else {
+        this.error = e?.message ?? String(e);
+        this.cdr.markForCheck();
+      }
+    }
+  }
+
+  private async onSchemaChanged(): Promise<void> {
+    if (!this.table) return;
+    try {
+      this.cols = (this.table.columns ?? []).map((c: any) => c.name);
+      await this.table.setViewport(this.offset, this.offset + this.pageSize - 1, this.cols);
+      await this.refresh();
+    } catch {}
+  }
+
+  // ---------- paging & scroll ----------
+  async pageFirst() { this.offset = 0; await this.onPage(); }
+  async pagePrev()  { this.offset = Math.max(0, this.offset - this.pageSize); await this.onPage(); }
+  async pageNext()  { this.offset = this.offset + this.pageSize; await this.onPage(); }
+  private async onPage() {
+    if (!this.table) return;
+    await this.table.setViewport(this.offset, this.offset + this.pageSize - 1, this.cols);
+    await this.refresh();
+  }
+  onScroll(ev: Event) {
+    const el = ev.target as HTMLElement;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) this.pageNext();
+  }
+
+  // ---------- trackBys ----------
+  trackCol = (_: number, c: string) => c;
+  trackRow = (_: number, r: any[]) => r?.[0] ?? _;
+  trackCell = (_: number, _v: any) => _;
 }
 ```
 
-> If your DH runs somewhere else, change the `target` host/port.
+---
+
+## 3) `src/app/app.component.ts` (standalone shell)
+
+```ts
+import { Component } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { LiveTableComponent } from './live-table/live-table.component';
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [CommonModule, LiveTableComponent],
+  template: `
+    <main style="display:grid; grid-template-columns: 1fr 1fr; gap:1rem">
+      <section>
+        <h2>User</h2>
+        <app-live-table tableName="user"></app-live-table>
+      </section>
+      <section>
+        <h2>Account</h2>
+        <app-live-table tableName="account"></app-live-table>
+      </section>
+      <section style="grid-column:1 / -1">
+        <h2>User × Account (as-of)</h2>
+        <app-live-table tableName="user_account"></app-live-table>
+      </section>
+    </main>
+  `,
+})
+export class AppComponent {}
+```
 
 ---
 
-# 2) Deps
+## 4) `src/main.ts`
 
-```bash
-npm i ag-grid-community ag-grid-angular
-npm i -D @deephaven/jsapi-types
-```
+```ts
+import { bootstrapApplication } from '@angular/platform-browser';
+import { AppComponent } from './app/app.component';
 
-Add AG Grid styles in `src/styles.css`:
-
-```css
-@import "ag-grid-community/styles/ag-grid.css";
-@import "ag-grid-community/styles/ag-theme-alpine.css";
+bootstrapApplication(AppComponent).catch(err => console.error(err));
 ```
 
 ---
 
-# 3) Environment with PSK
-
-`src/environments/environment.ts` (mirror these to `environment.development.ts` if you use Angular’s file replacements)
+## 5) `src/environments/environment.ts`
 
 ```ts
 export const environment = {
   production: false,
-  // Because we proxy /jsapi and /socket through Angular dev server:
-  deephavenBaseUrl: 'http://localhost:4200',
-  deephavenAuth: {
-    // PSK handler class name is required:
-    type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
-    // Put your DH PSK here for local/dev only
-    token: 'YOUR_SUPER_SECRET_PSK'
-  }
+  deephavenUrl: 'http://localhost:10000',
+  deephavenPsk: 'YOUR_PSK_TOKEN',
 };
 ```
 
 ---
 
-# 4) Deephaven service (connect + viewport stream)
+### Important server-side notes
 
-`src/app/services/deephaven.service.ts`
-
-```ts
-import { Injectable, OnDestroy } from '@angular/core';
-import { BehaviorSubject, ReplaySubject } from 'rxjs';
-import { environment } from '../../environments/environment';
-
-// We’ll import the API at runtime from /jsapi/dh-core.js (served by DH)
-type DhNamespace = typeof import('/jsapi/dh-core.js');
-
-@Injectable({ providedIn: 'root' })
-export class DeephavenService implements OnDestroy {
-  private dh?: DhNamespace;
-  private client?: any;         // dh.CoreClient
-  private ide?: any;            // dh.IdeConnection / session
-  private table?: any;          // dh.Table
-  private viewport?: any;       // dh.TableViewportSubscription
-  private unsubscribeViewport?: (() => void) | undefined;
-  private connected = false;
-
-  // Expose to components:
-  readonly columns$ = new ReplaySubject<string[]>(1);
-  readonly rows$ = new BehaviorSubject<any[]>([]);
-
-  /** Connect once using PSK auth */
-  private async ensureConnected(): Promise<void> {
-    if (this.connected) return;
-
-    const dh: DhNamespace = await import('/jsapi/dh-core.js') as any;
-    this.dh = dh;
-
-    this.client = new dh.CoreClient(environment.deephavenBaseUrl);
-    await this.client.login(environment.deephavenAuth); // PSK login
-    this.connected = true;
-  }
-
-  /**
-   * Open a server-side table variable by name via an IDE session.
-   * Your table variable name is 'user'.
-   */
-  async openUserTable(): Promise<void> {
-    await this.ensureConnected();
-    if (!this.dh || !this.client) throw new Error('Deephaven JSAPI not available');
-
-    // Start Python session (works even if your table was created elsewhere; we just need a session to fetch by name)
-    const ideConn = await this.client.getAsIdeConnection();
-    this.ide = await ideConn.startSession('python');
-
-    // If the 'user' table already exists on the server, just fetch it:
-    this.table = await this.ide.getTable('user');
-
-    await this.subscribeViewport();
-  }
-
-  /** Subscribe to a viewport so updates stream in real time */
-  private async subscribeViewport(): Promise<void> {
-    if (!this.table) throw new Error('No table available');
-
-    // Column names (once)
-    const cols = this.table.columns?.map((c: any) => c.name) ?? [];
-    this.columns$.next(cols);
-
-    // Viewport first 1,000 rows (adjust as you need)
-    this.viewport = this.table.setViewport(0, 999);
-
-    // Push current data immediately
-    const sendRows = async () => {
-      const vp = await this.viewport.getViewportData();
-      const rows = vp.rows.map((row: any) => {
-        const obj: any = {};
-        for (const c of cols) obj[c] = row.get(c);
-        return obj;
-      });
-      this.rows$.next(rows);
-    };
-
-    await sendRows();
-
-    // Stream future updates
-    this.unsubscribeViewport = this.viewport.addEventListener('updated', sendRows);
-  }
-
-  ngOnDestroy(): void {
-    try { this.unsubscribeViewport?.(); } catch {}
-    try { this.viewport?.close?.(); } catch {}
-    try { this.ide?.close?.(); } catch {}
-  }
-}
-```
-
----
-
-# 5) Streaming grid component (standalone, Angular 20)
-
-`src/app/streaming-grid/streaming-grid.component.ts`
-
-```ts
-import { Component, OnDestroy, OnInit, inject } from '@angular/core';
-import { CommonModule } from '@angular/common';
-import { AgGridAngular } from 'ag-grid-angular';
-import { ColDef } from 'ag-grid-community';
-import { Subscription } from 'rxjs';
-import { DeephavenService } from '../services/deephaven.service';
-
-@Component({
-  selector: 'app-streaming-grid',
-  standalone: true,
-  imports: [CommonModule, AgGridAngular],
-  template: `
-    <div class="ag-theme-alpine" style="height: 80vh; width: 100%;">
-      <ag-grid-angular
-        [rowData]="rowData"
-        [columnDefs]="colDefs"
-        [deltaRowDataMode]="true"
-        [getRowId]="getRowId"
-        [rowBuffer]="0"
-        [suppressAnimationFrame]="true"
-      ></ag-grid-angular>
-    </div>
-  `
-})
-export class StreamingGridComponent implements OnInit, OnDestroy {
-  private dh = inject(DeephavenService);
-
-  colDefs: ColDef[] = [];
-  rowData: any[] = [];
-  private subCols?: Subscription;
-  private subRows?: Subscription;
-
-  // If your table has a natural key, use it instead of index.
-  getRowId = (p: any) => p?.data?.__id ?? p.rowIndex;
-
-  async ngOnInit() {
-    await this.dh.openUserTable();
-
-    this.subCols = this.dh.columns$.subscribe(names => {
-      this.colDefs = names.map(n => ({ field: n, sortable: true, filter: true }));
-    });
-
-    this.subRows = this.dh.rows$.subscribe(rows => {
-      // Add a synthetic id if you don’t have a key column
-      this.rowData = rows.map((r, i) => ({ __id: i, ...r }));
-    });
-  }
-
-  ngOnDestroy(): void {
-    this.subCols?.unsubscribe();
-    this.subRows?.unsubscribe();
-  }
-}
-```
-
-Use it in your app shell (standalone):
-
-`src/app/app.component.ts`
-
-```ts
-import { Component } from '@angular/core';
-import { StreamingGridComponent } from './streaming-grid/streaming-grid.component';
-
-@Component({
-  selector: 'app-root',
-  standalone: true,
-  imports: [StreamingGridComponent],
-  template: `<app-streaming-grid></app-streaming-grid>`
-})
-export class AppComponent {}
-```
-
-`main.ts` stays the default bootstrap for standalone apps.
-
----
-
-## Quick checklist
-
-- Start DH (Community/Core) with PSK enabled (`DEEPHAVEN_PSK=YOUR_SUPER_SECRET_PSK` or JVM `-Dauthentication.psk=...`).
+- In Deephaven Python, make sure your append tables and join are **stable globals**:
     
-- Run Angular with the proxy: `npm start`.
-    
-- Open `http://localhost:4200`.
-    
-- You should see the **`user`** table streaming into the grid. If the table grows/ticks on the server, the grid updates live.
+    - `user`, `account`, `user_account`.
+        
+- Use an idempotent script (create consumers only if not present). The “self-heal” in the component will also recover if you do re-run the cell, but avoiding constant re-creation is best.
     
 
 ---
 
-## Common gotchas (and fixes)
+With these files:
 
-- **“loaddhcore is not a function” / cannot import JSAPI**  
-    Always import from `/jsapi/dh-core.js` (served by your DH), not from npm. The dynamic `await import('/jsapi/dh-core.js')` is correct.
+- The UI **auto-updates** whenever DH pushes ticks.
     
-- **401 / still asks for auth**  
-    Verify handler **type** string and **token** match server config exactly:
+- If the server recycles a handle (e.g., you re-run the cell), the component **re-attaches** automatically.
     
-    ```ts
-    await client.login({
-      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
-      token: 'YOUR_SUPER_SECRET_PSK'
-    });
-    ```
-    
-- **CORS / WebSocket blocked**  
-    Use the proxy above in dev. In prod, front a reverse proxy so your Angular app and DH share origin (forward `/jsapi` and `/socket` to DH).
-    
-- **Big tables lag**  
-    Lower the viewport (`setViewport(0, 199)`), and prefer server-side filters/sorts.
+- No table closes from Angular (prevents “table already closed” errors).
     
 
----
-
-If you also have a **namespace path** for the same table (e.g., `['App', 'user']`), I can show you the `ObjectService` version too. But with your info, the IDE variable fetch (`getTable('user')`) is the simplest and streams in real time.
+If you want the AG-Grid view later, we can wire the same viewport+snapshot approach into an AG-Grid adapter, but this version gets you streaming right now without the AG Grid v34 API friction you hit earlier.
