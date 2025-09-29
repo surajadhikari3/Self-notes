@@ -3848,3 +3848,215 @@ export class LiveTableComponent implements OnInit, OnDestroy {
     
 
 Use the same environment values as before (server URL + PSK). With this in place, you should see the grid keep updating even if you re-run the server script, without any more “table already closed” crashes.
+
+
+-------------------------
+
+Here you go — a **complete, copy-paste** `deephaven.service.ts` that:
+
+- Logs in with **PSK**
+    
+- Opens a **Python IDE session**
+    
+- Fetches tables by **name** from the server session
+    
+- Lists columns
+    
+- Provides **robust live binding** that auto-recovers when a table is closed/replaced on the server (e.g., after you re-run the script)
+    
+
+> Adjust the `environment` import path if yours is different; it expects:
+> 
+> ```ts
+> // environment.ts
+> export const environment = {
+>   deephavenUrl: 'http://localhost:10000',   // or your DH server URL
+>   deephavenPsk: 'your-psk-here',
+> };
+> ```
+
+---
+
+```ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { Injectable } from '@angular/core';
+import { environment } from '../environments/environment'; // <-- adjust if needed
+
+/**
+ * DeephavenService
+ * - PSK login
+ * - Python IDE session
+ * - getTable by name
+ * - listColumnNames
+ * - bindByName: resilient live binding with auto-rebind on EVENT_CLOSED
+ */
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh: any | null = null;         // dh-js module (dh-core.js)
+  private client: any | null = null;     // dh.core.Client
+  private ide: any | null = null;        // IDE session connection
+  private ready = false;
+
+  get isReady(): boolean { return this.ready; }
+
+  /** Connect to Deephaven via PSK and open a Python IDE session. Safe to call multiple times. */
+  async connect(): Promise<void> {
+    if (this.ready && this.dh && this.client && this.ide) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    // Load dh-core.js **from the DH server** so versions match
+    const coreUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    // @ts-ignore – dynamic import of an absolute URL
+    this.dh = await import(/* @vite-ignore */ coreUrl);
+
+    this.client = new this.dh.core.Client(serverUrl);
+
+    // PSK login (works with modern DH)
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    // Get an IDE session (Python)
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+    this.ready = true;
+  }
+
+  /** Fetch a table handle by name from the IDE session. */
+  async getTable(tableName: string): Promise<any> {
+    await this.connect();
+    if (!tableName) throw new Error('getTable: tableName is empty');
+
+    // dh-js exposes either getTable(name) or getObject(name)
+    if (typeof this.ide.getTable === 'function') {
+      return await this.ide.getTable(tableName);
+    }
+    if (typeof this.ide.getObject === 'function') {
+      const obj = await this.ide.getObject(tableName);
+      if (!obj?.isTable && typeof obj?.isTable !== 'boolean') {
+        // Some builds return a Table for existing names; treat as table if it has columns
+        if (obj?.columns) return obj;
+      }
+      if (obj?.isTable) return obj;
+      throw new Error(`Object '${tableName}' is not a table`);
+    }
+    // Fallback: evaluate Python to return the table by name (no-op server side if it already exists)
+    const code = `__tmp = ${tableName}; __tmp`;
+    const t = await this.ide.evaluateCode(code);
+    if (!t) throw new Error(`Table '${tableName}' not found`);
+    return t;
+  }
+
+  /** Get simple string column names for a table. */
+  listColumnNames(table: any): string[] {
+    try {
+      const cols = (table?.columns ?? []) as any[];
+      return cols.map((c: any) => c?.name ?? '').filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  // ------------- Live binding (auto-rebind on table close) -------------
+
+  private isClosedError(err: unknown): boolean {
+    const msg = String((err as any)?.message ?? err ?? '');
+    return msg.includes('Table already closed') || msg.includes('closed, cannot be used again');
+  }
+
+  /**
+   * Subscribe to live updates for a server table by name.
+   * Returns an unbind() function to stop listening.
+   *
+   * - Automatically re-fetches and re-binds if the server closes/replaces the table
+   *   (common when you re-run your Python script).
+   */
+  async bindByName(
+    tableName: string,
+    onRows: (rows: any[]) => void,
+    columnNames?: string[],
+    viewportRows = 10000
+  ): Promise<() => void> {
+    await this.connect();
+
+    let cancelled = false;
+    let table: any | null = null;
+    let vp: any | null = null;
+    let colRefs: any[] = [];
+
+    const cleanup = () => {
+      try { table?.removeEventListener?.(table.EVENT_UPDATED, onUpdate); } catch {}
+      try { table?.removeEventListener?.(table.EVENT_CLOSED, onClosed); } catch {}
+      try { vp?.close?.(); } catch {}
+      vp = null;
+    };
+
+    const safeSnapshot = async () => {
+      if (!table) return;
+      try {
+        const snap = await table.snapshot(colRefs);
+        onRows(snap.toObjects());
+      } catch (e) {
+        // If the table was closed between event and snapshot, let onClosed handle recovery
+        if (!this.isClosedError(e)) {
+          // other transient races can be ignored to keep UI smooth
+        }
+      }
+    };
+
+    const onUpdate = async () => {
+      if (cancelled) return;
+      await safeSnapshot();
+    };
+
+    const onClosed = async () => {
+      if (cancelled) return;
+      cleanup();
+      // Re-acquire by name; tolerate races while the script is re-running
+      try {
+        table = await this.getTable(tableName);
+        colRefs = Array.isArray(columnNames) && columnNames.length
+          ? table.findColumns(...columnNames)
+          : (table.columns as any[]);
+        vp = await table.setViewport(0, viewportRows, colRefs);
+        table.addEventListener(table.EVENT_UPDATED, onUpdate);
+        table.addEventListener(table.EVENT_CLOSED, onClosed);
+        await safeSnapshot();
+      } catch {
+        if (!cancelled) setTimeout(onClosed, 300); // retry until server exposes the table again
+      }
+    };
+
+    // Initial bind
+    table = await this.getTable(tableName);
+    colRefs = Array.isArray(columnNames) && columnNames.length
+      ? table.findColumns(...columnNames)
+      : (table.columns as any[]);
+    vp = await table.setViewport(0, viewportRows, colRefs);
+    table.addEventListener(table.EVENT_UPDATED, onUpdate);
+    table.addEventListener(table.EVENT_CLOSED, onClosed);
+    await safeSnapshot();
+
+    // Return unsubscriber
+    return () => { cancelled = true; cleanup(); };
+  }
+}
+```
+
+**How to use from your component**
+
+```ts
+// Example
+await this.dh.bindByName(
+  'user',                       // table in your DH Python globals
+  (rows) => { this.rows = rows; this.cdr.markForCheck(); },
+  ['KafkaPartition','KafkaOffset','KafkaTimestamp','userId','name','email'] // optional
+);
+```
+
+This service avoids calling `table.close()` from the client and will **auto-rebind** whenever the server closes the old ticket, eliminating the “Table already closed” crash while you iterate on the Deephaven script.
