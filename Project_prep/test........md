@@ -1873,3 +1873,199 @@ export class JoinTablesComponent implements OnInit, OnDestroy {
     
 
 If your server table globals are named differently, just change `'users_ui'` / `'accounts_ui'` in the component.
+
+--------------------------------------
+
+
+Great—your screenshots make it clear what’s happening:
+
+- `this.ide.getVariables is not a function` means your JSAPI build doesn’t expose that helper on the IDE connection.
+    
+- And earlier “Cannot use 'in' operator to search for 'type' in users_ui” happens because `ide.getObject('users_ui')` sometimes returns a **ticket string**, not the `{ type: 'Table', ... }` descriptor.
+    
+
+You don’t need `getVariables` at all. Resolve tickets directly.
+
+# Drop-in fix (service)
+
+Replace your service with this version. It logs in with PSK, fetches globals, and **auto-resolves ticket strings** returned by `getObject(name)`. It also streams via a **viewport** (no snapshots), so you won’t hit “table already closed”.
+
+```ts
+// src/app/deephaven.service.ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject, Observable } from 'rxjs';
+import { environment } from '../environments/environment';
+
+type Rows = any[];
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: any;
+  private client!: any;        // CoreClient
+  private ide!: any;           // IDE connection
+  private ready = false;
+
+  private handles = new Map<string, any>();
+  private streams = new Map<string, BehaviorSubject<Rows>>();
+  private listeners = new Map<string, () => void>();
+
+  /** Connect once using PSK */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl.replace(/\/+$/, '');
+    const psk = environment.deephavenPsk;
+    if (!serverUrl || !psk) throw new Error('Missing deephavenUrl or deephavenPsk');
+
+    // Load JSAPI directly from the DH server
+    const mod = await import(/* @vite-ignore */ `${serverUrl}/jsapi/dh-core.js?ts=${Date.now()}`);
+    this.dh = mod.default ?? mod;
+
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+
+    this.ready = true;
+  }
+
+  /** Robust: get a Table handle by global name, resolving string tickets if needed */
+  private async getTableHandle(varName: string): Promise<any> {
+    await this.connect();
+
+    const cached = this.handles.get(varName);
+    if (cached && !cached.isClosed?.()) return cached;
+
+    // 1) Ask for the object by name
+    const obj = await this.ide.getObject(varName);
+
+    // 2) If it already looks like a Table, use it
+    if (obj && typeof obj === 'object' && obj.type === 'Table') {
+      this.handles.set(varName, obj);
+      return obj;
+    }
+
+    // 3) If the IDE returned a string or {ticket: "..."} descriptor, resolve by ticket
+    if (typeof obj === 'string' || (obj && typeof obj === 'object' && 'ticket' in obj)) {
+      const ticket = typeof obj === 'string' ? obj : obj.ticket;
+      const resolved = await this.ide.getObject({ type: 'Table', ticket });
+      if (!resolved || resolved.type !== 'Table') {
+        throw new Error(`Global '${varName}' resolved by ticket but is not a Table`);
+      }
+      this.handles.set(varName, resolved);
+      return resolved;
+    }
+
+    // 4) Not found / wrong type
+    throw new Error(`Global '${varName}' not found as a Table on this server build.`);
+  }
+
+  /** Live rows stream via viewport (avoids “table already closed”) */
+  async stream(varName: string, pageSize = 1000): Promise<Observable<Rows>> {
+    const existing = this.streams.get(varName);
+    if (existing) return existing.asObservable();
+
+    const table = await this.getTableHandle(varName);
+    const subject = new BehaviorSubject<Rows>([]);
+    this.streams.set(varName, subject);
+
+    const push = () => {
+      try {
+        const vp = table.getViewportData?.();
+        subject.next(vp?.rows ?? []);
+      } catch {
+        /* ignore transient reads while the table mutates */
+      }
+    };
+
+    const cols = table.columns?.map((c: any) => c.name) ?? [];
+    await table.setViewport(0, Math.max(0, pageSize - 1), cols);
+    push();
+
+    const onUpdated = () => push();
+    await table.addEventListener(this.dh.Table.EVENT_UPDATED, onUpdated);
+    this.listeners.set(varName, () => table.removeEventListener(this.dh.Table.EVENT_UPDATED, onUpdated));
+
+    return subject.asObservable();
+  }
+
+  /** Optional teardown */
+  async disconnect(): Promise<void> {
+    for (const stop of this.listeners.values()) {
+      try { stop(); } catch {}
+    }
+    this.listeners.clear();
+
+    for (const t of this.handles.values()) {
+      try { await t.close?.(); } catch {}
+    }
+    this.handles.clear();
+
+    for (const s of this.streams.values()) s.complete();
+    this.streams.clear();
+
+    try { await this.ide?.close?.(); } catch {}
+    try { await this.client?.close?.(); } catch {}
+    this.ready = false;
+  }
+}
+```
+
+### Component usage (unchanged)
+
+```ts
+// src/app/join-tables.component.ts
+import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Subscription } from 'rxjs';
+import { DeephavenService } from './deephaven.service';
+
+@Component({
+  selector: 'app-join-tables',
+  template: `
+    <section class="card">
+      <h3>Users</h3>
+      <pre>{{ users | json }}</pre>
+    </section>
+
+    <section class="card">
+      <h3>Accounts</h3>
+      <pre>{{ accounts | json }}</pre>
+    </section>
+  `,
+})
+export class JoinTablesComponent implements OnInit, OnDestroy {
+  users: any[] = [];
+  accounts: any[] = [];
+  private subs: Subscription[] = [];
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    try {
+      this.subs.push((await this.dh.stream('users_ui')).subscribe(r => (this.users = r)));
+      this.subs.push((await this.dh.stream('accounts_ui')).subscribe(r => (this.accounts = r)));
+    } catch (e: any) {
+      this.users = [e?.message ?? String(e)];
+      this.accounts = [e?.message ?? String(e)];
+    }
+  }
+
+  ngOnDestroy() {
+    this.subs.forEach(s => s.unsubscribe());
+    // optionally: void this.dh.disconnect();
+  }
+}
+```
+
+### Notes
+
+- Keep your **vite** settings you already added (ignore dynamic import analysis for `/jsapi/dh-core.js` and exclude `@deephaven/jsapi-bootstrap`).
+    
+- On the **server**, just ensure those globals exist (your screenshots show `users_ui`, `accounts_ui`, `user_accounts_ui` are there). You don’t need to change the DH script for this client fix.
+    
+
+This removes the `getVariables` dependency and handles the ticket-string case, so you shouldn’t see the “‘type’ in …” error again, and you’ll keep a stable viewport (no table-closed).
