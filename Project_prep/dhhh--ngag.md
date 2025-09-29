@@ -4060,3 +4060,266 @@ await this.dh.bindByName(
 ```
 
 This service avoids calling `table.close()` from the client and will **auto-rebind** whenever the server closes the old ticket, eliminating the “Table already closed” crash while you iterate on the Deephaven script.
+
+-----
+
+You’re getting “Cannot read properties of undefined (reading 'client')” because the Deephaven client never finishes initializing (so `this.client` is still `undefined`). That happens when the jsapi module isn’t loaded from your DH server (wrong URL/port, missing protocol, or a failed dynamic import), so every call after `connect()` blows up.
+
+Below is a small, **working** pair: a robust Deephaven service and a minimal live table component. It:
+
+- Loads `dh-core.js` from your DH server (must be reachable, e.g. `http://localhost:10000`)
+    
+- Logs in with PSK
+    
+- Starts a Python IDE session
+    
+- Fetches a table by name and streams rows
+    
+- Auto-recovers if the table is closed/replaced on the server
+    
+
+## 1) `environment.ts`
+
+```ts
+export const environment = {
+  production: false,
+  deephavenUrl: 'http://localhost:10000',   // MUST include protocol + port
+  deephavenPsk: 'YOUR_PSK_HERE'
+};
+```
+
+## 2) `deephaven.service.ts`
+
+```ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { Injectable } from '@angular/core';
+import { environment } from '../environments/environment';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh: any | null = null;          // jsapi module
+  private client: any | null = null;      // dh Client
+  private ide: any | null = null;         // IDE connection
+  private connectPromise: Promise<void> | null = null;
+
+  get isReady(): boolean { return !!(this.client && this.ide && this.dh); }
+
+  /** Load jsapi, login with PSK, start Python session. Idempotent. */
+  async connect(): Promise<void> {
+    if (this.isReady) return;
+    if (this.connectPromise) return this.connectPromise;
+
+    const serverUrl = environment.deephavenUrl?.trim();
+    const psk = environment.deephavenPsk?.trim();
+    if (!serverUrl?.startsWith('http')) {
+      throw new Error(`environment.deephavenUrl must include protocol, got "${serverUrl}"`);
+    }
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    this.connectPromise = (async () => {
+      // 1) Load JS API directly from the DH server
+      const jsapiUrl =
+        `${serverUrl.replace(/\/+$/, '')}/jsapi/dh-core.js?ts=${Date.now()}`;
+      this.dh = await import(/* @vite-ignore */ jsapiUrl);
+
+      // 2) Create client + login (PSK)
+      this.client = new this.dh.Client(serverUrl);
+      await this.client.login({
+        type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+        token: psk,
+      });
+
+      // 3) Get IDE connection and start Python session
+      this.ide = await this.client.getAsIdeConnection();
+      await this.ide.startSession('python');
+    })();
+
+    try {
+      await this.connectPromise;
+    } finally {
+      // Ensure subsequent calls don’t await an old rejected promise
+      if (!this.isReady) this.connectPromise = null;
+    }
+  }
+
+  /** Get a table handle by exported/global name. */
+  async getTable(tableName: string): Promise<any> {
+    await this.connect();
+    if (!this.ide) throw new Error('IDE connection not ready');
+    return this.ide.getTable(tableName);
+  }
+
+  listColumnNames(table: any): string[] {
+    return (table?.columns ?? []).map((c: any) => c?.name ?? '').filter(Boolean);
+  }
+
+  private isClosedError(err: unknown): boolean {
+    const m = String((err as any)?.message ?? err ?? '');
+    return m.includes('Table already closed') || m.includes('closed, cannot be used again');
+  }
+
+  /** Robust live binding that auto-recovers after table close/replacement. */
+  async bindByName(
+    tableName: string,
+    onRows: (rows: any[]) => void,
+    columnNames?: string[],
+    viewportRows = 10000
+  ): Promise<() => void> {
+    await this.connect();
+
+    let cancelled = false;
+    let table: any | null = null;
+    let vp: any | null = null;
+    let cols: any[] = [];
+
+    const cleanup = () => {
+      try { table?.removeEventListener?.(table.EVENT_UPDATED, onUpdate); } catch {}
+      try { table?.removeEventListener?.(table.EVENT_CLOSED, onClosed); } catch {}
+      try { vp?.close?.(); } catch {}
+      vp = null;
+    };
+
+    const safeSnapshot = async () => {
+      if (!table) return;
+      try {
+        const snap = await table.snapshot(cols);
+        onRows(snap.toObjects());
+      } catch (e) {
+        if (this.isClosedError(e)) return; // onClosed will handle
+      }
+    };
+
+    const onUpdate = async () => {
+      if (!cancelled) await safeSnapshot();
+    };
+
+    const onClosed = async () => {
+      if (cancelled) return;
+      cleanup();
+      try {
+        table = await this.getTable(tableName);
+        cols = columnNames?.length ? table.findColumns(...columnNames) : table.columns;
+        vp = await table.setViewport(0, viewportRows, cols);
+        table.addEventListener(table.EVENT_UPDATED, onUpdate);
+        table.addEventListener(table.EVENT_CLOSED, onClosed);
+        await safeSnapshot();
+      } catch {
+        if (!cancelled) setTimeout(onClosed, 300);
+      }
+    };
+
+    // Initial attach
+    table = await this.getTable(tableName);
+    cols = columnNames?.length ? table.findColumns(...columnNames) : table.columns;
+    vp = await table.setViewport(0, viewportRows, cols);
+    table.addEventListener(table.EVENT_UPDATED, onUpdate);
+    table.addEventListener(table.EVENT_CLOSED, onClosed);
+    await safeSnapshot();
+
+    return () => { cancelled = true; cleanup(); };
+  }
+}
+```
+
+## 3) `live-table.component.ts`
+
+```ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { Component, Input, OnInit, OnDestroy, ChangeDetectorRef, ChangeDetectionStrategy } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { DeephavenService } from '../deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+<section class="card">
+  <h3 style="font-family: ui-monospace, monospace">{{ tableName }}</h3>
+
+  <div *ngIf="error" style="color:#b00">{{ error }}</div>
+  <div *ngIf="!error && loading">Connecting…</div>
+
+  <table *ngIf="!error && !loading && rows.length">
+    <thead><tr>
+      <th *ngFor="let c of cols; trackBy: trackCol">{{ c }}</th>
+    </tr></thead>
+    <tbody>
+      <tr *ngFor="let r of rows; trackBy: trackRow">
+        <td *ngFor="let c of cols; trackBy: trackCol">{{ r[c] }}</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+  `
+})
+export class LiveTableComponent implements OnInit, OnDestroy {
+  @Input() tableName = '';          // must match the exported DH variable name
+  @Input() columns: string[] | null = null;
+
+  loading = false;
+  error: string | null = null;
+  cols: string[] = [];
+  rows: any[] = [];
+  private unbind: (() => void) | null = null;
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  async ngOnInit(): Promise<void> {
+    try {
+      this.loading = true;
+      this.cdr.markForCheck();
+
+      await this.dh.connect();
+
+      const t = await this.dh.getTable(this.tableName);
+      this.cols = this.columns?.length ? this.columns : this.dh.listColumnNames(t);
+      this.cdr.markForCheck();
+
+      this.unbind = await this.dh.bindByName(
+        this.tableName,
+        (rows) => { this.rows = rows; this.cdr.markForCheck(); },
+        this.columns ?? undefined
+      );
+
+      this.loading = false;
+      this.cdr.markForCheck();
+    } catch (e: any) {
+      this.loading = false;
+      this.error = (e?.message ?? e ?? 'Failed to connect').toString();
+      this.cdr.markForCheck();
+    }
+  }
+
+  ngOnDestroy(): void {
+    try { this.unbind?.(); } catch {}
+    this.unbind = null;
+  }
+
+  trackCol = (_: number, c: string) => c;
+  trackRow = (_: number, r: any) => r?.__row ?? _;
+}
+```
+
+## What to verify (this is crucial)
+
+1. Your DH server exposes `http://localhost:10000/jsapi/dh-core.js` in the browser (open it in a tab).
+    
+2. `environment.deephavenUrl` includes the protocol (`http://`) and correct port.
+    
+3. The Python script in DH has exported variables with **exact** names you use in Angular, e.g.:
+    
+    ```python
+    # in the DH IDE
+    # user and account are exported as globals
+    user = user_raw.update_view([...])           # whatever transformation
+    account = account_raw.update_view([...])
+    ```
+    
+    If the variable is named `user`, pass `tableName="user"`. (Names are case-sensitive.)
+    
+4. If you re-run the DH script, the table handles change — the service’s auto-rebind handles it; you should not see “table already closed” anymore.
+    
+
+If you still see “Cannot read … client”, check the browser **Network** tab for a failed request to `/jsapi/dh-core.js`. Fix the URL or CORS, and the rest will come alive.
