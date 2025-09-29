@@ -274,3 +274,181 @@ Ensure your DH session actually exports globals named `user` and `account`.
     
 
 This setup streams rows continuously without classcast or “already closed” errors.
+
+-----------------------------------
+
+
+Got it — your JSAPI build doesn’t expose `client.login()` the way mine did. Deephaven has shipped a couple of API shapes over time:
+
+- **Newer builds** expose a **top-level `login({...}, url)`** that returns a logged-in client.
+    
+- Others expose **`new CoreClient(url)` + `client.login({...})`**.
+    
+- A few older ones had **`new Client(url)`**.
+    
+
+Let’s make the service handle **all three** cleanly so you don’t have to guess which version you have. Everything else (IDE session, table streaming) stays the same.
+
+# Drop-in Deephaven service (version-agnostic auth)
+
+`src/app/deephaven/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+import { BehaviorSubject, Observable } from 'rxjs';
+
+type DH = any;
+type CoreLikeClient = any;
+type Ide = any;
+type Table = any;
+type Viewport = any;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DH;
+  private client!: CoreLikeClient;
+  private ide!: Ide;
+  private ready = false;
+
+  get isReady() { return this.ready; }
+
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const base = environment.deephavenUrl?.replace(/\/+$/, '');
+    const psk = environment.deephavenPsk;
+    if (!base) throw new Error('environment.deephavenUrl is not set');
+    if (!psk) throw new Error('environment.deephavenPsk is not set');
+
+    // Load the JSAPI directly from the DH server you’re connecting to
+    const jsapiUrl = `${base}/jsapi/dh-core.js?ts=${Date.now()}`;
+    const mod: any = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod?.default ?? mod;
+
+    // ---- Auth across API shapes -------------------------------------------
+    const creds = {
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    };
+
+    // Case A: top-level login(dhCreds, url) -> client
+    if (typeof this.dh?.login === 'function') {
+      this.client = await this.dh.login(creds, base);
+
+    } else {
+      // Case B or C: instantiate client then login
+      const Ctor = this.dh?.CoreClient ?? this.dh?.Client;
+      if (!Ctor) throw new Error('Neither CoreClient nor Client found in JSAPI');
+
+      this.client = new Ctor(base);
+
+      // Some builds name it login, others authenticate
+      const loginFn =
+        (this.client as any).login ??
+        (this.client as any).authenticate ??
+        null;
+
+      if (typeof loginFn === 'function') {
+        await loginFn.call(this.client, creds);
+      } else {
+        throw new Error('Client has no login/authenticate function – JSAPI mismatch');
+      }
+    }
+    // -----------------------------------------------------------------------
+
+    // IDE/session handle (supports both APIs)
+    if (typeof this.client.getAsIdeConnection === 'function') {
+      this.ide = await this.client.getAsIdeConnection();
+    } else if (typeof this.client.getAsIde === 'function') {
+      this.ide = await this.client.getAsIde();
+    } else if (typeof this.client.getIde === 'function') {
+      this.ide = await this.client.getIde();
+    } else {
+      throw new Error('No IDE connection function on client');
+    }
+
+    if (typeof this.ide.startSession === 'function') {
+      await this.ide.startSession('python');
+    }
+
+    this.ready = true;
+  }
+
+  /** Return a *server-exported* table by variable name */
+  async getTable(varName: string): Promise<Table> {
+    if (!this.ready) await this.connect();
+    const obj = await this.ide.getObject(varName);
+    if (!obj || obj.type !== 'Table') {
+      throw new Error(`Global '${varName}' is not a Table`);
+    }
+    return obj;
+  }
+
+  /** Stream a table as rows (we manage only the viewport; we never close globals) */
+  streamTable(varName: string): {
+    cols$: Observable<string[]>;
+    rows$: Observable<any[]>;
+    dispose: () => Promise<void>;
+  } {
+    const cols$ = new BehaviorSubject<string[]>([]);
+    const rows$ = new BehaviorSubject<any[]>([]);
+
+    let table: Table | null = null;
+    let vp: Viewport | null = null;
+    let onUpdate: ((e: any) => void) | null = null;
+    let disposed = false;
+
+    const toObjects = (snap: any) => snap?.toObjects?.() ?? [];
+
+    const attach = async () => {
+      try {
+        await this.connect();
+        table = await this.getTable(varName);
+
+        const cols = (table.columns ?? []).map((c: any) => c.name);
+        cols$.next(cols);
+
+        vp = await table.setViewport(0, 1000, cols);
+        const first = await table.snapshot(cols);
+        rows$.next(toObjects(first));
+
+        onUpdate = async () => {
+          try {
+            if (!table) return;
+            const snap = await table.snapshot(cols);
+            rows$.next(toObjects(snap));
+          } catch (err: any) {
+            const msg = String(err?.message || err);
+            if (!/already closed/i.test(msg)) console.warn('[DH] snapshot error:', msg);
+          }
+        };
+        table.addEventListener(this.dh.Table.EVENT_UPDATED, onUpdate);
+      } catch (e) {
+        cols$.error(e);
+        rows$.error(e);
+      }
+    };
+
+    const dispose = async () => {
+      if (disposed) return;
+      disposed = true;
+      try { if (table && onUpdate) table.removeEventListener(this.dh.Table.EVENT_UPDATED, onUpdate); } catch {}
+      try { if (vp) await vp.close(); } catch {}
+      table = null; vp = null; onUpdate = null;
+    };
+
+    void attach();
+    return { cols$: cols$.asObservable(), rows$: rows$.asObservable(), dispose };
+  }
+}
+```
+
+### Notes
+
+- Keep `environment.deephavenUrl` like `http://localhost:10000` and `environment.deephavenPsk` set.
+    
+- We no longer call `new this.dh.Client(...).login()` unconditionally; the service picks the right path based on what your JSAPI exposes.
+    
+
+Your `LiveTableComponent` from my previous message works unchanged. If you need it again, ping me and I’ll repost — but once this service connects, those “`.client.login is not a function`” errors will disappear.
