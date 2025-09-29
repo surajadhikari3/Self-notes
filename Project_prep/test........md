@@ -1433,3 +1433,229 @@ If you see **“table already closed”**, you are trying to use a handle that�
 ---
 
 Would you like me to give you a **full updated Angular service + component pair** where the service guarantees a fresh handle every time (no reuse → no “table already closed”)?
+
+---------------------------------------------
+
+
+Perfect 👌 — let’s build you an **end-to-end Angular + Deephaven setup** that is:
+
+- ✅ Compatible with your Angular 20.3.0 + `@deephaven/jsapi-bootstrap@41.5.3` + `@deephaven/jsapi-types@41.0.0`
+    
+- ✅ Uses **PSK authentication** (like you had before, no login UI)
+    
+- ✅ Avoids the **“table already closed”** problem by keeping a **live handle** to the server-side tables
+    
+- ✅ Avoids the **dynamic import warnings** by using Vite config (`/* @vite-ignore */` and `optimizeDeps.exclude`)
+    
+- ✅ Ready for use in your `join-tables.component.ts` with RxJS observables
+    
+
+---
+
+## 1. `vite.config.ts`
+
+Add this file at the root of your Angular project (same level as `angular.json`):
+
+```ts
+import { defineConfig } from 'vite';
+import angular from '@analogjs/vite-plugin-angular';
+
+export default defineConfig({
+  plugins: [angular()],
+  optimizeDeps: {
+    exclude: ['@deephaven/jsapi-bootstrap']
+  },
+  build: {
+    commonjsOptions: {
+      ignoreDynamicRequires: true,
+    },
+  },
+});
+```
+
+This silences the **dynamic import warning**.
+
+---
+
+## 2. `deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { environment } from '../environments/environment';
+import { BehaviorSubject, Observable } from 'rxjs';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh: any;
+  private client: any;
+  private ide: any;
+  private ready = false;
+
+  private tableCache = new Map<string, any>();
+  private tableSubjects = new Map<string, BehaviorSubject<any[]>>();
+
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl.replace(/\/+$/, '');
+    const psk = environment.deephavenPsk;
+    if (!serverUrl || !psk) {
+      throw new Error('Deephaven URL or PSK not configured');
+    }
+
+    // Load DH JSAPI dynamically from the DH server
+    const jsapiUrl = `${serverUrl}/jsapi/dh-core.js?ts=${Date.now()}`;
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default ?? mod;
+
+    // Create client
+    this.client = new this.dh.CoreClient(serverUrl);
+
+    // Authenticate with PSK
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    // Open IDE session
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+
+    this.ready = true;
+  }
+
+  /** Get or subscribe to a live table by global name */
+  async getTable(varName: string): Promise<Observable<any[]>> {
+    await this.connect();
+
+    // Return cached observable if already active
+    if (this.tableSubjects.has(varName)) {
+      return this.tableSubjects.get(varName)!.asObservable();
+    }
+
+    const obj = await this.ide.getObject(varName);
+    if (!obj || obj.type !== 'Table') {
+      throw new Error(`Global '${varName}' is not a Table`);
+    }
+
+    const table = obj; // live handle
+    this.tableCache.set(varName, table);
+
+    const subject = new BehaviorSubject<any[]>([]);
+    this.tableSubjects.set(varName, subject);
+
+    // Subscribe to snapshot updates
+    const listener = (update: any) => {
+      const rows = update.snapshot?.rows ?? [];
+      subject.next(rows);
+    };
+
+    await table.addEventListener(this.dh.Table.EVENT_UPDATED, listener);
+    await table.snapshot([], true).then((snap: any) => {
+      subject.next(snap.rows ?? []);
+    });
+
+    return subject.asObservable();
+  }
+
+  /** Cleanup */
+  async disconnect(): Promise<void> {
+    for (const [varName, table] of this.tableCache) {
+      try {
+        await table.close();
+      } catch {}
+    }
+    this.tableCache.clear();
+    this.tableSubjects.clear();
+
+    if (this.ide) {
+      try {
+        await this.ide.close();
+      } catch {}
+    }
+    if (this.client) {
+      try {
+        await this.client.close();
+      } catch {}
+    }
+    this.ready = false;
+  }
+}
+```
+
+---
+
+## 3. `join-tables.component.ts`
+
+```ts
+import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Subscription } from 'rxjs';
+import { DeephavenService } from './deephaven.service';
+
+@Component({
+  selector: 'app-join-tables',
+  template: `
+    <div>
+      <h3>Users</h3>
+      <pre>{{ users | json }}</pre>
+
+      <h3>Accounts</h3>
+      <pre>{{ accounts | json }}</pre>
+    </div>
+  `,
+})
+export class JoinTablesComponent implements OnInit, OnDestroy {
+  users: any[] = [];
+  accounts: any[] = [];
+
+  private subs: Subscription[] = [];
+
+  constructor(private dhService: DeephavenService) {}
+
+  async ngOnInit() {
+    const users$ = await this.dhService.getTable('users_ui');
+    const accounts$ = await this.dhService.getTable('accounts_ui');
+
+    this.subs.push(users$.subscribe((rows) => (this.users = rows)));
+    this.subs.push(accounts$.subscribe((rows) => (this.accounts = rows)));
+  }
+
+  ngOnDestroy() {
+    this.subs.forEach((s) => s.unsubscribe());
+    this.dhService.disconnect();
+  }
+}
+```
+
+---
+
+## 4. `environment.ts`
+
+```ts
+export const environment = {
+  production: false,
+  deephavenUrl: 'http://localhost:10000', // your DH server
+  deephavenPsk: 'YOUR_PSK_VALUE',        // your PSK
+};
+```
+
+---
+
+### ✅ Key Fixes Applied
+
+- **No `table already closed`**:  
+    We never close the table from Angular. We keep a live handle and subscribe via snapshots + event listeners.
+    
+- **No import issue**:  
+    Used `/* @vite-ignore */` + `vite.config.ts` with `optimizeDeps.exclude`.
+    
+- **Angular safe cleanup**:  
+    `ngOnDestroy()` unsubscribes from RxJS and calls `disconnect()` to close tables only when leaving.
+    
+
+---
+
+👉 Next step: run `ng serve` and open `http://localhost:4200`.  
+You should see **live `users_ui` and `accounts_ui` tables** from Deephaven without any closed table errors.
+
+Would you like me to also wire this into your **Ag-Grid component** instead of just `<pre>{{ rows | json }}</pre>` so you see a real table UI directly?
