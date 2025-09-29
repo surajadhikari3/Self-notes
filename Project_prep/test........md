@@ -830,3 +830,142 @@ export class JoinTablesComponent implements OnInit, OnDestroy {
     
 
 If you want, I can also drop a tiny SCSS to make the three panels responsive.
+
+
+----------------------------------
+
+You’re still tripping a **server-side** `BackingJsObjectError: java.lang.ClassCastException` while reading the viewport.  
+This almost always happens when the table you’re viewing contains **non-JS-friendly types** (e.g., `Instant/DateTime`, `BigDecimal`, `byte[]`) or when a **column’s type changes** mid-stream (append/aj/update pipeline). Your screenshots show the Kafka system columns (`KafkaPartition`, `KafkaOffset`, `KafkaTimestamp`) plus your join—those are classic culprits.
+
+The clean, no-drama fix is:
+
+## 1) Freeze a UI-safe schema in Deephaven (server)
+
+Create “UI tables” that:
+
+- select only the columns you want to display,
+    
+- **cast/convert** tricky types to **string/number**, and
+    
+- keep the **same schema** forever.
+    
+
+Paste this in your DH console (adjust fields as needed):
+
+```python
+# ui_tables.py  -- run this in DH console once (or as your app script)
+
+from deephaven import dtypes as dt
+import deephaven.kafkautil as kc
+
+# ---- your existing specs (keep as-is) ----
+# USER_VALUE_SPEC = kc.json_spec({...})
+# ACCOUNT_VALUE_SPEC = kc.json_spec({...})
+# user_raw  = kc.consume(..., table_type=kc.TableType.append())
+# account_raw = kc.consume(..., table_type=kc.TableType.append())
+# users_hist = user_raw.sort_descending("KafkaTimestamp")
+# user_account = account_raw.aj(
+#     on=["userId", "KafkaTimestamp"],  # or your key(s)
+#     joins=["name","email"]
+# )
+
+# ---- make everything UI-safe and stable ----
+def ui_users(t):
+    return t.view([
+        "kafka_partition = (int)KafkaPartition",
+        "kafka_offset   = (long)KafkaOffset",
+        "kafka_ts       = (String)KafkaTimestamp",   # stringify Instant
+        "userId",
+        "name",
+        "email",
+    ])
+
+def ui_accounts(t):
+    return t.view([
+        "kafka_partition = (int)KafkaPartition",
+        "kafka_offset   = (long)KafkaOffset",
+        "kafka_ts       = (String)KafkaTimestamp",
+        "userId",
+        "accountType",
+        "balance = (double)balance",                 # ensure numeric
+    ])
+
+def ui_join(t):
+    return t.view([
+        "kafka_partition = (int)KafkaPartition",
+        "kafka_offset   = (long)KafkaOffset",
+        "kafka_ts       = (String)KafkaTimestamp",
+        "userId",
+        "accountType",
+        "balance = (double)balance",
+        "name",
+        "email",
+    ])
+
+user         = ui_users(user_raw)
+account      = ui_accounts(account_raw)
+user_account = ui_join(user_account)   # rename if your source variable is same
+```
+
+> Key points  
+> • `(String)KafkaTimestamp` converts DH `Instant` to a stable string.  
+> • We explicitly cast numeric columns to `int/long/double`.  
+> • The three exported globals are **`user`, `account`, `user_account`** (the names your Angular code already uses).
+
+## 2) Tell the Angular side to only request those UI-safe columns
+
+You already generate `columnDefs` from `table.columns`. That will now be the **safe** set (strings + numbers). Nothing else changes on the front-end.
+
+If you still want to be extra defensive, keep the `valueGetter.toString()` you added, but it shouldn’t be necessary once the server exports strings/numbers only.
+
+## 3) Keep the self-healing viewport binder
+
+The `ViewportBinder` you’re using is the right approach for streaming. It already re-acquires a fresh handle and viewport on “table closed”. Two tiny hardening tweaks:
+
+```ts
+// inside ViewportBinder.pushViewport
+private async pushViewport(onRows: (rows: any[]) => void) {
+  const data = await this.sub!.getViewportData();
+  // Some DH builds name it toObjects, others expose rows().toObjects()
+  const rows = data.toObjects?.() ?? data.rows?.toObjects?.() ?? [];
+  onRows(rows);
+}
+
+// wherever you catch(e):
+const msg = (e?.message ?? String(e)).toLowerCase();
+if (msg.includes('closed') || msg.includes('classcastexception')) {
+  await this.rebind(tableName, cols, onRows);
+  return;
+}
+```
+
+That way even if a transient `ClassCastException` bubbles out of the subscription once, you immediately **rebind** to the same exported UI table (which now has a stable schema), and the flood stops.
+
+## 4) Common gotchas (now avoided)
+
+- **Instant / Big types** sent directly to the browser can cause server conversion issues; you’re now stringifying/casting them server-side.
+    
+- **Schema shifts mid-tick** (e.g., join adds a column, or a field flips type): the UI tables `view([...])` pin the output schema.
+    
+- **Duplicate column names from joins**: if you bring columns with same names from both sides, suffix/rename them in the `view([...])`.
+    
+
+---
+
+### What to change right now
+
+1. Run the Python “UI tables” block in your DH console so that the exported names `user`, `account`, `user_account` are schema-stable and JS-friendly.
+    
+2. Keep your latest Angular component and HTML as we structured earlier. No extra changes needed apart from the small binder tweak (optional).
+    
+
+This is the simplest path that:
+
+- stops the `BackingJsObjectError/ClassCastException` spam,
+    
+- streams reliably with `setViewport` updates,
+    
+- and keeps your AG Grid columns consistent across ticks.
+    
+
+If you paste your exact `kc.consume(...)` lines (with only non-secret bits), I can tailor the three `view([...])` lists precisely to your schema.
