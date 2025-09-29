@@ -538,3 +538,70 @@ async listGlobals(): Promise<Array<{ name: string; type: string }>> {
 Your previous code did `obj.type` directly. When `obj` was a string/undefined (e.g., typo like `'acount'`), the runtime threw “Cannot use ‘in’ operator to search for ‘type’…”. The hardened checks gate on `typeof obj === 'object'` and recognize multiple JSAPI shapes, so you’ll either get a clean table back or a precise message telling you what came across.
 
 If you still see it after this change, run `await deephaven.listGlobals()` in your component’s `ngOnInit` and confirm the server really exports `account` / `user`.
+
+-------------------------------------------
+
+Got it — the **`getObject` API isn’t consistent across DH builds**. In some distributions it’s not exposed (hence “Function not implemented”), which is why you’re seeing that error.
+
+Here’s how to make it work reliably:
+
+---
+
+### ✅ Updated `DeephavenService`
+
+Replace your `getTable` with this version:
+
+```ts
+async getTable(varName: string): Promise<any> {
+  if (!this.ready) await this.connect();
+
+  // Use getConsole().getVariableDescriptor instead of getObject
+  const desc = await this.ide.getConsole().getVariableDescriptor(varName);
+
+  if (!desc) {
+    throw new Error(`Global '${varName}' not found on server.`);
+  }
+
+  // Descriptors tell us the type
+  if (desc.type !== 'Table') {
+    throw new Error(`Global '${varName}' is type '${desc.type}', not a Table.`);
+  }
+
+  // Resolve the descriptor to an actual Table handle
+  const tableHandle = await this.ide.getObject(desc);
+  if (!tableHandle) {
+    throw new Error(`Failed to resolve table '${varName}'.`);
+  }
+
+  return tableHandle;
+}
+```
+
+---
+
+### ✅ Why this works
+
+- `getConsole().getVariableDescriptor(name)` → Asks the DH IDE for a descriptor of a global variable (with type info).
+    
+- `getObject(descriptor)` → Resolves that descriptor into a live object (table, figure, etc.).
+    
+- This way, you don’t directly call `getObject(varName)` (which isn’t implemented in your build), but you go through the **descriptor path**, which is supported everywhere.
+    
+
+---
+
+### ⚡ Quick test in Angular component
+
+```ts
+async ngOnInit() {
+  const userTable = await this.dhService.getTable('user');
+  console.log('User table handle', userTable);
+
+  const accountTable = await this.dhService.getTable('account');
+  console.log('Account table handle', accountTable);
+}
+```
+
+---
+
+👉 Question for you: do you want me to also give you the **RxJS live subscription binding** (so Angular automatically updates when DH table changes), or do you just need the table handles fetched correctly first?
