@@ -2197,3 +2197,173 @@ class ViewportBinder {
     
 
 Keep your component exactly as you have it (supplying explicit column names to `bind()`), and you should see rows flow without the earlier exception. If anything still throws, share the **first** error line only and I’ll adjust further.
+
+
+
+--------------------------------------
+
+
+totally — let’s move both the **baseUrl** and your **PSK** into Angular env files and wire the service to read from there. below is a drop-in update that works with **Angular 20.3** and the current Deephaven JS API.
+
+# 1) Environment files
+
+Create/update these (paths are the Angular defaults):
+
+**`src/environments/environment.development.ts`**
+
+```ts
+export const environment = {
+  production: false,
+  deephaven: {
+    // your DH web server
+    baseUrl: 'http://localhost:10000',
+    // ⚠️ for local/dev only — see security note below
+    psk: 'YOUR_DEV_PSK',
+  },
+};
+```
+
+**`src/environments/environment.ts`** (used for prod builds)
+
+```ts
+export const environment = {
+  production: true,
+  deephaven: {
+    baseUrl: 'https://your-prod-dh.example.com',
+    psk: 'YOUR_PROD_PSK', // or leave as '' if you’ll inject at runtime
+  },
+};
+```
+
+> Deephaven’s PSK auth expects the client to **“login” with the PSK** value; the official example calls `client.login({ type: 'io.deephaven.authentication.psk.PskAuthenticationHandler', token: '<psk>' })`. ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/use-jsapi/?utm_source=chatgpt.com "Use the JS API"))  
+> Server-side, PSK is typically set via `-Dauthentication.psk=...` or `DEEPHAVEN_PSK` in Docker. ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/authentication/auth-psk/ "Configure and use pre-shared key authentication | Deephaven"))
+
+# 2) Updated Angular service (reads env vars)
+
+Place this at `src/app/deephaven.service.ts` (adjust the import path to `environment` if your folders differ):
+
+```ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+import { environment } from '../environments/environment';
+
+type DhNs = any; // optionally install @deephaven/jsapi-types for stronger typing
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNs;
+  private client: any;
+  private ideConn: any;
+
+  private _rows$ = new BehaviorSubject<any[]>([]);
+  readonly rows$ = this._rows$.asObservable();
+
+  private viewportCleanup?: () => void;
+
+  /** Connect using baseUrl + PSK pulled from Angular env files */
+  async connect() {
+    // Load the JS API from your DH server
+    this.dh = await import(
+      /* dynamic remote module */
+      `${environment.deephaven.baseUrl}/jsapi/dh-core.js`
+    );
+
+    // Create client and PSK-login
+    this.client = new this.dh.CoreClient(environment.deephaven.baseUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: environment.deephaven.psk,
+    });
+
+    // Get an IdeConnection (entry point to tables)
+    this.ideConn = await this.client.getAsIdeConnection();
+  }
+
+  /**
+   * Subscribe to a table by name and stream a small viewport of rows
+   * into rows$ (array of objects), using JS API events.
+   */
+  async subscribeViewport(tableName: string, top = 0, bottom = 499) {
+    const table = await this.ideConn.getTable(tableName); // documented API
+    // Set a viewport (rows are inclusive) and listen for updates
+    table.setViewport(top, bottom);
+
+    const handleUpdate = async () => {
+      const vpd = await table.getViewportData();
+      const cols = table.columns;
+      const out: any[] = [];
+      for (let i = 0; i < vpd.rows.length; i++) {
+        const row = vpd.rows[i];
+        const rec: any = {};
+        for (const col of cols) rec[col.name] = row.get(col);
+        out.push(rec);
+      }
+      this._rows$.next(out);
+    };
+
+    // initial fill + subsequent updates
+    await handleUpdate();
+    table.addEventListener('update', handleUpdate);
+
+    // keep a cleanup handle
+    this.viewportCleanup = () => {
+      table.removeEventListener('update', handleUpdate);
+      try { table.close?.(); } catch {}
+    };
+  }
+
+  async disconnect() {
+    try { this.viewportCleanup?.(); } finally {
+      try { await this.ideConn?.close?.(); } catch {}
+      try { await this.client?.close?.(); } catch {}
+    }
+  }
+}
+```
+
+- `CoreClient` → `login({ type: '...PskAuthenticationHandler', token: '<psk>' })` is the canonical flow for PSK auth in the JS API examples. ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/use-jsapi/?utm_source=chatgpt.com "Use the JS API"))
+    
+- `IdeConnection.getTable(name)` is the documented way to fetch a named table. ([docs.deephaven.io](https://docs.deephaven.io/core/client-api/javascript/classes/dh.IdeConnection.html "IdeConnection | @deephaven/jsapi-types"))
+    
+- `setViewport` + listen for `update` events is the recommended pattern for streaming view data in browsers. ([deephaven.io](https://deephaven.io/core/docs/reference/js-api/concepts/ "Javascript API Concepts | Deephaven"))
+    
+
+# 3) Minimal component usage (unchanged, just works)
+
+```ts
+// src/app/users-grid.component.ts
+import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Subscription } from 'rxjs';
+import { DeephavenService } from './deephaven.service';
+
+@Component({
+  selector: 'app-users-grid',
+  template: `
+    <pre *ngIf="rows; else loading">{{ rows | json }}</pre>
+    <ng-template #loading>Loading…</ng-template>
+  `,
+})
+export class UsersGridComponent implements OnInit, OnDestroy {
+  rows: any[] = [];
+  private sub?: Subscription;
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    await this.dh.connect();
+    await this.dh.subscribeViewport('users'); // your DH table name
+    this.sub = this.dh.rows$.subscribe(r => (this.rows = r));
+  }
+
+  ngOnDestroy() {
+    this.sub?.unsubscribe();
+    this.dh.disconnect();
+  }
+}
+```
+
+# quick security note (important)
+
+Putting a **PSK in a browser env file exposes it to anyone with devtools**. For production, prefer switching to a real auth flow (e.g., token-based) or placing a tiny backend in front of Deephaven that holds secrets server-side. The docs show PSK for quick starts; treat it as **dev-only**. ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/use-jsapi/?utm_source=chatgpt.com "Use the JS API"))
+
+If you want, I can show you a **runtime config** pattern (load `/assets/runtime-config.json` so ops can set `baseUrl`/`psk` without rebuilds), or a tiny Node proxy that keeps the PSK off the client.
