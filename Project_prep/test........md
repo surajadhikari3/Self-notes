@@ -2696,3 +2696,105 @@ export class UsersGridComponent implements OnInit, OnDestroy {
     
 
 If you want this wired to AG Grid 34.2.0, say the word and I’ll drop in the grid component (column defs + async rows$ binding).
+
+----------------------------------------------------------------
+
+You’re loading `dh-core.js` from `http://localhost:10000/...`, so your Angular app on `http://localhost:4200` is **cross-origin** → CORS blocks it. Your proxy only helps if the browser hits **/jsapi** on `4200`, not on `10000`. Fix is: use a **relative baseUrl** (through the Angular proxy) so everything is same-origin.
+
+Here’s the clean setup that works:
+
+# 1) Use a proxied base URL
+
+Change your Angular env to point at a **relative** path (no protocol/host):
+
+```ts
+// src/environments/environment.development.ts
+export const environment = {
+  production: false,
+  deephaven: {
+    baseUrl: '/dh',              // 👈 relative; goes through Angular proxy
+    psk: 'YOUR_DEV_PSK'
+  }
+};
+```
+
+(Do the same in `environment.ts` for prod if you want a proxy there too; otherwise set the real DH URL in prod and enable CORS at DH or front it with the same domain.)
+
+# 2) One proxy rule that handles HTTP + WebSocket
+
+Create `proxy.conf.json` (or update yours) to forward **everything under `/dh`** to DH:
+
+```json
+{
+  "/dh": {
+    "target": "http://localhost:10000",
+    "secure": false,
+    "changeOrigin": true,
+    "ws": true,
+    "logLevel": "debug",
+    "pathRewrite": { "^/dh": "" }
+  }
+}
+```
+
+This makes:
+
+- `/dh/jsapi/dh-core.js` → `http://localhost:10000/jsapi/dh-core.js`
+    
+- `/dh/socket` (WebSocket) → `ws://localhost:10000/socket`
+    
+- `/dh/api/...` → `http://localhost:10000/api/...`
+    
+
+Start dev server with the proxy:
+
+```bash
+ng serve --proxy-config proxy.conf.json
+```
+
+(Or add `"proxyConfig": "proxy.conf.json"` under `architect.serve.options` in `angular.json`.)
+
+# 3) Load `dh-core.js` via the proxy (same-origin)
+
+Update your service so it uses the **relative** env baseUrl and loads the script from `/dh/...`:
+
+```ts
+// deephaven.service.ts (key parts)
+private loadDhCore(): Promise<any> {
+  const src = `${environment.deephaven.baseUrl}/jsapi/dh-core.js`; // -> /dh/jsapi/dh-core.js
+  if ((window as any).dh) return Promise.resolve((window as any).dh);
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => (window as any).dh ? resolve((window as any).dh) : reject(new Error('window.dh missing'));
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+async connect() {
+  this.dh = await this.loadDhCore();                       // window.dh is ready
+  this.client = new this.dh.CoreClient(environment.deephaven.baseUrl); // '/dh'
+  await this.client.login({
+    type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+    token: environment.deephaven.psk,
+  });
+  this.ide = await this.client.getAsIdeConnection();
+}
+```
+
+# 4) Use the proxied base everywhere
+
+Anywhere you pass the base URL (e.g., `CoreClient`, any fetches), use `environment.deephaven.baseUrl` (`/dh`), not the absolute `http://localhost:10000`. That keeps all requests same-origin → no CORS.
+
+# 5) Quick sanity checks
+
+- Hard refresh (disable cache) after changing the proxy. The earlier **304 / NotSameOrigin** was from the browser blocking a cached cross-origin script.
+    
+- Only **one** `connect()` per app session (multiple clients can cause “table already closed” on teardown).
+    
+- If you still need to hit DH directly (no proxy) in prod, enable CORS at DH or put DH behind the same domain (e.g., Nginx) so the browser sees a single origin.
+    
+
+If you want, I can also drop the AG Grid component wired to this `rows$` stream next.

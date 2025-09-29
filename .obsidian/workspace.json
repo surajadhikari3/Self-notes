@@ -92,7 +92,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 200
+    "width": 200,
+    "collapsed": true
   },
   "right": {
     "id": "dae58c0c189fede0",
@@ -194,7 +195,7 @@
       "obsidian-git:Open Git source control": false
     }
   },
-  "active": "2c21ca8d70617dda",
+  "active": "21a7aecd5be464f6",
   "lastOpenFiles": [
     "Project_prep/ag-dh.md",
     "Project_prep/test........md",
