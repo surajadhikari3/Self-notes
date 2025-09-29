@@ -452,3 +452,89 @@ export class DeephavenService {
     
 
 Your `LiveTableComponent` from my previous message works unchanged. If you need it again, ping me and I’ll repost — but once this service connects, those “`.client.login is not a function`” errors will disappear.
+
+---------------------
+
+That error means the thing returned by `ide.getObject('account')` is **not a table object** (it’s probably a string or undefined). Two fixes:
+
+## 1) Make sure the global name is exact
+
+In your DH script the variables looked like `user` and `account`. If you pass `'acount'` (missing a “c”), or any different casing, the IDE returns a non-table value. Double-check the exact names in the DH IDE (left sidebar “Variables”) — use those strings verbatim.
+
+## 2) Harden `getTable` so it never tries to read `.type` on non-objects
+
+Drop this version in your service:
+
+```ts
+async getTable(varName: string): Promise<any> {
+  if (!this.ready) await this.connect();
+
+  const obj = await this.ide.getObject(varName);
+
+  // Helpful logs if something odd comes back
+  if (obj == null) {
+    throw new Error(`Global '${varName}' was not found (null/undefined).`);
+  }
+  const t = typeof obj;
+  if (t !== 'object') {
+    throw new Error(`Global '${varName}' is '${t}', not a Table (value=${JSON.stringify(obj)})`);
+  }
+
+  // JSAPI variants: sometimes it's .type, sometimes .typeName, sometimes it is the table already
+  const looksLikeTable =
+    (obj as any).type === 'Table' ||
+    (obj as any).typeName === 'Table' ||
+    typeof (obj as any).setViewport === 'function' ||
+    typeof (obj as any).snapshot === 'function';
+
+  if (!looksLikeTable) {
+    // Some builds wrap the table under .table
+    const inner = (obj as any).table;
+    const innerLooksLikeTable =
+      inner && typeof inner === 'object' &&
+      (inner.type === 'Table' ||
+       inner.typeName === 'Table' ||
+       typeof inner.setViewport === 'function');
+
+    if (innerLooksLikeTable) return inner;
+    throw new Error(`Global '${varName}' is not a Table (keys=${Object.keys(obj)})`);
+  }
+
+  return obj;
+}
+```
+
+## (Optional) Quick helper to see what’s actually exported
+
+Add this to the service to dump globals/types from the server. Call it once from your component to sanity-check names.
+
+```ts
+async listGlobals(): Promise<Array<{ name: string; type: string }>> {
+  if (!this.ready) await this.connect();
+  const names: string[] = await this.ide.getObject?.('__all__names__')
+    ?.catch(() => []) // some builds don’t have this
+    ?? [];
+
+  // Fallback: try a small fixed set you care about
+  const candidates = names.length ? names : ['user', 'account', 'users', 'accounts'];
+
+  const out: Array<{name: string; type: string}> = [];
+  for (const n of candidates) {
+    try {
+      const o = await this.ide.getObject(n);
+      const type =
+        (o && typeof o === 'object' && (o.type || o.typeName)) ||
+        (o && typeof (o as any).setViewport === 'function' ? 'Table' : typeof o);
+      out.push({ name: n, type: String(type) });
+    } catch { /* ignore */ }
+  }
+  console.table(out);
+  return out;
+}
+```
+
+### Why this fixes your error
+
+Your previous code did `obj.type` directly. When `obj` was a string/undefined (e.g., typo like `'acount'`), the runtime threw “Cannot use ‘in’ operator to search for ‘type’…”. The hardened checks gate on `typeof obj === 'object'` and recognize multiple JSAPI shapes, so you’ll either get a clean table back or a precise message telling you what came across.
+
+If you still see it after this change, run `await deephaven.listGlobals()` in your component’s `ngOnInit` and confirm the server really exports `account` / `user`.
