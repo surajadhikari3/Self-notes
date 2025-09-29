@@ -1340,3 +1340,96 @@ Nothing else in your component needs to change.
     
 
 If you still see nothing: check the exact global names in DH (case-sensitive). In the IDE console, the tab name is not always the global variable name; verify with a quick `globals()` or by printing `user` / `account` in the Python console.
+
+------------------------------------------------
+
+This error tells me exactly what’s happening now:
+
+👉 `java.lang.IllegalStateException: Table already closed, cannot be used again`
+
+That’s not a Kafka schema mismatch this time. It’s Angular/DH client lifecycle. You’re “re-using” the same Deephaven `Table` object after Angular has already **closed** it.
+
+---
+
+### Why the table is closed
+
+- Deephaven tables are _live server handles_.
+    
+- When you call `.close()` or Angular destroys a component, the table handle is released on the server.
+    
+- If you try to re-attach to that same handle from the client, you’ll get this exception.
+    
+
+This usually happens when:
+
+1. You subscribe to a table, then Angular re-renders and tries to bind to the same table handle again.
+    
+2. Your service/component calls `detach` or `.close()` in `ngOnDestroy`, but you still reference the old table object later.
+    
+3. Multiple `subscribe()` calls reuse the same DH table reference.
+    
+
+---
+
+### Fix pattern
+
+You must **never reuse a closed handle**. Instead:
+
+- Always **fetch a fresh handle** with `ide.getObject("users_ui")` / `ide.getObject("accounts_ui")` when you need the table again.
+    
+- Keep the table “open” until you explicitly want it gone.
+    
+
+---
+
+### Example Angular service fix
+
+```ts
+async getFreshTable(varName: string): Promise<any> {
+  if (!this.ready) await this.connect();
+
+  // always fetch a fresh handle
+  const obj = await this.ide.getObject(varName);
+
+  // some builds wrap table, unwrap it
+  const table = obj?.object ?? obj?.table ?? obj;
+  if (!table || typeof table.snapshot !== 'function') {
+    throw new Error(`Global '${varName}' is not a Table`);
+  }
+
+  return table;
+}
+```
+
+---
+
+### Component side
+
+When you use it:
+
+```ts
+async ngOnInit() {
+  this.table = await this.dhService.getFreshTable("users_ui");
+  this.viewport = await this.table.setViewport(0, 100);
+  this.table.addEventListener(this.table.EVENT_UPDATED, () => {
+    this.onUpdate();
+  });
+}
+
+ngOnDestroy() {
+  // cleanly close this instance only once
+  if (this.table) {
+    this.table.close();
+    this.table = null;
+  }
+}
+```
+
+---
+
+✅ Key rule:  
+If you see **“table already closed”**, you are trying to use a handle that’s been invalidated. Solution is to **always re-fetch a fresh handle** instead of storing and re-using one across multiple binds.
+
+---
+
+Would you like me to give you a **full updated Angular service + component pair** where the service guarantees a fresh handle every time (no reuse → no “table already closed”)?
