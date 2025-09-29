@@ -3196,3 +3196,58 @@ print(user_raw.head(3).to_string())
 ```
 
 to confirm the payload really is JSON text in `Value`. If your producer sends Avro/Protobuf instead of JSON, switch the spec to the appropriate `kc.avro_spec(...)` / `kc.protostream_spec(...)` and skip manual parsing.
+
+-------------------------
+
+Got it — your build is choking on the `kc.simple_spec([("Value", dt.string)])` call. That error (“no matching Java method overloads found”) means the argument type isn’t exactly what the Java side expects. Feed it an explicit `TableDefinition` instead of a Python list and it works across Deephaven versions.
+
+Use this minimal, version-tolerant snippet:
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven import Column, table_definition as tdef
+
+# ---- build a TableDefinition for a single string column 'Value'
+val_def = tdef([Column("Value", dt.string)])
+STRING_VALUE = kc.simple_spec(val_def)   # <-- avoids the overload mismatch
+
+# ---- consume: value arrives as one string column named 'Value'
+user_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=STRING_VALUE,
+    table_type=kc.TableType.append,
+)
+
+account_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=STRING_VALUE,
+    table_type=kc.TableType.append,
+)
+```
+
+Then parse the JSON to real columns (no “invalid column” issues because we create them):
+
+```python
+def parse_json_value_to_cols(t, json_col, fields):
+    j = t.update_view([f"_node = io.deephaven.json.jackson.JsonTools.parseJson({json_col})"])
+    exprs = [f"`{f}` = ((_node.get('{f}') == null) ? null : _node.get('{f}').asText())"
+            for f in fields]
+    return j.update_view(exprs).drop_columns("_node")
+
+user = parse_json_value_to_cols(user_raw, "Value", ["userId", "name", "email"]).drop_columns("Value").coalesce()
+account = parse_json_value_to_cols(account_raw, "Value", ["userId", "accountType", "balance"]).drop_columns("Value").coalesce()
+```
+
+Quick sanity checks you can run right after:
+
+```python
+print("user_raw cols   ->", [c.name for c in user_raw.columns])
+print("account_raw cols->", [c.name for c in account_raw.columns])
+print(user.head(3).to_string())
+print(account.head(3).to_string())
+```
+
+If you still hit issues, double-check that your `Value` column actually contains JSON text. If your producer sends something else (Avro/Protobuf), you’ll need the corresponding `kc.avro_spec(...)` / `kc.protostream_spec(...)` instead of `simple_spec`.
