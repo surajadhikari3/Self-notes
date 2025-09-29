@@ -1249,3 +1249,150 @@ private makeCols(table: any) {
     
 
 If you later need Kafka columns for debugging, expose them via _separate_ tables like `users_debug`—don’t mix them into these UI tables.
+
+--------------------------------------------------------
+
+Gotcha. Here’s a **known-good, non-deprecated setup** that works with **Angular 20.3.x** and your **AG Grid 34.2.0**.
+
+# Versions to use
+
+- **Angular:** 20.3.x (your current) — keep it. ([Ninja Squad](https://blog.ninja-squad.com/2025/09/11/what-is-new-angular-20.3/?utm_source=chatgpt.com "What's new in Angular 20.3? - Blog | Ninja Squad"))
+    
+- **TypeScript:** ≥ **5.2** (AG Grid 34 requires this; Angular 20 is fine with ≥5.5). ([AG Grid](https://www.ag-grid.com/angular-data-grid/compatibility/?utm_source=chatgpt.com "Angular Grid: Version Compatibility"))
+    
+- **AG Grid:** **34.2.0** (fully compatible with Angular 17–20). ([AG Grid](https://www.ag-grid.com/angular-data-grid/compatibility/?utm_source=chatgpt.com "Angular Grid: Version Compatibility"))
+    
+- **Deephaven JS client packages (supported & not deprecated):**
+    
+    - **`@deephaven/jsapi-bootstrap`**: use the latest **0.85.x** (e.g., **0.85.15+**). This is the supported loader/bootstrapping lib. ([npm](https://www.npmjs.com/package/%40deephaven%2Fjsapi-bootstrap?utm_source=chatgpt.com "deephaven/jsapi-bootstrap"))
+        
+    - **`@deephaven/jsapi-types`**: use the latest **1.0.0-dev0.39.x** that **matches your server’s 0.39.x**. (Pick the `dev0.39.*` that aligns with your DH server.) ([npm](https://www.npmjs.com/package/%40deephaven%2Fjsapi-types?utm_source=chatgpt.com "deephaven/jsapi-types"))
+        
+
+> Note: **`@deephaven/jsapi`** (old name) is not on npm anymore—don’t use it. Use **`jsapi-bootstrap`** + **`jsapi-types`** instead. ([npm](https://www.npmjs.com/package/%40deephaven%2Fjsapi-bootstrap?utm_source=chatgpt.com "deephaven/jsapi-bootstrap"))
+
+# Install commands
+
+```bash
+# AG Grid for Angular 20
+npm i ag-grid-community@34.2.0 @ag-grid-community/angular@34.2.0
+
+# Deephaven JS API (supported packages)
+npm i @deephaven/jsapi-bootstrap@^0.85.15 @deephaven/jsapi-types@latest
+```
+
+# Minimal Angular wiring (works with 20.3)
+
+**Service (sketch) using jsapi-bootstrap pattern** – aligns with Deephaven’s “Use the JS API” docs:
+
+```ts
+// deephaven.service.ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+import loadDhCore from '@deephaven/jsapi-bootstrap'; // loads the DH JS API bundle
+// Types
+import type { dh as DhNamespace } from '@deephaven/jsapi-types';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: typeof DhNamespace;
+  private session!: DhNamespace.IdeConnection;
+
+  private _rows$ = new BehaviorSubject<any[]>([]);
+  rows$ = this._rows$.asObservable();
+
+  async connect(opts: { baseUrl: string; authToken?: string }) {
+    // Load JS API and open a session
+    this.dh = await loadDhCore({ baseUrl: opts.baseUrl }); // uses WebSocket for live updates
+    this.session = await this.dh.IdeConnection.startSession(
+      opts.baseUrl,
+      opts.authToken ? { type: 'token', token: opts.authToken } : undefined
+    );
+  }
+
+  async subscribeTable(tableName: string) {
+    // Get a handle to the table (already created/exposed in DH)
+    const table = await this.session.getTable({ tableName });
+
+    // Fetch an initial snapshot
+    const snapshot = await table.snapshot();
+    this._rows$.next(snapshot.data);
+
+    // Subscribe for live updates via Barrage
+    const sub = await table.subscribe({
+      onSnapshot: s => this._rows$.next(s.data),
+      onUpdate: u => {
+        // apply incremental updates as needed (u.added/u.removed/u.modified)
+        // for simple cases, re-fetch snapshot:
+        table.snapshot().then(s => this._rows$.next(s.data));
+      },
+      onError: e => console.error('DH update error', e),
+    });
+
+    return () => sub.close(); // unsubscribe
+  }
+
+  async close() {
+    await this.session?.close();
+  }
+}
+```
+
+This pattern follows Deephaven’s official JS API guidance (bootstrap loader + live updates over Arrow Flight/Barrage). ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/use-jsapi/?utm_source=chatgpt.com "Use the JS API"))
+
+# AG Grid 34 + Angular 20 component (simple)
+
+```ts
+// users-grid.component.ts
+import { Component, OnInit, OnDestroy } from '@angular/core';
+import { ColDef } from 'ag-grid-community';
+import { DeephavenService } from '../deephaven.service';
+import { Subscription } from 'rxjs';
+
+@Component({
+  selector: 'app-users-grid',
+  template: `<ag-grid-angular
+      style="width: 100%; height: 600px"
+      class="ag-theme-quartz"
+      [rowData]="rows"
+      [columnDefs]="cols">
+    </ag-grid-angular>`
+})
+export class UsersGridComponent implements OnInit, OnDestroy {
+  rows: any[] = [];
+  cols: ColDef[] = [
+    { field: 'id' }, { field: 'name' }, { field: 'email' }
+  ];
+
+  private sub?: Subscription;
+  private cleanup?: () => void;
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    await this.dh.connect({ baseUrl: 'http://<your-dh-host>:<port>' });
+    this.cleanup = await this.dh.subscribeTable('users'); // your DH table name
+
+    this.sub = this.dh.rows$.subscribe(r => (this.rows = r));
+  }
+
+  ngOnDestroy() {
+    this.sub?.unsubscribe();
+    this.cleanup?.();
+    this.dh.close();
+  }
+}
+```
+
+# Why these choices are safe
+
+- **AG Grid 34.x ⇄ Angular 17–20** official compatibility is confirmed. ([AG Grid](https://www.ag-grid.com/angular-data-grid/compatibility/?utm_source=chatgpt.com "Angular Grid: Version Compatibility"))
+    
+- **Angular 20.3** is current and supported; no AG Grid breaking changes needed. ([Ninja Squad](https://blog.ninja-squad.com/2025/09/11/what-is-new-angular-20.3/?utm_source=chatgpt.com "What's new in Angular 20.3? - Blog | Ninja Squad"))
+    
+- **Deephaven JS API**: `jsapi-bootstrap` is the supported way to load the web client API; `jsapi-types` provides typings that track server versions (choose the `dev0.39.*` track if your server is 0.39.x). ([npm](https://www.npmjs.com/package/%40deephaven%2Fjsapi-bootstrap?utm_source=chatgpt.com "deephaven/jsapi-bootstrap"))
+    
+- **Live updates** come via **Barrage** over WebSockets, which the JS API handles (so you get real-time streaming without polling). ([deephaven.io](https://deephaven.io/barrage/docs/?utm_source=chatgpt.com "Barrage"))
+    
+
+If you tell me your exact **Deephaven server version** (e.g., 0.39.7), I’ll pin the **exact** `@deephaven/jsapi-types` version to match and adjust the sample to your auth (PSK / token).
