@@ -1245,3 +1245,98 @@ export const environment = {
     
 
 Wire this in and you should see headers immediately, then rows streaming as DH updates. If anything still errors, copy the first error line from the devtools console (it will include which branch it took) and we can tweak the tiny auth probe for your exact JSAPI build.
+
+---------------------------
+
+
+You’re hitting this because on your DH build `ide.getObject(varName)` doesn’t return a `{ type: 'Table', ... }` wrapper. It’s returning either the raw table or even just the string `'user'`, and then some code tries to check `'type' in obj` → boom: “Cannot use 'in' operator to search for 'type' in user”.
+
+Below is a **drop-in update** that resolves globals in a defensive, multi-path way and never uses the `in` operator on non-objects. It tries (in order):
+
+1. `ide.getTable(name)` (some builds expose this)
+    
+2. `ide.getObject(name)` (raw table or wrapper)
+    
+3. `ide.getQueryScope()` + `scope.get(name)` (older builds)
+    
+
+It then normalizes to the actual `Table` instance.
+
+Only replace your service’s `getTable` with this, plus the small helper.
+
+---
+
+### Patch to `DeephavenService`
+
+```ts
+// add this helper in the class
+private isTableLike(obj: any): boolean {
+  // guard against strings/numbers/etc
+  if (!obj || typeof obj !== 'object') return false;
+  // dh table instances generally expose snapshot() and setViewport()
+  return typeof (obj as any).snapshot === 'function'
+      && typeof (obj as any).setViewport === 'function';
+}
+
+// REPLACE your current getTable() with this robust version:
+async getTable(varName: string): Promise<any /* Table */> {
+  if (!this.ready) await this.connect();
+
+  // 1) try getTable(name)
+  const maybeGetTable = (this.ide as any).getTable;
+  if (typeof maybeGetTable === 'function') {
+    try {
+      const t = await maybeGetTable.call(this.ide, varName);
+      if (this.isTableLike(t)) return t;
+    } catch {}
+  }
+
+  // 2) try getObject(name)
+  const maybeGetObject = (this.ide as any).getObject;
+  if (typeof maybeGetObject === 'function') {
+    try {
+      const obj = await maybeGetObject.call(this.ide, varName);
+      // some builds return the table directly
+      if (this.isTableLike(obj)) return obj;
+
+      // some return a wrapper like { type: 'Table', object: <Table> } or {type:'Table', value:...}
+      if (obj && typeof obj === 'object') {
+        const candidate = (obj as any).object ?? (obj as any).value ?? (obj as any).table ?? null;
+        if (this.isTableLike(candidate)) return candidate;
+      }
+    } catch {}
+  }
+
+  // 3) last resort: query scope
+  const getQueryScope = (this.ide as any).getQueryScope;
+  if (typeof getQueryScope === 'function') {
+    try {
+      const scope = await getQueryScope.call(this.ide);
+      // scope.get(name) or scope[name]
+      const candidate = typeof scope?.get === 'function'
+        ? scope.get(varName)
+        : (scope && typeof scope === 'object' ? (scope as any)[varName] : undefined);
+      if (this.isTableLike(candidate)) return candidate;
+      if (candidate && typeof candidate === 'object') {
+        const unwrap = (candidate as any).object ?? (candidate as any).value ?? null;
+        if (this.isTableLike(unwrap)) return unwrap;
+      }
+    } catch {}
+  }
+
+  throw new Error(`Global '${varName}' not found as a Table on this server build.`);
+}
+```
+
+Nothing else in your component needs to change.
+
+#### Why this fixes your loop/error
+
+- We **never** run `'type' in obj` on a string; we only touch object fields after `typeof obj === 'object'` checks.
+    
+- We **normalize** whatever the server returns to an actual `Table` (the one that has `snapshot()` / `setViewport()`).
+    
+- If the name doesn’t exist, you’ll get one clear error (“not found as a Table”) instead of that cryptic “in operator” message.
+    
+
+If you still see nothing: check the exact global names in DH (case-sensitive). In the IDE console, the tab name is not always the global variable name; verify with a quick `globals()` or by printing `user` / `account` in the Python console.
