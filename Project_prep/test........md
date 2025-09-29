@@ -2488,3 +2488,211 @@ If you still see errors, double-check:
     
 
 Want me to wire this into your AG Grid component you showed earlier?
+
+
+------------------------------------
+
+
+You’re right — **`@deephaven/jsapi-bootstrap` doesn’t export `loadDhCore`** (it’s a React helper).  
+For Angular, the most reliable way is to **load `/jsapi/dh-core.js` as a script** and then use the global **`window.dh`**.
+
+Below is a **working, minimal setup** that:
+
+- reads **baseUrl** and **PSK** from your Angular env files,
+    
+- loads **dh-core.js** correctly (no import errors),
+    
+- logs in with **PSK**,
+    
+- opens an **IdeConnection**,
+    
+- streams a **viewport** from a table into an observable.
+    
+
+---
+
+# 1) Environment files
+
+`src/environments/environment.development.ts`
+
+```ts
+export const environment = {
+  production: false,
+  deephaven: {
+    baseUrl: 'http://localhost:10000', // no trailing slash
+    psk: 'YOUR_DEV_PSK'
+  }
+};
+```
+
+`src/environments/environment.ts`
+
+```ts
+export const environment = {
+  production: true,
+  deephaven: {
+    baseUrl: 'https://your-dh-host',
+    psk: 'YOUR_PROD_PSK'
+  }
+};
+```
+
+---
+
+# 2) Angular service (copy/paste)
+
+`src/app/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+import { environment } from '../environments/environment';
+import type { dh as DhNS } from '@deephaven/jsapi-types';
+
+declare global {
+  interface Window { dh: any }
+}
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: typeof DhNS;
+  private client!: any;       // DhNS.CoreClient at runtime
+  private ide!: any;          // DhNS.IdeConnection at runtime
+  private viewportCleanup?: () => void;
+
+  private _rows$ = new BehaviorSubject<any[]>([]);
+  readonly rows$ = this._rows$.asObservable();
+
+  /** Load /jsapi/dh-core.js once and return window.dh */
+  private loadDhCore(): Promise<typeof DhNS> {
+    const src = `${environment.deephaven.baseUrl}/jsapi/dh-core.js`;
+
+    // already loaded?
+    if (window.dh) return Promise.resolve(window.dh as typeof DhNS);
+
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.onload = () => {
+        if (!window.dh) return reject(new Error('dh-core loaded but window.dh is undefined'));
+        resolve(window.dh as typeof DhNS);
+      };
+      s.onerror = () => reject(new Error(`Failed to load dh-core.js from ${src}`));
+      document.head.appendChild(s);
+    });
+  }
+
+  /** Connect using baseUrl + PSK from env */
+  async connect(): Promise<void> {
+    this.dh = await this.loadDhCore();
+
+    // Create client & PSK login
+    this.client = new this.dh.CoreClient(environment.deephaven.baseUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: environment.deephaven.psk,
+    });
+
+    // Open an IDE connection (entry point for tables)
+    this.ide = await this.client.getAsIdeConnection();
+  }
+
+  /** Subscribe to a table viewport and stream rows into rows$ */
+  async subscribeViewport(tableName: string, top = 0, bottom = 499): Promise<void> {
+    const table =
+      typeof this.ide.getTable === 'function' && this.ide.getTable.length >= 1
+        ? await this.ide.getTable(tableName)                 // newer servers
+        : await this.ide.getTable({ tableName });            // older servers
+
+    table.setViewport(top, bottom);
+
+    const refresh = async () => {
+      const vp = await table.getViewportData();   // { rows, columns }
+      const out: any[] = [];
+      for (let i = 0; i < vp.rows.length; i++) {
+        const src = vp.rows[i];
+        const rec: any = {};
+        for (const col of table.columns) rec[col.name] = src.get(col);
+        out.push(rec);
+      }
+      this._rows$.next(out);
+    };
+
+    await refresh(); // initial snapshot
+    table.addEventListener('update', refresh);
+
+    this.viewportCleanup = () => {
+      try { table.removeEventListener('update', refresh); } catch {}
+      try { table.close?.(); } catch {}
+    };
+  }
+
+  async disconnect(): Promise<void> {
+    try { this.viewportCleanup?.(); } finally {
+      try { await this.ide?.close?.(); } catch {}
+      try { await this.client?.close?.(); } catch {}
+    }
+  }
+}
+```
+
+> Notes  
+> • No `@deephaven/jsapi-bootstrap` needed for Angular.  
+> • We still keep `@deephaven/jsapi-types` for typings (optional but nice).  
+> • `window.dh` is the correct entry point once `/jsapi/dh-core.js` is loaded.  
+> • The fallback in `getTable(...)` covers server API differences (`getTable(name)` vs `getTable({ tableName })`).
+
+---
+
+# 3) Simple component usage
+
+`src/app/users-grid.component.ts`
+
+```ts
+import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Subscription } from 'rxjs';
+import { DeephavenService } from './deephaven.service';
+
+@Component({
+  selector: 'app-users-grid',
+  template: `
+    <ng-container *ngIf="rows; else loading">
+      <pre>{{ rows | json }}</pre>
+    </ng-container>
+    <ng-template #loading>Loading…</ng-template>
+  `,
+})
+export class UsersGridComponent implements OnInit, OnDestroy {
+  rows: any[] = [];
+  private sub?: Subscription;
+
+  constructor(private dh: DeephavenService) {}
+
+  async ngOnInit() {
+    await this.dh.connect();
+    await this.dh.subscribeViewport('users', 0, 199); // adjust table & size
+    this.sub = this.dh.rows$.subscribe(r => (this.rows = r));
+  }
+
+  ngOnDestroy() {
+    this.sub?.unsubscribe();
+    this.dh.disconnect();
+  }
+}
+```
+
+---
+
+## Common pitfalls to double-check
+
+- **CORS**: your DH server must allow your app’s origin.
+    
+- **Base URL**: no trailing `/` (e.g., `http://host:10000`).
+    
+- **Only one connect** per app lifecycle; don’t create multiple clients (avoids “table already closed”).
+    
+- **PSK**: dev-only. Anyone with the browser can see it. For prod, use a backend/token flow.
+    
+
+If you want this wired to AG Grid 34.2.0, say the word and I’ll drop in the grid component (column defs + async rows$ binding).
