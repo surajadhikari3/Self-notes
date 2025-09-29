@@ -294,3 +294,104 @@ A basic CSS (optional):
 ---
 
 If you drop these files in, run `npm start`, and ensure the `user` table exists in your DH Python session, you should see the rows stream into the table in real time. If you want this with **AG Grid** instead of a simple `<table>`, I can swap the template to AG Grid in the same service pattern.
+
+--------------------------------
+
+That error means Angular can’t actually load the file the service tries to import. Let’s fix it in a bullet-proof way:
+
+## 1) Verify the file really exists
+
+Open this in your browser (replace host/port):
+
+- `http://localhost:10000/jsapi/` → you should see a small index page
+    
+- `http://localhost:10000/jsapi/dh-core.js` → should download/serve the JS file
+    
+
+If either is 404, your Deephaven server isn’t serving the JS API assets (or a reverse proxy isn’t routing `/jsapi`). Deephaven’s docs show that `dh-core.js` is served from `/jsapi/dh-core.js`. ([Deephaven](https://deephaven.io/core/docs/how-to-guides/use-jsapi/ "Use the JS API | Deephaven"))
+
+## 2) Use a _full URL_ fallback (and a proxy in dev)
+
+Instead of importing only `'/jsapi/dh-core.js'`, try proxy first (nice for CORS), then fall back to the absolute URL.
+
+**proxy.conf.json** (dev only; same as before)
+
+```json
+{
+  "/jsapi": {
+    "target": "http://localhost:10000",
+    "changeOrigin": true,
+    "secure": false,
+    "ws": true
+  },
+  "/grpc-web": {
+    "target": "http://localhost:10000",
+    "changeOrigin": true,
+    "secure": false,
+    "ws": true
+  }
+}
+```
+
+Run dev with: `ng serve --proxy-config proxy.conf.json`
+
+## 3) Drop-in fix for your service
+
+Update just the loader method:
+
+```ts
+// deephaven.service.ts
+import { environment } from '../environments/environment';
+
+private async ensureDhLoaded(): Promise<void> {
+  if (this.dh) return;
+
+  const proxyUrl = '/jsapi/dh-core.js';
+  const absoluteUrl = `${environment.DEEPHAVEN_BASE_URL.replace(/\/+$/, '')}/jsapi/dh-core.js`;
+
+  let lastErr: unknown;
+
+  // 1) Try via Angular dev proxy (no CORS in dev)
+  try {
+    this.dh = (await import(/* @vite-ignore */ proxyUrl)).default;
+    return;
+  } catch (e) {
+    lastErr = e;
+    console.warn('Proxy import failed, falling back to absolute URL...', e);
+  }
+
+  // 2) Fallback: full absolute URL (works in prod or if you don’t use the proxy)
+  try {
+    this.dh = (await import(/* @vite-ignore */ absoluteUrl)).default;
+    return;
+  } catch (e2) {
+    console.error('Failed to load dh-core.js from both proxy and absolute URL', { proxyUrl, absoluteUrl, lastErr, e2 });
+    throw e2;
+  }
+}
+```
+
+> Why this works: Deephaven’s official guide imports the JS API directly from the server at `/jsapi/dh-core.js`. Using the full URL ensures it doesn’t depend on your app’s base href, while the proxy keeps CORS away in dev. ([Deephaven](https://deephaven.io/core/docs/how-to-guides/use-jsapi/ "Use the JS API | Deephaven"))
+
+## 4) If it still fails, one of these is the culprit
+
+- **`environment.DEEPHAVEN_BASE_URL` wrong** (extra slash, wrong port, wrong host).  
+    Example good value: `http://localhost:10000` (no trailing slash).
+    
+- **Deephaven not exposing `/jsapi`** behind your reverse proxy. Add a route for `/jsapi` to the DH server.
+    
+- **Didn’t start Angular with the proxy.** Use `ng serve --proxy-config proxy.conf.json`.
+    
+- **CORS** (if you skip the proxy). Then the absolute URL request to `/jsapi/dh-core.js` must be allowed by your server.
+    
+
+## 5) Quick sanity check
+
+From your Angular app’s dev console (F12 → Network), reload and confirm:
+
+- A `GET /jsapi/dh-core.js` (status 200, served by either dev server proxy or DH directly).
+    
+
+Once `dh-core.js` is loading, the rest of the code (CoreClient → login → startSession → setViewport → `getViewportData`) will behave like in the docs example. ([Deephaven](https://deephaven.io/core/docs/how-to-guides/use-jsapi/ "Use the JS API | Deephaven"))
+
+If you want, paste the exact Network tab error (status code + response) and I’ll pinpoint whether it’s a routing or CORS header issue.
