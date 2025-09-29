@@ -2798,3 +2798,128 @@ Anywhere you pass the base URL (e.g., `CoreClient`, any fetches), use `environme
     
 
 If you want, I can also drop the AG Grid component wired to this `rows$` stream next.
+
+
+-------------------------
+
+Gotcha — your screenshot shows the browser still trying to load:
+
+```
+http://localhost:10000/jsapi/dh-core.js   (304 NotSameOrigin)
+```
+
+That means your app is **still hitting DH directly**, not through the Angular proxy. Let’s force _everything_ through the proxy and remove CORS from the equation.
+
+---
+
+# Fix (works with Angular 20.3)
+
+## 1) Point your app to a **relative** base URL
+
+Use a relative prefix (e.g. `/dh`) so the browser stays same-origin.
+
+**`src/environments/environment.development.ts`**
+
+```ts
+export const environment = {
+  production: false,
+  deephaven: {
+    baseUrl: '/dh',          // 👈 relative, NOT http://localhost:10000
+    psk: 'YOUR_DEV_PSK'
+  }
+};
+```
+
+(Do the same in `environment.ts` if you also want it via proxy in prod. If prod will hit DH on another domain, you’ll need proper CORS at DH or a reverse proxy there too.)
+
+## 2) Single proxy rule that covers **HTTP + WebSocket**
+
+Delete any old `/jsapi`, `/socket`, `/api` rules and use **one** rule:
+
+**`proxy.conf.json`**
+
+```json
+{
+  "/dh": {
+    "target": "http://localhost:10000",
+    "secure": false,
+    "changeOrigin": true,
+    "ws": true,
+    "logLevel": "debug",
+    "pathRewrite": { "^/dh": "" }
+  }
+}
+```
+
+Then run:
+
+```bash
+ng serve --proxy-config proxy.conf.json
+```
+
+(or put `"proxyConfig": "proxy.conf.json"` under `architect.serve.options` in `angular.json` and restart `ng serve`.)
+
+## 3) Load `dh-core.js` **via the proxy**
+
+Update your service loader to use the relative base and add a tiny cache-buster so the browser doesn’t reuse the previously blocked URL.
+
+```ts
+private loadDhCore(): Promise<any> {
+  const src = `${environment.deephaven.baseUrl}/jsapi/dh-core.js?_=${Date.now()}`; // -> /dh/jsapi/...
+  if ((window as any).dh) return Promise.resolve((window as any).dh);
+
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => (window as any).dh ? resolve((window as any).dh)
+                                        : reject(new Error('window.dh missing after load'));
+    s.onerror = () => reject(new Error(`Failed to load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+```
+
+## 4) Make sure **CoreClient** also uses the relative base
+
+```ts
+this.client = new this.dh.CoreClient(environment.deephaven.baseUrl); // '/dh'
+await this.client.login({
+  type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+  token: environment.deephaven.psk,
+});
+this.ide = await this.client.getAsIdeConnection();
+```
+
+## 5) Quick sanity checks
+
+- **Hard refresh** (disable cache) after changing proxy/env.
+    
+- Confirm in the **Network** tab that you now see:
+    
+    - `/dh/jsapi/dh-core.js` (200 from `localhost:4200`, proxied to `10000`)
+        
+    - `/dh/socket?...` (WebSocket, status 101 Switching Protocols)
+        
+    - `/dh/api/...` calls
+        
+- Add this temporary guard to confirm you’re not using an absolute URL by mistake:
+    
+    ```ts
+    console.log('DH baseUrl ->', environment.deephaven.baseUrl);
+    if (/^https?:\/\//i.test(environment.deephaven.baseUrl)) {
+      throw new Error('Use a relative baseUrl like "/dh" to avoid CORS in dev.');
+    }
+    ```
+    
+
+---
+
+## If you still must use an absolute DH URL (no proxy)
+
+Then you need **CORS enabled at Deephaven** (allow `http://localhost:4200`) _and_ allow WebSockets. But since you already have an Angular proxy, the simplest, most reliable path is the relative `/dh` approach above — it keeps everything same-origin and avoids CORS entirely.
+
+If you want, I can also drop the AG Grid component wired to `rows$` now that the stream is same-origin.
+
+
+
