@@ -3339,3 +3339,293 @@ user = t.update_view([
 ```
 
 But if `kc.simple_spec` isn’t present in your version, stick with `kc.json_spec` — that’s the cleanest, version-safe path.
+
+--------------------------------------------
+
+Alright — here’s a clean, **working** Angular setup that:
+
+- logs in to Deephaven with **PSK**
+    
+- grabs an existing **global table** by name (e.g. `user`, `account`, `user_account`)
+    
+- opens a **viewport**, takes an initial **snapshot**, and **streams live updates**
+    
+- uses **Column references (not strings)** to avoid `ClassCastException`
+    
+- never closes the table while bound (avoids “table already closed”)
+    
+- plays nicely with Angular standalone components
+    
+
+---
+
+# `src/app/deephaven/deephaven.service.ts`
+
+```ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { Injectable } from '@angular/core';
+import { environment } from '../../environments/environment';
+
+type Unbind = () => void;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh: any | null = null;            // dh-core.js module
+  private client: any | null = null;        // CoreClient
+  private ide: any | null = null;           // IDE connection
+  private ready = false;
+
+  get isReady(): boolean { return this.ready; }
+
+  /** Connect to Deephaven using PSK auth (idempotent). */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+
+    const serverUrl = environment.deephavenUrl;
+    const psk       = environment.deephavenPsk;
+    if (!serverUrl) throw new Error('environment.deephavenUrl is not set');
+    if (!psk)       throw new Error('environment.deephavenPsk is not set');
+
+    // Load the matching JS API from the server (avoid version mismatch)
+    const jsapiUrl = new URL('/jsapi/dh-core.js', serverUrl).toString();
+    const mod = await import(/* @vite-ignore */ jsapiUrl);
+    this.dh = mod.default ?? mod;
+
+    // Create client and log in with PSK
+    this.client = new this.dh.CoreClient(serverUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: psk,
+    });
+
+    // Get an IDE connection and make sure Python session is running
+    this.ide = await this.client.getAsIdeConnection();
+    await this.ide.startSession('python');
+
+    this.ready = true;
+  }
+
+  /** Fetch a live Table by the **global** variable name from the Python session. */
+  async getTable(name: string): Promise<any> {
+    if (!this.ready) await this.connect();
+    if (!name) throw new Error('table name is required');
+    // Throws if not a table — which is good feedback while wiring things up.
+    return await this.ide.getTable(name);
+  }
+
+  /** List column names of a Table (handy for debugging). */
+  listColumnNames(table: any): string[] {
+    // `table.columns` is already an array of Column refs
+    return (table.columns as any[]).map(c => c.name);
+  }
+
+  /**
+   * Bind to a Table:
+   * - opens one viewport
+   * - emits initial snapshot as plain objects
+   * - listens for EVENT_UPDATED and emits subsequent snapshots
+   * - returns `unbind()` that removes listeners and closes the viewport
+   *
+   * `columnNames` is optional. If provided, we resolve to Column refs via `findColumns`.
+   */
+  async bind(
+    table: any,
+    onRows: (rows: any[]) => void,
+    columnNames?: string[],
+    viewportRows = 10000,
+  ): Promise<Unbind> {
+    // Always pass **Column objects** to viewport/snapshot — NOT strings.
+    const colRefs = Array.isArray(columnNames) && columnNames.length > 0
+      ? table.findColumns(...columnNames)
+      : (table.columns as any[]);
+
+    // 1) open viewport first
+    const vp = await table.setViewport(0, viewportRows, colRefs);
+
+    // 2) initial snapshot → plain objects
+    const first = await table.snapshot(colRefs);
+    onRows(first.toObjects());
+
+    // 3) subscribe for live updates
+    const onUpdate = async () => {
+      try {
+        const snap = await table.snapshot(colRefs);
+        onRows(snap.toObjects());
+      } catch {
+        // ignore transient races during server-side transforms/refreshes
+      }
+    };
+    table.addEventListener(table.EVENT_UPDATED, onUpdate);
+
+    // 4) return unbind (don’t close `table` unless you own its lifecycle)
+    const unbind = () => {
+      try { table.removeEventListener(table.EVENT_UPDATED, onUpdate); } catch {}
+      try { vp.close(); } catch {}
+    };
+    return unbind;
+  }
+}
+```
+
+---
+
+# `src/app/live-table/live-table.component.ts`
+
+A tiny, reusable viewer that streams a DH table to the page.  
+Works with _any_ table name that exists as a global in your Python session (`user`, `account`, `user_account`, etc.).
+
+```ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import {
+  Component, Input, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef
+} from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { DeephavenService } from '../deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+<section class="card">
+  <header class="bar">
+    <h3 class="mono">{{ tableName }}</h3>
+    <span class="status">
+      <span *ngIf="error" class="error">{{ error }}</span>
+      <span *ngIf="!error && loading">Connecting…</span>
+    </span>
+  </header>
+
+  <div class="grid" *ngIf="!error">
+    <div class="thead" *ngIf="cols.length">
+      <div class="th" *ngFor="let c of cols; trackBy: trackCol">{{ c }}</div>
+    </div>
+
+    <div class="tbody" (scroll)="onScroll($event)">
+      <div class="tr" *ngFor="let r of rows; trackBy: trackRow">
+        <div class="td" *ngFor="let v of r | keyvalue : keySort; trackBy: trackCell">{{ v.value }}</div>
+      </div>
+    </div>
+  </div>
+</section>
+  `,
+  styles: [`
+:host { display:block; }
+.card { border:1px solid #2a2a2a; border-radius:.75rem; background:#0f0f0f; color:#fff; }
+.bar { display:flex; justify-content:space-between; align-items:center; padding:.75rem 1rem; border-bottom:1px solid #242424; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+.status .error { color:#ff6b6b; }
+.grid { display:flex; flex-direction:column; min-height:240px; }
+.thead, .tr { display:grid; grid-auto-columns: 1fr; grid-auto-flow: column; }
+.thead { position:sticky; top:0; background:#111; z-index:1; }
+.thead .th, .td { padding:.5rem .75rem; border-right:1px solid #1e1e1e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.thead .th:last-child, .td:last-child { border-right:none; }
+.tbody { overflow:auto; max-height:50vh; }
+.tr:nth-child(even) .td { background:#0f0f0f; }
+  `],
+})
+export class LiveTableComponent implements OnInit, OnDestroy {
+  /** Name of the DH global table (e.g. 'user', 'account', 'user_account') */
+  @Input() tableName = '';
+
+  /** Optional: restrict to these column names (exact, case-sensitive) */
+  @Input() columns: string[] | null = null;
+
+  loading = false;
+  error: string | null = null;
+
+  cols: string[] = [];
+  rows: any[] = [];
+
+  private table: any | null = null;
+  private unbind: (() => void) | null = null;
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  async ngOnInit(): Promise<void> {
+    try {
+      this.loading = true;
+      this.cdr.markForCheck();
+
+      await this.dh.connect();
+      this.table = await this.dh.getTable(this.tableName);
+
+      // Show header immediately
+      this.cols = this.columns?.length
+        ? this.columns
+        : this.dh.listColumnNames(this.table);
+      this.cdr.markForCheck();
+
+      // Start streaming
+      this.unbind = await this.dh.bind(
+        this.table,
+        (rows) => { this.rows = rows; this.cdr.markForCheck(); },
+        this.columns ?? undefined
+      );
+
+      this.loading = false;
+      this.cdr.markForCheck();
+    } catch (e: any) {
+      this.loading = false;
+      this.error = (e?.message ?? e ?? 'Failed to connect').toString();
+      this.cdr.markForCheck();
+    }
+  }
+
+  ngOnDestroy(): void {
+    try { this.unbind?.(); } catch {}
+    this.unbind = null;
+  }
+
+  // Optional helpers
+  trackCol = (_: number, c: string) => c;
+  trackRow = (_: number, r: any) => r?.__row ?? r; // stable if present
+  trackCell = (_: number, kv: any) => kv?.key ?? _;
+  keySort = (a: any, b: any) => ('' + a.key).localeCompare('' + b.key);
+
+  onScroll(e: Event) {
+    // Example: add lazy paging if you want; viewport is already large
+    // const el = e.target as HTMLElement;
+    // if (el.scrollTop + el.clientHeight >= el.scrollHeight - 8) { ... }
+  }
+}
+```
+
+---
+
+## Example usage (template)
+
+```html
+<!-- app.component.html -->
+<app-live-table tableName="user"></app-live-table>
+<app-live-table tableName="account"></app-live-table>
+<app-live-table tableName="user_account"></app-live-table>
+```
+
+---
+
+## `src/environments/environment.ts`
+
+```ts
+export const environment = {
+  production: false,
+  deephavenUrl: 'http://localhost:10000',          // your DH server URL
+  deephavenPsk:  'replace-with-your-psk-token',    // PSK used by the server
+};
+```
+
+---
+
+### Notes that matter
+
+- **Column refs are key**: we pass `table.columns` (Column[]) or `table.findColumns('ExactName', ...)`. Do **not** pass strings directly to `setViewport` / `snapshot`.
+    
+- **Case-sensitive names**: e.g. Kafka meta columns are `KafkaPartition`, `KafkaOffset`, `KafkaTimestamp`. Your JSON fields must match what you defined in the Python script (`userId`, `name`, `email`, …).
+    
+- **One bind at a time**: the component keeps a single viewport/listener; it removes them in `ngOnDestroy` to avoid “table already closed”.
+    
+- **Don’t close the Table** in the component; other views may use it. We only close the viewport.
+    
+
+Drop these two files in, set `deephavenUrl` + `deephavenPsk`, and you should see live updates without `ClassCastException` or tear-down errors.
