@@ -3629,3 +3629,222 @@ export const environment = {
     
 
 Drop these two files in, set `deephavenUrl` + `deephavenPsk`, and you should see live updates without `ClassCastException` or tear-down errors.
+
+------------------------
+
+Got it — the `ClassCastException` is gone, but you’re hitting **“Table already closed, cannot be used again”**. That happens when the server closes/replaces the table (e.g., you re-run your Python, or the producer swaps a handle). Your JS still holds the old handle and tries to snapshot it.
+
+Below is a drop-in update that makes the binding **self-healing**:
+
+- listens for `EVENT_CLOSED`
+    
+- retries snapshots that fail with “closed”
+    
+- **re-acquires** the table by name and re-binds automatically
+    
+- guards against races during detach / destroy
+    
+
+---
+
+# `deephaven.service.ts` (only the changed/added parts)
+
+```ts
+// ...same imports / class header as before...
+
+export class DeephavenService {
+  // ...same fields / connect() / getTable() / listColumnNames()...
+
+  private isClosedError(err: unknown): boolean {
+    const m = String((err as any)?.message ?? err ?? '');
+    return m.includes('Table already closed') || m.includes('closed, cannot be used again');
+  }
+
+  /**
+   * Robust bind that auto-recovers if the table gets closed/replaced on the server.
+   * - `tableName` is used to re-fetch the handle when needed.
+   */
+  async bindByName(
+    tableName: string,
+    onRows: (rows: any[]) => void,
+    columnNames?: string[],
+    viewportRows = 10000
+  ): Promise<() => void> {
+    await this.connect();
+
+    let cancelled = false;
+    let currentTable: any | null = null;
+    let currentVp: any | null = null;
+    let colRefs: any[] = [];
+
+    const cleanup = () => {
+      try { currentTable?.removeEventListener?.(currentTable.EVENT_UPDATED, onUpdate); } catch {}
+      try { currentTable?.removeEventListener?.(currentTable.EVENT_CLOSED, onClosed); } catch {}
+      try { currentVp?.close?.(); } catch {}
+      currentVp = null;
+    };
+
+    const safeSnapshot = async () => {
+      if (!currentTable) return;
+      try {
+        const snap = await currentTable.snapshot(colRefs);
+        onRows(snap.toObjects());
+      } catch (e) {
+        if (this.isClosedError(e)) {
+          // will be handled by onClosed; ignore here
+          return;
+        }
+        // Ignore transient snapshot races
+      }
+    };
+
+    const onUpdate = async () => {
+      if (cancelled) return;
+      await safeSnapshot();
+    };
+
+    const onClosed = async () => {
+      if (cancelled) return;
+      // Re-acquire a fresh handle by name and re-bind
+      cleanup();
+      try {
+        currentTable = await this.getTable(tableName);
+        colRefs = Array.isArray(columnNames) && columnNames.length
+          ? currentTable.findColumns(...columnNames)
+          : (currentTable.columns as any[]);
+        currentVp = await currentTable.setViewport(0, viewportRows, colRefs);
+        currentTable.addEventListener(currentTable.EVENT_UPDATED, onUpdate);
+        currentTable.addEventListener(currentTable.EVENT_CLOSED, onClosed);
+        await safeSnapshot();
+      } catch {
+        // Backoff a bit and try again; keeps UI alive while dev reruns Python
+        if (!cancelled) setTimeout(onClosed, 300);
+      }
+    };
+
+    // Initial bind
+    currentTable = await this.getTable(tableName);
+    colRefs = Array.isArray(columnNames) && columnNames.length
+      ? currentTable.findColumns(...columnNames)
+      : (currentTable.columns as any[]);
+
+    currentVp = await currentTable.setViewport(0, viewportRows, colRefs);
+    currentTable.addEventListener(currentTable.EVENT_UPDATED, onUpdate);
+    currentTable.addEventListener(currentTable.EVENT_CLOSED, onClosed);
+    await safeSnapshot();
+
+    // Unbind
+    return () => { cancelled = true; cleanup(); };
+  }
+}
+```
+
+---
+
+# `live-table.component.ts` (updated to use `bindByName`)
+
+```ts
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import {
+  Component, Input, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef
+} from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { DeephavenService } from '../deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+<section class="card">
+  <header class="bar">
+    <h3 class="mono">{{ tableName }}</h3>
+    <span class="status">
+      <span *ngIf="error" class="error">{{ error }}</span>
+      <span *ngIf="!error && loading">Connecting…</span>
+    </span>
+  </header>
+
+  <div class="grid" *ngIf="!error">
+    <div class="thead" *ngIf="cols.length">
+      <div class="th" *ngFor="let c of cols; trackBy: trackCol">{{ c }}</div>
+    </div>
+
+    <div class="tbody">
+      <div class="tr" *ngFor="let r of rows; trackBy: trackRow">
+        <div class="td" *ngFor="let v of r | keyvalue : keySort; trackBy: trackCell">{{ v.value }}</div>
+      </div>
+    </div>
+  </div>
+</section>
+  `,
+  styles: [/* same CSS as before */]
+})
+export class LiveTableComponent implements OnInit, OnDestroy {
+  @Input() tableName = '';
+  @Input() columns: string[] | null = null;
+
+  loading = false;
+  error: string | null = null;
+
+  cols: string[] = [];
+  rows: any[] = [];
+
+  private unbind: (() => void) | null = null;
+
+  constructor(private dh: DeephavenService, private cdr: ChangeDetectorRef) {}
+
+  async ngOnInit(): Promise<void> {
+    try {
+      this.loading = true;
+      this.cdr.markForCheck();
+
+      await this.dh.connect();
+
+      // show header immediately from a fresh handle
+      const t = await this.dh.getTable(this.tableName);
+      this.cols = this.columns?.length ? this.columns : this.dh.listColumnNames(t);
+      this.cdr.markForCheck();
+
+      // resilient binding (auto rebinds when the table is closed/replaced)
+      this.unbind = await this.dh.bindByName(
+        this.tableName,
+        (rows) => { this.rows = rows; this.cdr.markForCheck(); },
+        this.columns ?? undefined
+      );
+
+      this.loading = false;
+      this.cdr.markForCheck();
+    } catch (e: any) {
+      this.loading = false;
+      this.error = (e?.message ?? e ?? 'Failed to connect').toString();
+      this.cdr.markForCheck();
+    }
+  }
+
+  ngOnDestroy(): void {
+    try { this.unbind?.(); } catch {}
+    this.unbind = null;
+  }
+
+  trackCol = (_: number, c: string) => c;
+  trackRow = (_: number, r: any) => r?.__row ?? r;
+  trackCell = (_: number, kv: any) => kv?.key ?? _;
+  keySort = (a: any, b: any) => ('' + a.key).localeCompare('' + b.key);
+}
+```
+
+---
+
+## Why this fixes “table already closed”
+
+- When you re-run your Python (or your pipeline swaps a ticket), Deephaven **closes the old table**.  
+    The service now listens for `EVENT_CLOSED` and **re-fetches** the table by name, then re-opens the viewport and continues streaming.
+    
+- Snapshot attempts during a tiny race can also hit “closed”; the code catches that and lets the `EVENT_CLOSED` path do the recovery.
+    
+- The component never calls `table.close()`; it only closes the **viewport** it owns.
+    
+
+Use the same environment values as before (server URL + PSK). With this in place, you should see the grid keep updating even if you re-run the server script, without any more “table already closed” crashes.
