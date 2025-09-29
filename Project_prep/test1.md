@@ -395,3 +395,99 @@ From your Angular app’s dev console (F12 → Network), reload and confirm:
 Once `dh-core.js` is loading, the rest of the code (CoreClient → login → startSession → setViewport → `getViewportData`) will behave like in the docs example. ([Deephaven](https://deephaven.io/core/docs/how-to-guides/use-jsapi/ "Use the JS API | Deephaven"))
 
 If you want, paste the exact Network tab error (status code + response) and I’ll pinpoint whether it’s a routing or CORS header issue.
+
+---------------------
+
+You’re hitting this because both input tables contain the Kafka system columns  
+`KafkaPartition`, `KafkaOffset`, `KafkaTimestamp`.  
+`left_outer_join` tries to bring all right-hand columns into the result (except the join keys). Since the left table already has those Kafka columns, the join fails with:
+
+> Conflicting column names [KafkaPartition] …
+
+Fix: either (a) tell the join to only add the right-hand columns you actually need, or (b) drop/rename the Kafka columns before joining.
+
+Below is a complete, working Deephaven script that keeps the Kafka columns in the raw tables (for debugging), but uses option (a) so the join result doesn’t conflict. It also publishes the three UI tables your Angular app expects: `users_ui`, `accounts_ui`, `user_accounts_ui`.
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.experimental.outer_joins import left_outer_join
+
+TOPIC_USERS  = "ccd01_sb_its_esp_tap3507_bishowocaseraw"
+TOPIC_ACCTS  = "ccd01_sb_its_esp_tap3507_bishowowcasecurated"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config":
+        "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required "
+        'clientId="TestScopeClient" '
+        'clientSecret="2Federate" '
+        'scope="*" ;',
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygywwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRKl",
+    "sasl.oauthbearer.token.endpoint.url": "https://fdsit.rasstest.tdbank.ca/as/token.oauth2",
+    "ssl.endpoint.identification.algorithm": "https",
+}
+
+# decode the Kafka message values as JSON with these fields
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,  # keep if your messages carry it; otherwise remove
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,   # use dt.string if the value truly arrives as a string
+})
+
+# Append-ticking raw tables (these include KafkaPartition/Offset/Timestamp)
+user_raw = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=USER_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+account_raw = kc.consume(
+    KAFKA_CONFIG,
+    TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=ACCOUNT_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+# Simple UI projections (these update automatically)
+users_ui    = user_raw.view("userId", "name", "email", "age")
+accounts_ui = account_raw.view("userId", "accountType", "balance")
+
+# Join WITHOUT conflicts:
+# - only bring the right-hand columns we care about (no Kafka* columns)
+user_account = left_outer_join(
+    l_table=users_ui,                 # left side already projected
+    r_table=accounts_ui,              # right side already projected
+    on=["userId"],
+    joins=["accountType", "balance"], # explicit => avoids Kafka* conflicts
+)
+
+user_accounts_ui = user_account.view("userId", "accountType", "balance", "name", "email", "age")
+
+# (Option B instead of explicit `joins`):
+# If you prefer, drop Kafka columns before any join:
+# DROP_KAFKA = ["KafkaPartition", "KafkaOffset", "KafkaTimestamp"]
+# users_clean   = user_raw.drop_columns(*DROP_KAFKA)
+# accounts_clean= account_raw.drop_columns(*DROP_KAFKA)
+# user_account  = left_outer_join(l_table=users_clean, r_table=accounts_clean,
+#                                 on=["userId"], joins=["accountType","balance"])
+# user_accounts_ui = user_account.view("userId","accountType","balance","name","email","age")
+```
+
+Nothing else needs to change on the Angular side if you’re already subscribing to `users_ui` and `accounts_ui` and (optionally) `user_accounts_ui`. This join specification removes the name collision that was throwing the error, while keeping your raw tables intact for inspection.
