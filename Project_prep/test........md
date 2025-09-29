@@ -2367,3 +2367,124 @@ export class UsersGridComponent implements OnInit, OnDestroy {
 Putting a **PSK in a browser env file exposes it to anyone with devtools**. For production, prefer switching to a real auth flow (e.g., token-based) or placing a tiny backend in front of Deephaven that holds secrets server-side. The docs show PSK for quick starts; treat it as **dev-only**. ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/use-jsapi/?utm_source=chatgpt.com "Use the JS API"))
 
 If you want, I can show you a **runtime config** pattern (load `/assets/runtime-config.json` so ops can set `baseUrl`/`psk` without rebuilds), or a tiny Node proxy that keeps the PSK off the client.
+
+
+
+--------------------------------
+tt
+
+You’re getting **`this.dh.CoreClient is not a constructor`** because importing  
+`/jsapi/dh-core.js` with a dynamic `import(...)` doesn’t return the Deephaven **dh  
+namespace** the way you expect. Fix is to load the client with **`@deephaven/jsapi-bootstrap`**.
+
+Below is a **drop-in replacement** for your service that:
+
+- loads the DH JS API with `loadDhCore(...)`
+    
+- reads `baseUrl` and **PSK** from Angular env
+    
+- logs in with PSK
+    
+- opens an `IdeConnection`
+    
+- streams a viewport
+    
+
+### 1) Install (once)
+
+```bash
+npm i @deephaven/jsapi-bootstrap @deephaven/jsapi-types
+```
+
+### 2) Service (replace your current one)
+
+```ts
+// src/app/deephaven.service.ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+import loadDhCore from '@deephaven/jsapi-bootstrap';
+import type { dh as DhNS } from '@deephaven/jsapi-types';
+import { environment } from '../environments/environment';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: typeof DhNS;
+  private client!: DhNS.CoreClient;
+  private ide!: DhNS.IdeConnection;
+
+  private _rows$ = new BehaviorSubject<any[]>([]);
+  readonly rows$ = this._rows$.asObservable();
+
+  private cleanupViewport?: () => void;
+
+  /** Connect using baseUrl + PSK from environment files */
+  async connect(): Promise<void> {
+    // ✅ Proper way to load the DH JS API in the browser
+    this.dh = await loadDhCore({ baseUrl: environment.deephaven.baseUrl });
+
+    // Create client and login with PSK
+    this.client = new this.dh.CoreClient(environment.deephaven.baseUrl);
+    await this.client.login({
+      type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+      token: environment.deephaven.psk,
+    });
+
+    // Get an IDE-style connection for tables, query scope, etc.
+    this.ide = await this.client.getAsIdeConnection();
+  }
+
+  /** Stream a small viewport from a DH table by name */
+  async subscribeViewport(tableName: string, top = 0, bottom = 499): Promise<void> {
+    const table = await this.ide.getTable(tableName);
+
+    // set the viewport we want to keep updated
+    table.setViewport(top, bottom);
+
+    const handleUpdate = async () => {
+      const vp = await table.getViewportData(); // { rows, columns }
+      const out: any[] = [];
+      for (let i = 0; i < vp.rows.length; i++) {
+        const src = vp.rows[i];
+        const rec: any = {};
+        for (const col of table.columns) rec[col.name] = src.get(col);
+        out.push(rec);
+      }
+      this._rows$.next(out);
+    };
+
+    // initial fill + live updates
+    await handleUpdate();
+    table.addEventListener('update', handleUpdate);
+
+    this.cleanupViewport = () => {
+      try { table.removeEventListener('update', handleUpdate); } catch {}
+      try { table.close?.(); } catch {}
+    };
+  }
+
+  async disconnect(): Promise<void> {
+    try { this.cleanupViewport?.(); } finally {
+      try { await this.ide?.close?.(); } catch {}
+      try { await this.client?.close?.(); } catch {}
+    }
+  }
+}
+```
+
+### 3) Why this fixes your error
+
+- `loadDhCore(...)` returns the **`dh` namespace** (with `CoreClient`, `IdeConnection`, etc.).
+    
+- Dynamically importing `/jsapi/dh-core.js` gives you a module wrapper—not the `dh` object—so `CoreClient` isn’t the class constructor you expect.
+    
+
+If you still see errors, double-check:
+
+- `environment.deephaven.baseUrl` and `psk` are set
+    
+- CORS on your DH server allows your app origin
+    
+- Your `@deephaven/jsapi-types` version roughly matches your DH server version (helpful for typings, not strictly required to run)
+    
+
+Want me to wire this into your AG Grid component you showed earlier?
