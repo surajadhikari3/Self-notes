@@ -1129,3 +1129,123 @@ export class UsersGridComponent implements OnInit, OnDestroy {
     
 
 If you tell me your exact **Deephaven server version** (e.g., 0.39.7), I’ll pin the **exact** `@deephaven/jsapi-types` version to match and adjust the sample to your auth (PSK / token).
+
+
+--------------------------------------
+
+
+Perfect—let’s strip all Kafka metadata and only expose clean, domain fields with stable types.
+
+# 1) Deephaven: export “UI” tables (domain-only, stable schema)
+
+Paste this in the DH console (edit topic names/config only). It enforces types at the boundary and exports three globals the Angular app can bind to:
+
+```python
+from deephaven import dtypes as dt
+import deephaven.kafkautil as kc
+
+# --- your topics & config ---
+TOPIC_USERS = "<users_topic>"
+TOPIC_ACCTS = "<accounts_topic>"
+KAFKA_CONFIG = {  # keep your working config here
+  # ...
+}
+
+# 1) Lock value types (no mixed/flip-flop types)
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name":   dt.string,
+    "email":  dt.string,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId":      dt.string,
+    "accountType": dt.string,
+    "balance":     dt.double,   # force numeric at the boundary
+})
+
+# 2) Append tables from Kafka
+user_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=USER_VALUE_SPEC,
+    table_type=kc.TableType.append()
+)
+
+account_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=ACCOUNT_VALUE_SPEC,
+    table_type=kc.TableType.append()
+)
+
+# 3) Extra safety: if producer ever sends "balance" as text, coerce or null it
+account_norm = account_raw.update_view(["balance = (double) balance"])
+
+# 4) Domain-only “UI” tables (NO KafkaPartition/Offset/Timestamp)
+users_ui         = user_raw.view(["userId", "name", "email"])
+accounts_ui      = account_norm.view(["userId", "accountType", "balance"])
+user_accounts_ui = account_norm.aj(
+    on=["userId"],  # join only on userId to avoid time type mismatches
+    joins=["accountType", "balance", "name", "email"]
+).view(["userId", "accountType", "balance", "name", "email"])
+```
+
+**What you get**
+
+- `users_ui(userId, name, email)`
+    
+- `accounts_ui(userId, accountType, balance)`
+    
+- `user_accounts_ui(userId, accountType, balance, name, email)`  
+    All fields are plain `string`/`double`—easy for JS. No Kafka columns, so no schema surprises.
+    
+
+---
+
+# 2) Angular: point to the new table names
+
+In your component (already using the self-healing viewport binder), just change the names you fetch:
+
+```ts
+const usersHandle   = await this.dh.getTableHandle('users_ui');
+const accountsHandle= await this.dh.getTableHandle('accounts_ui');
+const joinedHandle  = await this.dh.getTableHandle('user_accounts_ui');
+
+this.userCols    = this.makeCols(usersHandle);
+this.accountCols = this.makeCols(accountsHandle);
+this.joinedCols  = this.makeCols(joinedHandle);
+
+await this.userBinder.bind('users_ui',           this.userCols.map(c => String(c.field)),   rows => this.userRows = rows);
+await this.accountBinder.bind('accounts_ui',     this.accountCols.map(c => String(c.field)),rows => this.accountRows = rows);
+await this.joinedBinder.bind('user_accounts_ui', this.joinedCols.map(c => String(c.field)), rows => this.joinedRows = rows);
+```
+
+Because the server only exposes **primitives**, AG Grid can consume them directly. You can even drop the `valueGetter` if you want:
+
+```ts
+private makeCols(table: any) {
+  return (table?.columns ?? []).map((c: any) => ({
+    field: c.name,
+    sortable: true,
+    filter: true,
+    resizable: true,
+    minWidth: 120,
+  }));
+}
+```
+
+---
+
+# 3) Why this cures the ClassCast flood
+
+- No Kafka `DateTime/Instant` or other tricky types reach the browser.
+    
+- Types are **frozen at the Kafka ingest** (`json_spec` + `(double)balance`), so you won’t get “sometimes string, sometimes number”.
+    
+- Join is on a single **string key** (`userId`)—no timestamp mismatches.
+    
+- Viewport binder keeps streaming and auto-rebinds if a handle is closed.
+    
+
+If you later need Kafka columns for debugging, expose them via _separate_ tables like `users_debug`—don’t mix them into these UI tables.
