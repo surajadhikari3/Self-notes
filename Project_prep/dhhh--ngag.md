@@ -3251,3 +3251,91 @@ print(account.head(3).to_string())
 ```
 
 If you still hit issues, double-check that your `Value` column actually contains JSON text. If your producer sends something else (Avro/Protobuf), you’ll need the corresponding `kc.avro_spec(...)` / `kc.protostream_spec(...)` instead of `simple_spec`.
+------------------
+
+
+You don’t need `table_definition` at all. Just let the Kafka consumer parse the JSON value into real columns with `kc.json_spec(...)`. That avoids both the missing-import problem and the later “invalid column” errors.
+
+### End-to-end (no `table_definition`, no `columns` import)
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# --- your topics & Kafka config already set above ---
+
+# 1) Tell Deephaven how to parse the Kafka VALUE (JSON -> columns)
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    # add more if present
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,   # or dt.string if it really is a string
+})
+
+# 2) Consume as APPEND tables (columns will include Kafka* + the fields above)
+user_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_USERS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=USER_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+account_raw = kc.consume(
+    KAFKA_CONFIG, TOPIC_ACCTS,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=ACCOUNT_VALUE_SPEC,
+    table_type=kc.TableType.append,
+)
+
+# 3) (Optional) keep only the columns you need, but *use exact names & case*
+user = user_raw.view(["KafkaPartition","KafkaOffset","KafkaTimestamp","userId","name","email"])
+account = account_raw.view(["KafkaPartition","KafkaOffset","KafkaTimestamp","userId","accountType","balance"])
+
+# 4) Sanity checks – these must print the field names as columns (case-sensitive)
+print("USERS:", [c.name for c in user.columns])
+print("ACCTS:", [c.name for c in account.columns])
+
+# 5) If you need the “account append + enrich with user as-of time”:
+users_hist = user.sort_descending("KafkaTimestamp")
+user_account = account.aj(
+    users_hist,
+    on=["userId", "KafkaTimestamp"],
+    joins=["name", "email"]
+)
+```
+
+#### Why this fixes it
+
+- No `table_definition` or `string_col` needed — `kc.json_spec` is the supported way to describe a JSON value.
+    
+- Columns like `userId` actually exist immediately after `kc.consume(...)`, so `update_view/view/aj` won’t throw “invalid column”.
+    
+- Make sure your field names match the JSON exactly (including **case**). If your producer emits `userid` (lowercase), change the spec keys accordingly.
+    
+
+If `kc.json_spec` somehow isn’t available in your build (it should be), fall back to the parser approach you already tried:
+
+```python
+# consume VALUE as a single string column named Value
+STRING_VALUE = kc.simple_spec(["Value"], [dt.string])   # supported in many builds
+t = kc.consume(KAFKA_CONFIG, TOPIC_USERS,
+               key_spec=kc.KeyValueSpec.IGNORE,
+               value_spec=STRING_VALUE,
+               table_type=kc.TableType.append)
+
+# then parse:
+user = t.update_view([
+    '_node = io.deephaven.json.jackson.JsonTools.parseJson(Value)',
+    'userId = _node.get("userId") == null ? null : _node.get("userId").asText()',
+    'name   = _node.get("name")   == null ? null : _node.get("name").asText()',
+    'email  = _node.get("email")  == null ? null : _node.get("email").asText()',
+]).drop_columns(['_node','Value'])
+```
+
+But if `kc.simple_spec` isn’t present in your version, stick with `kc.json_spec` — that’s the cleanest, version-safe path.
