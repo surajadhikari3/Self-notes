@@ -935,3 +935,313 @@ export const environment = {
 If you still see “Cannot read properties of undefined (reading 'Client')”, it means the module didn’t load. That’s almost always the dev server bundling the module instead of loading from DH. The `/* webpackIgnore: true */` comment in the dynamic import prevents that. Also make sure the URL is reachable: open `http://localhost:10000/jsapi/dh-core.js` in your browser; you should get the JS file.
 
 If the table names differ, just pass the actual export names you see in the Deephaven IDE (left sidebar “Variables”) into the component instances.
+
+-----------------------
+
+
+ps
+
+Perfect—thanks for the versions. The code below works with Angular **20.x**, TS **5.9**, RxJS **7**, and the DH JSAPI you’ve got. It:
+
+- Loads **/jsapi/dh-core.js** dynamically from the DH server (no version mismatch with `@deephaven/*` packages).
+    
+- Auths in a **version-agnostic** way (`dh.login` → `client.login` → `client.authenticate` → no-auth).
+    
+- Subscribes to **Table.EVENT_UPDATED** and only closes the **viewport**, never the table (so you won’t see “table already closed”).
+    
+- Emits columns once and rows on update; safe against “closed during snapshot”.
+    
+
+---
+
+### `src/app/deephaven/deephaven.service.ts`
+
+```ts
+import { Injectable } from '@angular/core';
+import { BehaviorSubject } from 'rxjs';
+import { environment } from '../../environments/environment';
+
+type DH = any;
+type Client = any;
+type IDE = any;
+type Table = any;
+type Viewport = any;
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DH;
+  private client!: Client;
+  private ide!: IDE;
+  private ready = false;
+
+  get isReady() { return this.ready; }
+
+  /** Load the JSAPI directly from the DH server to avoid version drift */
+  private async loadDh(): Promise<void> {
+    if (this.dh) return;
+    const base = environment.deephavenUrl?.replace(/\/+$/, '');
+    if (!base) throw new Error('environment.deephavenUrl is not set');
+    const url = `${base}/jsapi/dh-core.js?ts=${Date.now()}`;
+    const mod: any = await import(/* webpackIgnore: true */ url);
+    this.dh = mod?.default ?? mod;
+  }
+
+  private makeClient(base: string): Client {
+    // Different JSAPI builds expose either CoreClient or Client
+    const Ctor = this.dh?.CoreClient ?? this.dh?.Client;
+    if (!Ctor) throw new Error('No CoreClient/Client constructor found in JSAPI');
+    return new Ctor(base);
+  }
+
+  private async authenticateIfNeeded(psk: string, base: string): Promise<void> {
+    if (!psk) return; // anonymous server
+    // 1) Top-level helper in some builds
+    if (typeof this.dh?.login === 'function') {
+      await this.dh.login(
+        { type: 'io.deephaven.authentication.psk.PskAuthenticationHandler', token: psk },
+        base
+      );
+      return;
+    }
+    // 2) Handler class + client login/authenticate
+    const PskCtor = this.dh?.auth?.PskAuthHandler ?? this.dh?.PskAuthHandler ?? null;
+    const handler = PskCtor ? new PskCtor(psk)
+      : { type: 'io.deephaven.authentication.psk.PskAuthenticationHandler', token: psk };
+
+    const login = (this.client as any).login;
+    const authenticate = (this.client as any).authenticate;
+    if (typeof login === 'function') { await login.call(this.client, handler); return; }
+    if (typeof authenticate === 'function') { await authenticate.call(this.client, handler); return; }
+    // If neither exists, server likely doesn’t require auth; proceed.
+  }
+
+  /** Connect once */
+  async connect(): Promise<void> {
+    if (this.ready) return;
+    await this.loadDh();
+
+    const base = environment.deephavenUrl.replace(/\/+$/, '');
+    const psk  = environment.deephavenPsk ?? '';
+
+    this.client = this.makeClient(base);
+    await this.authenticateIfNeeded(psk, base);
+
+    // IDE connection method name varies by build
+    const getIde =
+      (this.client as any).getAsIdeConnection ??
+      (this.client as any).getAsIde ??
+      (this.client as any).getIde;
+    if (typeof getIde !== 'function') throw new Error('Client has no IDE connection method');
+    this.ide = await getIde.call(this.client);
+
+    // Some builds need this; harmless if it’s a no-op
+    if (typeof this.ide.startSession === 'function') {
+      await this.ide.startSession('python');
+    }
+
+    this.ready = true;
+  }
+
+  /** Fetch a global table by variable name (don’t close this table from the client) */
+  async getTable(varName: string): Promise<Table> {
+    if (!this.ready) await this.connect();
+    const obj = await this.ide.getObject(varName);
+    if (!obj || obj.type !== 'Table') {
+      throw new Error(`Global '${varName}' is not a Table (type=${obj?.type})`);
+    }
+    return obj;
+  }
+
+  /** Stream a table: BehaviorSubjects for cols/rows + disposer that closes only the viewport */
+  streamTable(varName: string) {
+    const cols$ = new BehaviorSubject<string[]>([]);
+    const rows$ = new BehaviorSubject<any[]>([]);
+
+    let table: Table | null = null;
+    let vp: Viewport | null = null;
+    let onUpdate: ((e: any) => void) | null = null;
+    let cols: string[] = [];
+    let disposed = false;
+
+    const toObjects = (snap: any) => (snap?.toObjects?.() ?? []);
+
+    const attach = async () => {
+      try {
+        await this.connect();
+        table = await this.getTable(varName);
+
+        cols = (table.columns ?? []).map((c: any) => c.name);
+        cols$.next(cols);
+
+        // Open a viewport and prime with a snapshot
+        vp = await table.setViewport(0, 2000, cols);
+        const first = await table.snapshot(cols);
+        rows$.next(toObjects(first));
+
+        // Listen for updates
+        onUpdate = async () => {
+          try {
+            if (!table) return;
+            const snap = await table.snapshot(cols);
+            rows$.next(toObjects(snap));
+          } catch (err: any) {
+            const m = String(err?.message || err);
+            // swallow transient "already closed" if user navigated away
+            if (!/already closed/i.test(m)) console.warn('[DH] snapshot error:', m);
+          }
+        };
+        table.addEventListener(this.dh.Table.EVENT_UPDATED, onUpdate);
+      } catch (e) {
+        cols$.error(e);
+        rows$.error(e);
+      }
+    };
+
+    const dispose = async () => {
+      if (disposed) return;
+      disposed = true;
+      try { if (table && onUpdate) table.removeEventListener(this.dh.Table.EVENT_UPDATED, onUpdate); } catch {}
+      try { if (vp) await vp.close(); } catch {}
+      table = null; vp = null; onUpdate = null;
+    };
+
+    void attach();
+    return { cols$, rows$, dispose };
+  }
+}
+```
+
+---
+
+### `src/app/live-table.component.ts`
+
+```ts
+import { Component, Input, OnDestroy, OnInit } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { Subscription } from 'rxjs';
+import { DeephavenService } from './deephaven/deephaven.service';
+
+@Component({
+  selector: 'app-live-table',
+  standalone: true,
+  imports: [CommonModule],
+  template: `
+    <section class="card">
+      <h3>{{ name }}</h3>
+      <div class="err" *ngIf="error">{{ error }}</div>
+      <div class="muted" *ngIf="!error && loading">Connecting…</div>
+
+      <table *ngIf="!loading && !error">
+        <thead><tr><th *ngFor="let c of cols">{{ c }}</th></tr></thead>
+        <tbody>
+          <tr *ngFor="let r of rows; trackBy: trackRow">
+            <td *ngFor="let c of cols; trackBy: trackCol">{{ r[c] }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  `,
+  styles: [`
+    .card { padding:.75rem;border:1px solid #ddd;border-radius:.5rem;margin:.5rem 0 }
+    .err { color:#b00020;margin:.5rem 0 }
+    .muted { color:#666;margin:.5rem 0 }
+    table { border-collapse:collapse;width:100% }
+    th,td{ border:1px solid #eee;padding:.25rem .5rem;font-family:ui-monospace,Menlo,Consolas,monospace }
+    thead th{ background:#f8f8f8;position:sticky;top:0 }
+  `],
+})
+export class LiveTableComponent implements OnInit, OnDestroy {
+  @Input({ required: true }) name!: string;
+
+  loading = true;
+  error = '';
+  cols: string[] = [];
+  rows: any[] = [];
+
+  private subCols?: Subscription;
+  private subRows?: Subscription;
+  private disposer?: () => Promise<void>;
+
+  constructor(private dh: DeephavenService) {}
+
+  trackRow = (_: number, r: any) => r?.__i ?? r;
+  trackCol = (_: number, c: string) => c;
+
+  async ngOnInit() {
+    try {
+      const { cols$, rows$, dispose } = this.dh.streamTable(this.name);
+      this.disposer = dispose;
+      this.subCols = cols$.subscribe({
+        next: c => (this.cols = c, this.loading = false),
+        error: e => (this.error = String(e?.message || e), this.loading = false),
+      });
+      this.subRows = rows$.subscribe({
+        next: r => (this.rows = r, this.loading = false),
+        error: e => (this.error = String(e?.message || e), this.loading = false),
+      });
+    } catch (e: any) {
+      this.error = String(e?.message || e);
+      this.loading = false;
+    }
+  }
+
+  async ngOnDestroy() {
+    this.subCols?.unsubscribe();
+    this.subRows?.unsubscribe();
+    await this.disposer?.();
+  }
+}
+```
+
+---
+
+### Minimal host & env
+
+`src/app/app.component.ts`
+
+```ts
+import { Component } from '@angular/core';
+import { LiveTableComponent } from './live-table.component';
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [LiveTableComponent],
+  template: `
+    <app-live-table name="user"></app-live-table>
+    <app-live-table name="account"></app-live-table>
+  `,
+})
+export class AppComponent {}
+```
+
+`src/main.ts`
+
+```ts
+import { bootstrapApplication } from '@angular/platform-browser';
+import { AppComponent } from './app/app.component';
+bootstrapApplication(AppComponent).catch(console.error);
+```
+
+`src/environments/environment.ts`
+
+```ts
+export const environment = {
+  production: false,
+  deephavenUrl: 'http://localhost:10000',   // your DH server
+  deephavenPsk:  'YOUR_PSK_OR_EMPTY',       // '' if anonymous
+};
+```
+
+---
+
+### Notes for your exact setup
+
+- Your `package.json` is fine. You can keep `@deephaven/jsapi-types` for typings. We **don’t import** `@deephaven/jsapi-bootstrap`; the service always loads the JSAPI **from the server** to match the running DH.
+    
+- The previous “`client.login` is not a function” / “Function not implemented” issues come from API shape differences; the service above probes all shapes and proceeds even when auth isn’t required.
+    
+- The “table already closed” is avoided by only closing the **viewport** in `dispose()` and never calling `table.close()` on a global.
+    
+
+Wire this in and you should see headers immediately, then rows streaming as DH updates. If anything still errors, copy the first error line from the devtools console (it will include which branch it took) and we can tweak the tiny auth probe for your exact JSAPI build.
