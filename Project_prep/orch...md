@@ -370,3 +370,309 @@ async function subscribeJoined() {
     
 
 If you want, paste your two actual topic names and the exact JSON payloads — I’ll tailor `SCHEMA_A` / `SCHEMA_B` precisely so you don’t hit parsing or join type issues.
+
+-------------------------------------
+
+
+Awesome—let’s wire the **minimal, end-to-end** flow you asked for:
+
+- one **control topic** message: `{ topicA, topicB, joinType }`
+    
+- **Deephaven** listens to control, (re)spins two `kc.consume(...)`, builds the join, and exposes three live tables
+    
+- tiny **Spring Boot** producer to publish the control message
+    
+- a simple **Angular** service + component to show Topic A, Topic B, and the **joined** table live
+    
+
+---
+
+# 1) Spring Boot — publish control command
+
+```java
+// build.gradle (or pom.xml equivalents)
+implementation "org.springframework.boot:spring-boot-starter-web"
+implementation "org.springframework.kafka:spring-kafka"
+implementation "com.fasterxml.jackson.core:jackson-databind"
+```
+
+```yaml
+# application.yml
+spring:
+  kafka:
+    bootstrap-servers: your-broker:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+app:
+  control-topic: dh.control
+```
+
+```java
+// ControlCommand.java
+public record ControlCommand(String topicA, String topicB, String joinType) {}
+```
+
+```java
+// ControlController.java
+@RestController
+@RequiredArgsConstructor
+class ControlController {
+  private final KafkaTemplate<String,String> kafka;
+  @Value("${app.control-topic}") String controlTopic;
+  private final ObjectMapper om = new ObjectMapper();
+
+  @PostMapping("/control")
+  public Map<String,String> post(@RequestBody ControlCommand cmd) throws Exception {
+    kafka.send(controlTopic, om.writeValueAsString(cmd));
+    return Map.of("status","sent","topic",controlTopic);
+  }
+}
+```
+
+Send:
+
+```bash
+curl -X POST localhost:8080/control \
+  -H 'Content-Type: application/json' \
+  -d '{"topicA":"ccd01_sb_..._raw","topicB":"ccd01_sb_..._curated","joinType":"LEFT_OUTER"}'
+```
+
+---
+
+# 2) Deephaven script — minimal control + dynamic spin-up
+
+> Assumption (to keep it simple): **Topic A** has the “users” schema; **Topic B** has the “accounts” schema you showed. Adjust the two `*_VALUE_SPEC` maps if your fields differ.
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, query_scope
+from deephaven.experimental.outer_joins import left_outer_join, natural_join, exact_join
+import os, json
+
+# ---- Kafka client config (yours) ----
+KAFKA_CONFIG = {
+    "bootstrap.servers": os.getenv("BOOTSTRAP", "pkc-...:9092"),
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.oauthbearer.token.endpoint.url": os.getenv("TOKEN_URL", "https://.../token.oauth2"),
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": os.getenv("CLIENT_ID","TestScopeClient"),
+    "sasl.oauthbearer.client.secret": os.getenv("CLIENT_SECRET","2Federate"),
+    "sasl.oauthbearer.extensions.logicalCluster": os.getenv("LOGICAL_CLUSTER","lkc-ygvwwp"),
+    "sasl.oauthbearer.extensions.identityPoolId": os.getenv("IDENTITY_POOL","pool-NRk1"),
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+CONTROL_TOPIC = os.getenv("CONTROL_TOPIC","dh.control")
+
+# ---- control message schema: {topicA, topicB, joinType} ----
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string           # LEFT_OUTER | NATURAL | EXACT
+})
+
+# ---- fixed value specs for simplicity (adjust if needed) ----
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+
+# ---- keep current live tables here ----
+state = {"A": None, "B": None, "J": None}
+
+def _join_by_type(jtype, lhs, rhs):
+    jtype = (jtype or "LEFT_OUTER").upper()
+    if jtype == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=["userId"], joins=["accountType","balance"])
+    if jtype == "NATURAL":
+        return natural_join(lhs, rhs, on=["userId"], joins=["accountType","balance"])
+    if jtype == "EXACT":
+        return exact_join(lhs, rhs, on=["userId"], joins=["accountType","balance"])
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+def _apply(topicA, topicB, joinType):
+    # (re)create two consumers and the join
+    a = kc.consume(KAFKA_CONFIG, topicA, key_spec=kc.KeyValueSpec.IGNORE,
+                   value_spec=USER_VALUE_SPEC, table_type=kc.TableType.append())
+    b = kc.consume(KAFKA_CONFIG, topicB, key_spec=kc.KeyValueSpec.IGNORE,
+                   value_spec=ACCOUNT_VALUE_SPEC, table_type=kc.TableType.append())
+
+    a_ui = a.view(["userId","name","email","age"])
+    b_ui = b.view(["userId","accountType","balance"])
+
+    j = _join_by_type(joinType, a_ui, b_ui)
+    j_ui = j.view(["userId","accountType","balance","name","email","age"])
+
+    state["A"], state["B"], state["J"] = a_ui, b_ui, j_ui
+
+    # expose stable names Angular can query
+    query_scope.expose("topicA_ui", a_ui)
+    query_scope.expose("topicB_ui", b_ui)
+    query_scope.expose("joined_ui", j_ui)
+    return "OK"
+
+# ---- consume control topic and apply latest command ----
+control_raw = kc.consume(KAFKA_CONFIG, CONTROL_TOPIC,
+                         key_spec=kc.KeyValueSpec.IGNORE,
+                         value_spec=CONTROL_SPEC,
+                         table_type=kc.TableType.append())
+
+def _dispatch(topicA, topicB, joinType):
+    try:
+        return _apply(topicA, topicB, joinType)
+    except Exception as e:
+        return f"ERR: {e}"
+
+control_status = control_raw.update(
+    "status = _dispatch(topicA, topicB, joinType)"
+)
+
+def exposeToAngular():
+    # returns TopicA, TopicB, and Joined tables (in that order)
+    return (state["A"], state["B"], state["J"])
+```
+
+- Post a new control message → Deephaven immediately switches to the two topics and rebuilds the join.
+    
+- Angular will always find three tables: `topicA_ui`, `topicB_ui`, `joined_ui`.
+    
+
+---
+
+# 3) Angular (v20) — display the three live tables
+
+**Install (one time):**
+
+```bash
+npm i @deephaven/jsapi-bootstrap @deephaven/jsapi-types ag-grid-community ag-grid-angular
+```
+
+**`src/environments/environment.ts`**
+
+```ts
+export const environment = {
+  production: false,
+  dhUrl: 'http://localhost:10000' // your DH IDE/server URL
+};
+```
+
+**`deephaven.service.ts`**
+
+```ts
+import { Injectable } from '@angular/core';
+import { ensureDhConnected } from '@deephaven/jsapi-bootstrap';
+import type { dh as DhNS } from '@deephaven/jsapi-types';
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh?: typeof DhNS;
+  private client?: DhNS.Client;
+
+  async connect(): Promise<void> {
+    if (this.client) return;
+    const { dhClient, dh } = await ensureDhConnected({ baseUrl: (window as any).env?.dhUrl || '/'}); // base URL auto
+    this.dh = dh;
+    this.client = dhClient;
+  }
+
+  async getTable(name: string) {
+    await this.connect();
+    if (!this.client || !this.dh) throw new Error('DH not connected');
+    const session = await this.client.getAsSession();
+    return session.getTable({ name }); // expects query_scope.expose(name,...)
+  }
+}
+```
+
+**`live-join.component.ts`**
+
+```ts
+import { Component, OnDestroy, OnInit } from '@angular/core';
+import { DeephavenService } from './deephaven.service';
+import { ColDef } from 'ag-grid-community';
+
+@Component({
+  selector: 'app-live-join',
+  template: `
+  <div class="grid-wrap">
+    <h3>Topic A</h3>
+    <ag-grid-angular class="ag-theme-quartz" style="height:250px"
+      [rowData]="rowsA" [columnDefs]="colsA"></ag-grid-angular>
+
+    <h3>Topic B</h3>
+    <ag-grid-angular class="ag-theme-quartz" style="height:250px"
+      [rowData]="rowsB" [columnDefs]="colsB"></ag-grid-angular>
+
+    <h3>Joined</h3>
+    <ag-grid-angular class="ag-theme-quartz" style="height:300px"
+      [rowData]="rowsJ" [columnDefs]="colsJ"></ag-grid-angular>
+  </div>
+  `
+})
+export class LiveJoinComponent implements OnInit, OnDestroy {
+  rowsA:any[]=[]; rowsB:any[]=[]; rowsJ:any[]=[];
+  colsA:ColDef[]=[{field:'userId'},{field:'name'},{field:'email'},{field:'age'}];
+  colsB:ColDef[]=[{field:'userId'},{field:'accountType'},{field:'balance'}];
+  colsJ:ColDef[]=[{field:'userId'},{field:'accountType'},{field:'balance'},{field:'name'},{field:'email'},{field:'age'}];
+
+  private subs:any[]=[];
+
+  constructor(private dhs:DeephavenService){}
+
+  async ngOnInit() {
+    const [tA,tB,tJ] = await Promise.all([
+      this.dhs.getTable('topicA_ui'),
+      this.dhs.getTable('topicB_ui'),
+      this.dhs.getTable('joined_ui')
+    ]);
+
+    // Minimal live viewport loop
+    const attach = async (t:any, sink:(rows:any[])=>void) => {
+      const vp = await t.setViewport(0, 500); // first 501 rows; adjust as needed
+      const sub = t.addEventListener(t.EVENT_UPDATED, () => {
+        const r: any[] = [];
+        const sz = vp.rows;
+        for (let i=0;i<sz;i++){
+          r.push(vp.getRow(i));  // plain object per row
+        }
+        sink(r);
+      });
+      this.subs.push(()=> t.removeEventListener(t.EVENT_UPDATED, sub));
+      // trigger once
+      const init: any[] = [];
+      for (let i=0;i<vp.rows;i++) init.push(vp.getRow(i));
+      sink(init);
+    };
+
+    await attach(tA, rows => this.rowsA = rows);
+    await attach(tB, rows => this.rowsB = rows);
+    await attach(tJ, rows => this.rowsJ = rows);
+  }
+
+  ngOnDestroy(){ this.subs.forEach(fn=>fn()); }
+}
+```
+
+> The component simply binds to three table names you exposed from Deephaven. When you POST a new control message, Deephaven swaps the sources and the grid updates live.
+
+---
+
+## How to use
+
+1. Start Deephaven with the script above.
+    
+2. Start Spring Boot and POST:
+    
+    - `{"topicA":"<your users topic>","topicB":"<your accounts topic>","joinType":"LEFT_OUTER"}`
+        
+3. Open the Angular page → you’ll see **Topic A**, **Topic B**, and **Joined**.  
+    Re-POST with different topics or a different `joinType` → the tables update live, no app restarts.
+    
+
+If you want to also change schemas later, we can re-introduce a `value_spec_json` per topic—but for now this keeps it dead simple while giving you dynamic topics + join type.
