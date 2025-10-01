@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/test1.md",
+                "file": "Project_prep/orch...md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "test1"
+              "title": "orch.."
             }
           }
         ]
@@ -196,6 +196,8 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
+    "Project_prep/test1.md",
+    "Project_prep/orch...md",
     "Project_prep/test........md",
     "Project_prep/rt-dh.md",
     "Project_prep/pls-goddd...md",
@@ -203,7 +205,6 @@
     "Project_prep/dashhh....md",
     "Project_prep/DASh;;;.md",
     "Project_prep/ag-dh.md",
-    "Project_prep/test1.md",
     "Project_prep/new...md",
     "Project_prep/dh-angular.md",
     "interview-prep/Minute pitch.md",
@@ -221,7 +222,6 @@
     "Cloud/Open-shift.md",
     "Cloud/Kubernets.md",
     "Interviews/On-class interview -Mohan.md",
-    "Interviews/Mohan TD interview.md",
     "Pasted image 20250914211139.png",
     "interview-prep",
     "Project_prep/ui/single-user-gap.svg",
