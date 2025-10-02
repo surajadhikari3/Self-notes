@@ -2588,3 +2588,206 @@ app["control_status"]  = control_status
 ---
 
 Do you also want me to show you the **Angular-side snippet** that waits for these exports (`first_scope_ui`, etc.) to exist before setting the viewport, so you don’t hit the “DEPENDENCY_FAILED” race?
+
+-----------------------------------------------------------
+
+You’re seeing that error when opening `first_scope_ui / second_scope_ui / final_ui` because something in the _creation path_ of those objects is throwing, so the export/open fails. The fastest way to make this bullet-proof is to:
+
+1. **Run only in the IDE** (no App-Mode APIs),
+    
+2. **Create placeholders immediately** so the names always open, and
+    
+3. **Wire the control stream** to (re)build the two consumers + the join and surface **any exception** in a small `apply_err` table and in `control_status`.
+    
+
+Below is a **single, self-contained IDE script** you can paste into `/ide` and run. It does all three.
+
+---
+
+### ✅ IDE-only robust script
+
+```python
+# ---------------- Imports ----------------
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table, new_table, Column
+from deephaven.experimental.outer_joins import left_outer_join
+
+# ---------------- Config -----------------
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # for data topics
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string,  # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,
+})
+
+# ------------- Placeholders (always open) -------------
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "name=(String)null",
+        "email=(String)null",
+        "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "accountType=(String)null",
+        "balance=(double)NaN",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "accountType=(String)null",
+        "balance=(double)NaN",
+        "name=(String)null",
+        "email=(String)null",
+        "age=(long)NULL_LONG",
+    ])
+
+# bind placeholders as globals so you can click them immediately
+first_scope_ui  = _empty_users()
+second_scope_ui = _empty_accounts()
+final_ui        = _empty_joined()
+
+# small table to surface any apply error
+apply_err = new_table([Column("error", [])])
+
+# ------------- Join helper -------------
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)   # experimental fn
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)       # table method
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)         # table method
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# ------------- Apply (replaces the three globals) -------------
+def apply_join(topicA: str, topicB: str, joinType: str):
+    """
+    (Re)create consumers and the join, then replace first_scope_ui / second_scope_ui / final_ui.
+    Returns 'OK' or 'ERR: ...'. Any exception is also put into apply_err.
+    """
+    global first_scope_ui, second_scope_ui, final_ui, apply_err
+    try:
+        left_raw = kc.consume(
+            KAFKA_CONFIG, topicA,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=USER_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+        right_raw = kc.consume(
+            KAFKA_CONFIG, topicB,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=ACCOUNT_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+
+        A = left_raw.view(["userId", "name", "email", "age"])
+        B = right_raw.view(["userId", "accountType", "balance"])
+
+        J = _join_by_type(joinType, A, B, on_cols=["userId"], join_cols=["accountType", "balance"])
+        J = J.view(["userId", "accountType", "balance", "name", "email", "age"])
+
+        first_scope_ui, second_scope_ui, final_ui = A, B, J
+        apply_err = new_table([Column("error", [""])])
+        return "OK"
+    except Exception as e:
+        apply_err = new_table([Column("error", [str(e)])])
+        return f"ERR: {e}"
+
+# ------------- Control stream (earliest) -------------
+CTRL_CFG = dict(KAFKA_CONFIG); CTRL_CFG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CTRL_CFG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+control_debug  = control_raw.tail(10)
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+# call apply_join whenever a new (topicA,topicB,joinType) arrives
+control_status = control_latest.update(['status = apply_join(topicA, topicB, joinType)'])
+
+# ------------- Angular helper -------------
+def exposeToAngular():
+    return first_scope_ui, second_scope_ui, final_ui
+```
+
+---
+
+## What to do now
+
+1. Paste the script above into the **IDE** and run it.
+    
+    - Immediately open `first_scope_ui`, `second_scope_ui`, `final_ui` → they should open (placeholders).
+        
+    - Open `control_debug` to confirm your control JSON arrived.
+        
+    - Open `control_status` → it will be `"OK"` or an `"ERR: ..."` string.
+        
+2. If the three UI tables still won’t open, click **`apply_err`**.
+    
+    - The first (and only) row contains the **exact exception** thrown when building the consumers or join (topic not found, auth failure, schema mismatch, etc.). Fix that root cause.
+        
+3. From Angular, attach to the IDE Python console and fetch:
+    
+    ```ts
+    const ide = await client.getConsole('python'); // same session
+    await ide.runCode('first_scope_ui, second_scope_ui, final_ui = exposeToAngular()');
+    const [A,B,J] = await Promise.all([
+      ide.getTable('first_scope_ui'),
+      ide.getTable('second_scope_ui'),
+      ide.getTable('final_ui'),
+    ]);
+    ```
+    
+
+---
+
+### Why this resolves your symptom
+
+- The names exist **before** any control message (placeholders), so opening them can’t fail due to missing exports.
+    
+- Any failure during consumer creation or join is **captured** in `apply_err` and mirrored as text in `control_status`, so you don’t have to hunt through logs.
+    
+- No App-Mode APIs are used here (you’re running in `/ide`), so you avoid the “application state outside ApplicationContext” error entirely.
+    
+
+If `apply_err` shows a message you’re not sure how to fix (e.g., a Kafka auth/offset error), paste that single line error and I’ll zero in on the fix.
