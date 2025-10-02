@@ -1456,3 +1456,205 @@ def exposeToAngular():
         
 
 If you still see an error, it’ll now surface in `control_status.status`. Share that one line and I’ll pinpoint the fix.
+-----------------------
+
+
+Great questions. Here’s how to **verify** your globals / `exposeToAngular()` on the Deephaven side, and how to **fetch the dynamic tables from Angular** using the supported JS API (via `@deephaven/jsapi-bootstrap`). No `dh-core.js` paths needed.
+
+---
+
+# 1) Verify in Deephaven IDE (server side)
+
+After your Python script runs, you should see these **tables** in the IDE’s Variables pane:
+
+- `A_ui`, `B_ui`, `J_ui`
+    
+- `control_debug`, `control_status`, etc.
+    
+
+Also add this at the very end of your script (purely for sanity):
+
+```python
+A_exists = str('A_ui' in globals())
+B_exists = str('B_ui' in globals())
+J_exists = str('J_ui' in globals())
+```
+
+Open `A_exists/B_exists/J_exists` → should be `"True"` once the control message applies.
+
+You can also execute inside the session:
+
+```python
+# quick check inside DH:
+A_ui.head(5)
+B_ui.head(5)
+J_ui.head(5)
+```
+
+If those open with rows, you’re golden.
+
+---
+
+# 2) Call `exposeToAngular()` from JS and bind results to named variables
+
+When you call a Python function from JS, the easiest way to receive the tables with **stable names** is to run a tiny Python snippet that assigns the tuple to variables. Do this from your Angular app.
+
+---
+
+# 3) Angular: connect & fetch tables (using `@deephaven/jsapi-bootstrap`)
+
+> This works with current Deephaven Web. It does **not** use `/jsapi/dh-core`. Use the bootstrap package.
+
+```ts
+// dh.service.ts
+import { Injectable } from '@angular/core';
+import { getDeephaven } from '@deephaven/jsapi-bootstrap';
+
+@Injectable({ providedIn: 'root' })
+export class DhService {
+  private dh: any;
+  private client: any;
+  private session: any;
+
+  async connect(url = 'http://localhost:10000'): Promise<void> {
+    this.dh = await getDeephaven();                         // loads Deephaven JS API
+    this.client = await this.dh.Client.connect({ url });    // opens WS connection
+    // Start a Python console session (or reuse if already created)
+    this.session = await this.client.getConsole('python');  // some builds: await this.client.getConsole({ language: 'python' })
+  }
+
+  /** Optional: list variables to verify globals exist */
+  async listVariables(): Promise<any[]> {
+    const vars = await this.session.getVariables();
+    // Each entry typically has fields like `title`, `type`, `id`.
+    return vars;
+  }
+
+  /** Bind exposeToAngular() results to *named* globals in the session */
+  async bindAngularTuple(): Promise<void> {
+    // This line runs in the server Python session:
+    // it calls your function and assigns the tuple to named variables.
+    await this.session.runCode('A_ui, B_ui, J_ui = exposeToAngular()');
+  }
+
+  /** Get a table handle by variable name */
+  async getTableByName(varName: 'A_ui' | 'B_ui' | 'J_ui') {
+    // Two common APIs across versions:
+    // 1) getObject + asTable()
+    // 2) getTable directly (newer)
+    try {
+      // newer:
+      return await this.session.getTable(varName);
+    } catch {
+      // fallback:
+      const obj = await this.session.getObject(varName);
+      return obj.asTable(); // returns Table
+    }
+  }
+}
+```
+
+Usage (e.g., in a component):
+
+```ts
+// example.component.ts
+import { Component, OnInit } from '@angular/core';
+import { DhService } from './dh.service';
+
+@Component({
+  selector: 'app-example',
+  template: `<div>Loaded: {{loaded}}</div>`
+})
+export class ExampleComponent implements OnInit {
+  loaded = false;
+
+  constructor(private dh: DhService) {}
+
+  async ngOnInit() {
+    await this.dh.connect('http://localhost:10000');
+
+    // (1) See variables (A_ui, B_ui, J_ui should appear after control message)
+    const vars = await this.dh.listVariables();
+    console.log('DH variables:', vars.map(v => ({ title: v.title, type: v.type })));
+
+    // (2) Ensure the tuple is bound to names
+    await this.dh.bindAngularTuple();
+
+    // (3) Fetch tables
+    const A = await this.dh.getTableByName('A_ui');
+    const B = await this.dh.getTableByName('B_ui');
+    const J = await this.dh.getTableByName('J_ui');
+
+    console.log('A table', A);
+    console.log('B table', B);
+    console.log('J table', J);
+
+    // Now you can adaptors to AG Grid or snapshot for debug:
+    const AData = await A.snapshot(); // small snapshot for debug
+    console.log('A snapshot', AData);
+
+    this.loaded = true;
+  }
+}
+```
+
+> If your build doesn’t have `session.getTable(name)`, the fallback using `getObject(name).asTable()` will work.
+
+---
+
+# 4) Common pitfalls & fixes
+
+1. **You can’t see vars / function**
+    
+    - Make sure your Python script is **running** in the same session your client connects to. With default setup, there’s one shared session; the code above connects to it.
+        
+    - Ensure `exposeToAngular()` is defined at the **top level** (not inside another function).
+        
+2. **`/jsapi/dh-core` 404**
+    
+    - Don’t call this path. It’s from the old, direct bundle. Use `@deephaven/jsapi-bootstrap` as above; it fetches the correct assets automatically.
+        
+3. **Control topic applied, but J_ui empty**
+    
+    - Open `control_status` table in DH IDE; check the `status` column (it will show `ERR: ...` if your join failed).
+        
+    - Verify `A_head` & `B_head` have rows and share `userId`.
+        
+    - Confirm column names/types match the `USER_VALUE_SPEC` / `ACCOUNT_VALUE_SPEC`.
+        
+4. **Multiple applies**
+    
+    - The script uses `last_by([topicA, topicB, joinType])`, so only the latest unique combo applies. Send a fresh message to re-apply when testing.
+        
+
+---
+
+# 5) Minimal “smoke test” from the browser console (no Angular)
+
+If you want to quickly test outside Angular:
+
+```js
+(async () => {
+  const dh = await window.deephaven.loadModule('@deephaven/jsapi-bootstrap').then(m => m.getDeephaven());
+  const client = await dh.Client.connect({ url: 'http://localhost:10000' });
+  const session = await client.getConsole('python');
+  await session.runCode('A_ui, B_ui, J_ui = exposeToAngular()');
+  const A = await (session.getTable ? session.getTable('A_ui') : session.getObject('A_ui').then(o => o.asTable()));
+  console.log('A rows snapshot', await A.snapshot());
+})();
+```
+
+(If `window.deephaven.loadModule` isn’t available, just use the Angular/TypeScript version above.)
+
+---
+
+## TL;DR
+
+- Don’t use `/jsapi/dh-core`; use `@deephaven/jsapi-bootstrap`.
+    
+- In JS, call `session.runCode('A_ui, B_ui, J_ui = exposeToAngular()')`, then fetch each by name with `getTable('A_ui')` or `getObject('A_ui').asTable()`.
+    
+- Verify on the server by opening `control_debug`, `control_status`, and `A_head/B_head/J_head` in the IDE.
+    
+
+If you paste your current package versions (`@deephaven/jsapi-bootstrap`, `@deephaven/jsapi-types`) I can tailor the `getTable` vs `getObject().asTable()` line to match exactly.
