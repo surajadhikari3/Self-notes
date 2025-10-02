@@ -1797,3 +1797,195 @@ catch { await ide.runCode('first_scope_ui, second_scope_ui, final_ui = exposeToA
 ---
 
 If you share which JSAPI methods are available on your `CoreClient` (e.g., whether `getConsole`, `listConsoles`, or `getObject` exist), I can drop in the exact minimal code for your version.
+
+------------------
+
+Here’s a **single Deephaven IDE script** you can paste and run.  
+It creates the three globals `first_ui`, `second_ui`, `final_ui` **up-front** (as empty placeholders), then replaces them when your control message arrives. It also defines `exposeToAngular()` so your Angular code can bind them into its session.
+
+> No App Mode. No query_scope. Just globals in the IDE session.
+
+```python
+# ================== Imports ==================
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, new_table, Column
+from deephaven.experimental.outer_joins import left_outer_join  # only LEFT_OUTER from experimental
+
+# ================== Config ===================
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"  # control topic that sends topicA/topicB/joinType
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # for data topics; control will use 'earliest' below
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# Value specs for your two data topics
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+# Control topic schema (primitive fields only)
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string,   # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,
+})
+
+# ================== Placeholders (so variables ALWAYS exist) ==================
+def _empty_users():
+    return new_table([Column("userId", []), Column("name", []), Column("email", []), Column("age", [])])
+
+def _empty_accounts():
+    return new_table([Column("userId", []), Column("accountType", []), Column("balance", [])])
+
+def _empty_joined():
+    return new_table([
+        Column("userId", []), Column("accountType", []), Column("balance", []),
+        Column("name", []), Column("email", []), Column("age", []),
+    ])
+
+# Create the three globals immediately
+first_ui  = _empty_users()
+second_ui = _empty_accounts()
+final_ui  = _empty_joined()
+
+# Helper Angular/JS will call to bind these names into its session
+def exposeToAngular():
+    return first_ui, second_ui, final_ui
+
+# ================== Join helper ==================
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    """
+    LEFT_OUTER -> experimental function
+    NATURAL / EXACT -> table methods on lhs
+    """
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# ================== Apply current config ==================
+def _apply(topicA: str, topicB: str, joinType: str):
+    """
+    1) Create/replace the two consumers
+    2) Build projections
+    3) Build the join
+    4) Update the three GLOBALS (first_ui, second_ui, final_ui)
+    """
+    # 1) Consumers (append mode for streaming)
+    left_raw = kc.consume(
+        KAFKA_CONFIG, topicA,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+    right_raw = kc.consume(
+        KAFKA_CONFIG, topicB,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+
+    # 2) Projections
+    left_ui = left_raw.view(["userId", "name", "email", "age"])
+    right_ui = right_raw.view(["userId", "accountType", "balance"])
+
+    # 3) Join (default LEFT_OUTER; NATURAL/EXACT use table methods)
+    joined = _join_by_type(joinType, left_ui, right_ui,
+                           on_cols=["userId"], join_cols=["accountType", "balance"])
+    joined_ui = joined.view(["userId", "accountType", "balance", "name", "email", "age"])
+
+    # 4) Update GLOBALS so Angular can fetch them
+    global first_ui, second_ui, final_ui
+    first_ui, second_ui, final_ui = left_ui, right_ui, joined_ui
+
+    return "OK"
+
+# ================== Control stream & dispatcher ==================
+# For control only, read from earliest so you catch messages sent before this script started.
+CONTROL_KAFKA_CONFIG = dict(KAFKA_CONFIG)
+CONTROL_KAFKA_CONFIG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CONTROL_KAFKA_CONFIG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Debug: tail of control messages so you can verify the payload DH received
+control_debug = control_raw.tail(10)
+
+# Keep latest unique config and apply
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+def _dispatch(topicA, topicB, joinType):
+    try:
+        return _apply(topicA, topicB, joinType)
+    except Exception as e:
+        return f"ERR: {e!s}"
+
+control_status = control_latest.update(['status = _dispatch(topicA, topicB, joinType)'])
+
+# Optional quick samples/counters, useful to eyeball in IDE
+A_count = first_ui.count_by("rows")
+B_count = second_ui.count_by("rows")
+J_count = final_ui.count_by("rows")
+
+A_head = first_ui.head(5)
+B_head = second_ui.head(5)
+J_head = final_ui.head(5)
+```
+
+### How Angular should fetch them
+
+Attach to the **existing IDE Python console**, then bind & get:
+
+```ts
+// attach to IDE python (don’t create a new session)
+const ide = await (client as any).getConsole?.('python')
+  ?? (await client.getAsIdeConnection()).startSession('python'); // fallback
+
+// bind the three names into THIS session from the IDE globals
+await ide.runCode('first_ui, second_ui, final_ui = exposeToAngular()');
+
+// fetch
+const [A, B, J] = await Promise.all([
+  ide.getTable('first_ui'),
+  ide.getTable('second_ui'),
+  ide.getTable('final_ui'),
+]);
+```
+
+### Why this works
+
+- The three names **always exist** (placeholders first).
+    
+- When your control message arrives, `_apply(...)` **replaces the globals** with live streaming tables.
+    
+- `exposeToAngular()` lets your client rebind the names inside its own session and call `getTable(...)` successfully.
