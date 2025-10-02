@@ -955,3 +955,143 @@ The Spring endpoint publishes a new control message; DH receives it and rebuilds
     
 
 If you want, I can also add **validation + error status** in `control_status` so you can see failures (bad topic names, etc.) right in the DH IDE.
+
+------------------------------------
+
+Here’s a **ready-to-paste** Deephaven script that:
+
+- Listens to a **control topic** for `{ topicA, topicB, joinType }`
+    
+- Consumes the two data topics
+    
+- Builds the join using **table methods**: `left_join`, `natural_join`, or `exact_join`
+    
+- Exposes `A_ui`, `B_ui`, `J_ui` as top-level variables (no `query_scope`)
+    
+- Provides `exposeToAngular()` for your Angular bridge
+    
+
+```python
+# =========================
+# Deephaven: dynamic 2-topic join (no query_scope)
+# =========================
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+
+# -------- Kafka & topics --------
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3567_metadata"   # control stream with {topicA, topicB, joinType}
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# -------- Value specs (match your data) --------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+# Control message is primitive-only for easy json_spec
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,      # users topic
+    "topicB": dt.string,      # accounts topic
+    "joinType": dt.string,    # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,           # optional
+})
+
+# -------- Helpers --------
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt in ("LEFT_OUTER", "LEFT"):
+        return lhs.left_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+def _apply(topicA: str, topicB: str, joinType: str):
+    """
+    (Re)create two consumers and the join.
+    Binds A_ui, B_ui, J_ui at module top-level (no query_scope needed).
+    """
+    # Consumers (append for streaming)
+    left_raw = kc.consume(
+        KAFKA_CONFIG, topicA,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+    right_raw = kc.consume(
+        KAFKA_CONFIG, topicB,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+
+    # Projections
+    left_ui  = left_raw.view(["userId", "name", "email", "age"])
+    right_ui = right_raw.view(["userId", "accountType", "balance"])
+
+    # Join
+    joined   = _join_by_type(joinType, left_ui, right_ui,
+                             on_cols=["userId"],
+                             join_cols=["accountType", "balance"])
+
+    joined_ui = joined.view(["userId", "accountType", "balance", "name", "email", "age"])
+
+    # Expose as top-level vars
+    global A_ui, B_ui, J_ui
+    A_ui, B_ui, J_ui = left_ui, right_ui, joined_ui
+    return "OK"
+
+# -------- Control stream & dispatcher --------
+control_raw = kc.consume(
+    KAFKA_CONFIG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Keep the latest unique configuration
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+# Apply on update; 'status' column shows the last apply result
+control_status = control_latest.update(['status = _apply(topicA, topicB, joinType)'])
+
+# Optional: for Angular/JS API to fetch all three
+def exposeToAngular():
+    return A_ui, B_ui, J_ui
+```
+
+**Control message example** (from Spring Boot now, Angular later):
+
+```json
+{
+  "topicA": "ccd01_sb_its_esp_tap3507_bishowocaseraw",
+  "topicB": "ccd01_sb_its_esp_tap3507_bishowcasecurated",
+  "joinType": "LEFT_OUTER"
+}
+```
+
+Paste the script, publish the control message, and you’ll get live `A_ui`, `B_ui`, and `J_ui`.
