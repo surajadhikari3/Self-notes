@@ -1658,3 +1658,142 @@ If you want to quickly test outside Angular:
     
 
 If you paste your current package versions (`@deephaven/jsapi-bootstrap`, `@deephaven/jsapi-types`) I can tailor the `getTable` vs `getObject().asTable()` line to match exactly.
+
+
+-----------------------------
+
+
+You’re running into a **session boundary**.
+
+- The Deephaven script that builds `first_scope_ui`, `second_scope_ui`, and `final_ui` is running in **one Python console session**.
+    
+- Your Angular code creates a **new** session with `startSession('python')`. New sessions can’t “see” variables from other sessions, so `getTable('first_scope_ui')` fails even if you just called `exposeToAngular()`—because that function lives in the other session.
+    
+
+You have three solid ways to fix this. Pick one.
+
+---
+
+## ✅ Fix 1 (best): Attach to the same IDE console instead of starting a new one
+
+Change your connection code to attach to the existing IDE Python console:
+
+```ts
+// before:
+// const ideConn = await client.getAsIdeConnection();
+// const ide = await ideConn.startSession('python');
+
+// after:
+let ide: any;
+try {
+  // Works on most JSAPI builds: attaches to the IDE's running Python console
+  ide = await this.client.getConsole('python');
+} catch {
+  // Fallback if your build doesn’t have getConsole()
+  const ideConn = await this.client.getAsIdeConnection();
+  const consoles = await ideConn.listConsoles?.(); // if available
+  const py = consoles?.find((c: any) => c.type === 'python');
+  ide = py ? await ideConn.getConsole(py.id) : await ideConn.startSession('python');
+}
+```
+
+Now you’re in the **same session** as the script. You can just:
+
+```ts
+await ide.runCode('first_scope_ui, second_scope_ui, final_ui = exposeToAngular()');
+const t1 = await ide.getTable('first_scope_ui');
+const t2 = await ide.getTable('second_scope_ui');
+const t3 = await ide.getTable('final_ui');
+```
+
+---
+
+## ✅ Fix 2: Publish the tables via App Mode (session-agnostic)
+
+In your DH Python script (the one that builds the tables), add:
+
+```python
+from deephaven.appmode import Application
+
+app = Application("angular_bridge") \
+    .with_table("first_scope_ui", first_scope_ui) \
+    .with_table("second_scope_ui", second_scope_ui) \
+    .with_table("final_ui", final_ui)
+```
+
+Then fetch by name from JS without worrying about the original session (exact JS call varies slightly by JSAPI version; if `client.getObject` is present):
+
+```ts
+const t1 = await this.client.getObject({ name: 'first_scope_ui' });
+const t2 = await this.client.getObject({ name: 'second_scope_ui' });
+const t3 = await this.client.getObject({ name: 'final_ui' });
+```
+
+If your JSAPI doesn’t expose `getObject`, stick with **Fix 1**.
+
+---
+
+## ✅ Fix 3: Build a globals index in your session (robust fallback)
+
+Run once in your Angular session to create a table listing all global tables **in that session**:
+
+```ts
+await ide.runCode(`
+from deephaven.table import Table
+from deephaven import new_table, Column
+def _globals_table_index():
+    names, kinds = [], []
+    from deephaven.table import Table as _T
+    for n, v in globals().items():
+        try:
+            if isinstance(v, _T):
+                names.append(n); kinds.append("Table")
+        except: pass
+    return new_table([Column("name", names), Column("kind", kinds)])
+__dh_globals__ = _globals_table_index()
+`);
+
+const idx = await ide.getTable('__dh_globals__');
+const vp = await idx.getViewportData();
+const names: string[] = [];
+for (let i = 0; i < vp.rows.length; i++) names.push(vp.rows[i].get('name'));
+```
+
+…but remember, if you started a new session, those names won’t include the tables from the original script. Combine with **Fix 1** so you introspect the right session.
+
+---
+
+## Quick check you can add right now
+
+Right after you call `exposeToAngular()` in your Angular code, ask Python to confirm the variables exist in **that** session:
+
+```ts
+await ide.runCode(`
+__exists__ = {
+  "first": "first_scope_ui" in globals(),
+  "second": "second_scope_ui" in globals(),
+  "final": "final_ui" in globals(),
+}
+`);
+const exists = await ide.getTable('__exists__'); // If your JSAPI renders dicts as tables; otherwise log in Python
+```
+
+If any are `false`, you’re in the wrong session → apply **Fix 1**.
+
+---
+
+### Why your current code still fails
+
+You’re doing:
+
+```ts
+const ide = await ideConn.startSession('python');
+await ide.getTable(tableName)   // fails
+catch { await ide.runCode('first_scope_ui, second_scope_ui, final_ui = exposeToAngular()') }
+```
+
+`exposeToAngular()` is defined in the **other** session. Calling it here won’t work unless you attach to that original session. That’s exactly what **Fix 1** does.
+
+---
+
+If you share which JSAPI methods are available on your `CoreClient` (e.g., whether `getConsole`, `listConsoles`, or `getObject` exist), I can drop in the exact minimal code for your version.
