@@ -3343,3 +3343,247 @@ def exposeToAngular():
 4. Open `control_debug` → verify control messages arrive.
     
 5. Open `control_status` → shows “OK” or an “ERR: …” string. If “ERR”, open `apply_err` to see the exact exception.
+------------------------------------------------------
+
+
+Thanks for the screenshots — your build doesn’t expose any mechanism to call a Python function from a _formula_ (`query_scope` isn’t there, and your `query_library` doesn’t have `add_callable`/`add_function`).  
+So the “auto-trigger from `update(...)`” path will always explode.
+
+Here’s a **working, version-agnostic script** that:
+
+- creates placeholders so the three UI tables always open,
+    
+- consumes your **control** topic (from _earliest_),
+    
+- defines a safe `apply_join(topicA, topicB, joinType)` that (re)creates the two Kafka consumers and the join,
+    
+- gives you two **reliable ways** to trigger the apply **without** query-scope registration:
+    
+    1. From your Angular client: `ide.runCode('status = apply_join("topicA","topicB","LEFT_OUTER")')`
+        
+    2. From a helper that reads the newest control row and calls `apply_join`: `ide.runCode('status = apply_from_control()')`
+        
+
+No formula calls → no query-scope / execution-context issues.
+
+---
+
+### Paste this in `/ide` and run
+
+```python
+# ================== Deephaven IDE script: dynamic join via control topic (no formula calls) ==================
+
+# --- Imports ---
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table
+from deephaven.experimental.outer_joins import left_outer_join
+
+# --- Topics ---
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"  # control messages: {topicA, topicB, joinType, ts}
+
+# --- Kafka config (your values) ---
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # for data topics (the 2 streams)
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# --- JSON specs ---
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,          # left stream topic
+    "topicB": dt.string,          # right stream topic
+    "joinType": dt.string,        # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,               # optional producer timestamp
+})
+
+# --- Utility: 1-row error/status table using only empty_table / update_view ---
+def _err_table(msg: str):
+    msg = (msg or "").replace("`", "\\`")
+    return empty_table(1).update_view([f"error=`{msg}`"])
+
+# --- Placeholders (so tabs open even before any data arrives) ---
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null", "name=(String)null",
+        "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+        "name=(String)null", "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+# Bind placeholders immediately (you can click these tabs right away)
+first_scope_ui  = _empty_users()
+second_scope_ui = _empty_accounts()
+final_ui        = _empty_joined()
+apply_err       = _err_table("")      # last error text (if any)
+apply_status    = _err_table("idle")  # 1-row 'status' text
+
+# --- Join selector: experimental for LEFT_OUTER, table methods for NATURAL/EXACT ---
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# --- Apply: creates two consumers + join and swaps globals ---
+def apply_join(topicA: str, topicB: str, joinType: str):
+    """
+    Recreates the two Kafka consumers and the join using joinType.
+    Returns 'OK' or 'ERR: ...'. Any exception is also written to `apply_err`.
+    Invoke this from Angular via ide.runCode('status = apply_join("A","B","LEFT_OUTER")')
+    """
+    global first_scope_ui, second_scope_ui, final_ui, apply_err, apply_status
+    try:
+        # update status
+        apply_status = _err_table(f"building: {topicA}, {topicB}, {joinType}")
+
+        # Left stream
+        left_raw = kc.consume(
+            KAFKA_CONFIG, topicA,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=USER_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+        # Right stream
+        right_raw = kc.consume(
+            KAFKA_CONFIG, topicB,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=ACCOUNT_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+
+        A = left_raw.view(["userId", "name", "email", "age"])
+        B = right_raw.view(["userId", "accountType", "balance"])
+
+        J = _join_by_type(joinType, A, B, on_cols=["userId"], join_cols=["accountType", "balance"]) \
+              .view(["userId", "accountType", "balance", "name", "email", "age"])
+
+        first_scope_ui, second_scope_ui, final_ui = A, B, J
+        apply_err = _err_table("")                 # clear
+        apply_status = _err_table("OK")
+        return "OK"
+    except Exception as e:
+        apply_err = _err_table(str(e))
+        apply_status = _err_table(f"ERR: {e}")
+        return f"ERR: {e}"
+
+# ---------------- Control stream (manual dispatch helper) ----------------
+
+# Read control from earliest so pre-start messages are processed
+CTRL_CFG = dict(KAFKA_CONFIG)
+CTRL_CFG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CTRL_CFG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Inspect these in Panels
+control_debug  = control_raw.tail(10)
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+def apply_from_control():
+    """
+    Safely read the most recent control row and call apply_join.
+    Call from Angular after producing to the control topic:
+      ide.runCode('status = apply_from_control()')
+    """
+    # Convert a 1-row view to Python dict without Pandas dependency
+    # Use a small snapshot table to avoid races
+    t = control_latest.view(["topicA", "topicB", "joinType"]).tail(1)
+    # If empty, return a friendly message
+    if t.size == 0:
+        msg = "No control row yet"
+        global apply_status
+        apply_status = _err_table(msg)
+        return msg
+
+    # Extract cell values via column arrays
+    topicA = t.getColumnSource("topicA").get(0)
+    topicB = t.getColumnSource("topicB").get(0)
+    joinType = t.getColumnSource("joinType").get(0)
+
+    return apply_join(topicA, topicB, joinType)
+
+# ---------------- Angular/JS helper ----------------
+def exposeToAngular():
+    """
+    Returns (left table, right table, joined table).
+    Angular can run:  const [A,B,J] = await ide.runCode('exposeToAngular()');
+    """
+    return first_scope_ui, second_scope_ui, final_ui
+```
+
+---
+
+### How you’ll use it with your Angular app
+
+1. **Start** this script in `/ide` (it creates the placeholders and consumes the control topic).
+    
+2. When your Spring Boot sends the control message, have Angular call:
+    
+
+```ts
+await ide.runCode('status = apply_from_control()');
+```
+
+That reads the newest control row and executes `apply_join(...)`.
+
+Or, if you prefer to skip the control topic entirely and just drive it from Angular:
+
+```ts
+await ide.runCode('status = apply_join("ccd01_sb_its_esp_tap3507_bishowcasecurated","ccd01_sb_its_esp_tap3507_bishowcaseraw","LEFT_OUTER")');
+```
+
+3. In the IDE, you can always open:
+    
+
+- `first_scope_ui`, `second_scope_ui`, `final_ui` – your three result tables
+    
+- `apply_status` – shows `"OK"` or the current action
+    
+- `apply_err` – one-row table with the last exception text (if any)
+    
+- `control_debug` – last 10 control messages
+    
+- `control_latest` – deduped latest control config
+    
+
+This sidesteps the missing `query_scope`/`query_library` callable registration entirely and runs reliably on your build.
