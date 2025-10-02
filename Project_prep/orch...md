@@ -2409,3 +2409,182 @@ initialize(start)
         
 
 This pattern avoids the dependency and session pitfalls, and it’s the standard way to expose dynamic content in **Application Mode**.
+
+
+--------------------------------------------
+
+Got it 👍 — you want to stay in **IDE mode** (not full app mode), but still make your joined/consumed tables visible to Angular (via JS API or Panels). The right way in Deephaven IDE mode is to use `get_app_state()` and put the tables into it. That registers them as **exports** that Angular (or any client) can subscribe to.
+
+Here’s a **full updated working script** you can drop in, with `get_app_state` used correctly:
+
+```python
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven.appmode import get_app_state
+
+# -------------------------------
+# Kafka Topics and Config
+# -------------------------------
+TOPIC_USERS = "ccd01_sb_its_esp_tap3507_bishowocaseraw"
+TOPIC_ACCTS = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-...:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    # ... your existing auth configs here ...
+}
+
+# -------------------------------
+# JSON Schemas
+# -------------------------------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string,   # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,
+})
+
+# -------------------------------
+# Helpers: placeholder tables
+# -------------------------------
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "name=(String)null",
+        "email=(String)null",
+        "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "accountType=(String)null",
+        "balance=(double)NaN",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "accountType=(String)null",
+        "balance=(double)NaN",
+        "name=(String)null",
+        "email=(String)null",
+        "age=(long)NULL_LONG",
+    ])
+
+# -------------------------------
+# Join helper
+# -------------------------------
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# -------------------------------
+# Apply a join from control topic
+# -------------------------------
+def _apply(topicA: str, topicB: str, joinType: str):
+    left_raw = kc.consume(
+        KAFKA_CONFIG, topicA,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+    right_raw = kc.consume(
+        KAFKA_CONFIG, topicB,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+
+    left_ui = left_raw.view(["userId","name","email","age"])
+    right_ui = right_raw.view(["userId","accountType","balance"])
+
+    joined = _join_by_type(joinType, left_ui, right_ui,
+                           on_cols=["userId"],
+                           join_cols=["accountType","balance"])
+
+    joined_ui = joined.view(["userId","accountType","balance","name","email","age"])
+
+    # Expose to Angular / JS clients
+    app = get_app_state()
+    app["first_scope_ui"] = left_ui
+    app["second_scope_ui"] = right_ui
+    app["final_ui"] = joined_ui
+
+    return "OK"
+
+# -------------------------------
+# Control stream
+# -------------------------------
+control_raw = kc.consume(
+    KAFKA_CONFIG,
+    CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+control_debug = control_raw.tail(10)
+
+control_latest = control_raw.last_by(["topicA","topicB","joinType"])
+
+# when a new control msg arrives, apply it
+control_status = control_latest.update([
+    "status = _apply(topicA, topicB, joinType)"
+])
+
+# -------------------------------
+# Initialize placeholders so Angular doesn’t fail before first control msg
+# -------------------------------
+app = get_app_state()
+app["first_scope_ui"]  = _empty_users()
+app["second_scope_ui"] = _empty_accounts()
+app["final_ui"]        = _empty_joined()
+app["control_raw"]     = control_raw
+app["control_debug"]   = control_debug
+app["control_status"]  = control_status
+```
+
+---
+
+✅ With this script in IDE mode:
+
+- Before any control message: Angular/JS sees three empty tables with correct schema.
+    
+- When Spring Boot (or producer) sends a control JSON like:
+    
+    ```json
+    {"topicA":"ccd01_sb_its_esp_tap3507_bishowocaseraw","topicB":"ccd01_sb_its_esp_tap3507_bishowcasecurated","joinType":"LEFT_OUTER","ts":1730493241}
+    ```
+    
+    → `_apply` is called, and the exports (`first_scope_ui`, `second_scope_ui`, `final_ui`) are rebound to the live joined tables.
+    
+- Angular (your `DeephavenService`) can `getTable("first_scope_ui")` etc and subscribe with no export failure.
+    
+
+---
+
+Do you also want me to show you the **Angular-side snippet** that waits for these exports (`first_scope_ui`, etc.) to exist before setting the viewport, so you don’t hit the “DEPENDENCY_FAILED” race?
