@@ -3155,3 +3155,191 @@ def exposeToAngular():
 - Open `register_status` (shows how the callable was registered), `control_debug` (last 10 control messages), and `control_status` (OK/ERR string).
     
 - If anything fails in apply, open `apply_err` for the exact exception.
+------------------------------------
+
+Here’s the **full, ready-to-run Deephaven IDE script** with the latest fixes:
+
+- Uses **`query_library`** to register the callable (no `query_scope`, no Java fallback).
+    
+- Placeholders always open (no NaN; uses `NULL_DOUBLE` / `NULL_LONG`).
+    
+- Error text is surfaced in a 1-row `apply_err` table.
+    
+- Control topic read from **earliest** and triggers rebuilding the two Kafka consumers + join.
+    
+- `LEFT_OUTER` via experimental helper; `NATURAL` / `EXACT` via table methods.
+    
+- `exposeToAngular()` returns the three UI tables for your JS client.
+    
+
+```python
+# ================== Deephaven IDE script: dynamic join via control topic ==================
+
+# --- Imports ---
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import query_library
+
+# --- Topics ---
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"  # control messages: {topicA, topicB, joinType, ts}
+
+# --- Kafka config (your values) ---
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # for data topics (the 2 streams)
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# --- JSON specs ---
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,          # left stream topic
+    "topicB": dt.string,          # right stream topic
+    "joinType": dt.string,        # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,               # optional producer timestamp
+})
+
+# --- Utility: 1-row error/status table using only empty_table / update_view ---
+def _err_table(msg: str):
+    msg = (msg or "").replace("`", "\\`")
+    return empty_table(1).update_view([f"error=`{msg}`"])
+
+# --- Placeholders (so tabs open even before any data arrives) ---
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null", "name=(String)null",
+        "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+        "name=(String)null", "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+# Bind placeholders immediately
+first_scope_ui  = _empty_users()
+second_scope_ui = _empty_accounts()
+final_ui        = _empty_joined()
+apply_err       = _err_table("")   # shows last error (if any)
+
+# --- Join selector: experimental for LEFT_OUTER, table methods for NATURAL/EXACT ---
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# --- Apply: creates two consumers + join and swaps globals ---
+def apply_join(topicA: str, topicB: str, joinType: str):
+    """
+    Recreates the two Kafka consumers and the join using joinType.
+    Returns 'OK' or 'ERR: ...'. Any exception is also written to `apply_err`.
+    """
+    global first_scope_ui, second_scope_ui, final_ui, apply_err
+    try:
+        # Left stream
+        left_raw = kc.consume(
+            KAFKA_CONFIG, topicA,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=USER_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+        # Right stream
+        right_raw = kc.consume(
+            KAFKA_CONFIG, topicB,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=ACCOUNT_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+
+        A = left_raw.view(["userId", "name", "email", "age"])
+        B = right_raw.view(["userId", "accountType", "balance"])
+
+        J = _join_by_type(joinType, A, B, on_cols=["userId"], join_cols=["accountType", "balance"]) \
+              .view(["userId", "accountType", "balance", "name", "email", "age"])
+
+        first_scope_ui, second_scope_ui, final_ui = A, B, J
+        apply_err = _err_table("")  # clear
+        return "OK"
+    except Exception as e:
+        apply_err = _err_table(str(e))
+        return f"ERR: {e}"
+
+# --- Register callable so formulas can invoke it (your version uses query_library) ---
+def _register_callable(name: str, fn) -> str:
+    add = getattr(query_library, "add_callable", None) or getattr(query_library, "add_function", None)
+    if add is None:
+        raise RuntimeError("query_library has no add_callable/add_function")
+    add(name, fn)
+    return "query_library"
+
+_registered_via = _register_callable("apply_join", apply_join)
+register_status = empty_table(1).update_view([f"registered=`{_registered_via}`"])
+
+# --- Control consumer (earliest so pre-start messages are processed) ---
+CTRL_CFG = dict(KAFKA_CONFIG)
+CTRL_CFG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CTRL_CFG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Handy views to inspect in Panels
+control_debug  = control_raw.tail(10)
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+# Rebuild on control changes (engine thread safely calls our Python fn)
+control_status = control_latest.update(['status = apply_join(topicA, topicB, joinType)'])
+
+# --- Angular/JS helper (client can runCode('A,B,C = exposeToAngular()')) ---
+def exposeToAngular():
+    return first_scope_ui, second_scope_ui, final_ui
+```
+
+**How to verify**
+
+1. Run the script in `/ide`.
+    
+2. Open `first_scope_ui`, `second_scope_ui`, `final_ui` → placeholders load immediately.
+    
+3. Open `register_status` → should show `query_library`.
+    
+4. Open `control_debug` → verify control messages arrive.
+    
+5. Open `control_status` → shows “OK” or an “ERR: …” string. If “ERR”, open `apply_err` to see the exact exception.
