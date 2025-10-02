@@ -676,3 +676,282 @@ export class LiveJoinComponent implements OnInit, OnDestroy {
     
 
 If you want to also change schemas later, we can re-introduce a `value_spec_json` per topic—but for now this keeps it dead simple while giving you dynamic topics + join type.
+
+---------------------------------------------
+
+Awesome — let’s wire an **end-to-end flow** where:
+
+- **Spring Boot** pushes the _two topic names_ (and, for now, hard-codes `LEFT_OUTER`).
+    
+- **Deephaven** listens on a **control topic**, (re)creates two Kafka consumers and the join whenever a new control message arrives, and exposes three tables (`A_ui`, `B_ui`, `J_ui`) at top-level (no `query_scope`).
+    
+- **Angular (later)** can switch the join type by sending another control message; you won’t need to touch the Deephaven script.
+    
+
+Below is everything you need: message schema, a working DH script, a tiny Spring Boot producer, and the (later) Angular call.
+
+---
+
+# 1) Control message shape (single topic to drive everything)
+
+We’ll keep it primitive so it works cleanly with `kc.json_spec`:
+
+```json
+{
+  "topicA": "ccd01_sb_its_esp_tap3507_bishowocaseraw",
+  "topicB": "ccd01_sb_its_esp_tap3507_bishowcasecurated",
+  "joinType": "LEFT_OUTER",   // later: NATURAL | EXACT
+  "ts": 1730412345123         // epoch millis (optional)
+}
+```
+
+- For now, Spring Boot will always send `LEFT_OUTER`.
+    
+- Later, Angular can send the same payload with a different `joinType`.
+    
+
+---
+
+# 2) Deephaven script (Option-2: no query_scope, imports fixed)
+
+> Drop this into a single Python script in the DH IDE.  
+> It listens to the control topic and (re)builds A, B, and the joined table whenever a new control row arrives.
+
+```python
+# --- imports
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.experimental.outer_joins import left_outer_join, natural_join, exact_join
+
+# --- config
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3567_metadata"   # <— your control topic
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# --- value specs for your two data topics
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+# --- control topic spec (primitive only)
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string,   # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,
+})
+
+# ----------------------------
+# helpers
+# ----------------------------
+def _join_by_type(jtype, lhs, rhs):
+    j = (jtype or "LEFT_OUTER").upper()
+    if j == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=["userId"], joins=["accountType", "balance"])
+    if j == "NATURAL":
+        return natural_join(lhs, rhs, on=["userId"], joins=["accountType", "balance"])
+    if j == "EXACT":
+        return exact_join(lhs, rhs, on=["userId"], joins=["accountType", "balance"])
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+def _apply(topA, topB, joinType):
+    """
+    (Re)create two consumers and the join.
+    Exposes A_ui, B_ui, and J_ui as top-level variables (no query_scope).
+    """
+    # Recreate consumers (append mode for streaming)
+    left_raw = kc.consume(
+        KAFKA_CONFIG, topA,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+    right_raw = kc.consume(
+        KAFKA_CONFIG, topB,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+
+    # Projections that your UI uses
+    left_ui = left_raw.view(["userId", "name", "email", "age"])
+    right_ui = right_raw.view(["userId", "accountType", "balance"])
+
+    # Join by requested type (default LEFT_OUTER)
+    joined = _join_by_type(joinType, left_ui, right_ui)
+    joined_ui = joined.view(["userId", "accountType", "balance", "name", "email", "age"])
+
+    # --- IMPORTANT: bind at top level so Angular/JS can get them directly
+    global A_ui, B_ui, J_ui
+    A_ui, B_ui, J_ui = left_ui, right_ui, joined_ui
+    return "OK"
+
+# ----------------------------
+# control stream + dispatcher
+# ----------------------------
+control_raw = kc.consume(
+    KAFKA_CONFIG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Only react to *changes* (dedupe) and keep the latest row (by ts if present).
+# If your control topic is compacted, last_by on the three fields works well.
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+# Trigger side-effect to apply config;
+# The new status will simply show you the last applied config in a column.
+control_status = control_latest.update([
+    'status = _apply(topicA, topicB, joinType)'
+])
+
+# Optional: a function your Angular can call to fetch the three tables
+def exposeToAngular():
+    return A_ui, B_ui, J_ui
+```
+
+**Why this works well**
+
+- Variables `A_ui`, `B_ui`, `J_ui` are **global**, so they’re directly visible to the JS API and your `exposeToAngular()` without any `query_scope`.
+    
+- Re-applying the config creates new live consumers; we don’t call `.close()` on the old ones (avoids “table already closed” errors you saw earlier). DH will GC unused references.
+    
+
+---
+
+# 3) Spring Boot — send control command
+
+Minimal Spring Boot producer using Spring for Apache Kafka. If you’re on Confluent Cloud OAuth, keep your existing client props; I’ll show core bits only.
+
+**`build.gradle` (or Maven equivalents)**
+
+```groovy
+implementation 'org.springframework.boot:spring-boot-starter-web'
+implementation 'org.springframework.kafka:spring-kafka'
+implementation 'com.fasterxml.jackson.core:jackson-databind'
+```
+
+**`application.yml`** (adapt your OAuth props)
+
+```yaml
+spring:
+  kafka:
+    bootstrap-servers: pkc-k13op.canadacentral.azure.confluent.cloud:9092
+    properties:
+      security.protocol: SASL_SSL
+      sasl.mechanism: OAUTHBEARER
+      sasl.login.callback.handler.class: org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler
+      sasl.jaas.config: org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;
+      sasl.oauthbearer.token.endpoint.url: https://fedsit.rastest.tdbank.ca/as/token.oauth2
+      sasl.oauthbearer.sub.claim.name: client_id
+      sasl.oauthbearer.client.id: TestScopeClient
+      sasl.oauthbearer.client.secret: 2Federate
+      sasl.oauthbearer.extensions.logicalCluster: lkc-ygvwwp
+      sasl.oauthbearer.extensions.identityPoolId: pool-NRk1
+      ssl.endpoint.identification.algorithm: https
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+
+app:
+  controlTopic: ccd01_sb_its_esp_tap3567_metadata
+```
+
+**DTO + Controller**
+
+```java
+// ControlCommand.java
+public record ControlCommand(String topicA, String topicB, String joinType, Long ts) {}
+
+// ControlController.java
+@RestController
+@RequiredArgsConstructor
+public class ControlController {
+
+  private final KafkaTemplate<String, ControlCommand> kafka;
+  @Value("${app.controlTopic}") private String controlTopic;
+
+  @PostMapping("/control")
+  public ResponseEntity<?> send(@RequestBody ControlCommand cmd) {
+    ControlCommand out = new ControlCommand(
+        cmd.topicA(),
+        cmd.topicB(),
+        cmd.joinType() == null ? "LEFT_OUTER" : cmd.joinType(),
+        cmd.ts() == null ? System.currentTimeMillis() : cmd.ts()
+    );
+    kafka.send(controlTopic, "cfg", out);
+    return ResponseEntity.ok(Map.of("status", "sent", "payload", out));
+  }
+}
+```
+
+**How you’ll use it now**
+
+```
+POST /control
+{
+  "topicA": "ccd01_sb_its_esp_tap3507_bishowocaseraw",
+  "topicB": "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+  // joinType omitted => LEFT_OUTER
+}
+```
+
+DH will pick it up, build both consumers, and expose `A_ui`, `B_ui`, `J_ui`.
+
+---
+
+# 4) Angular (later) — change join type
+
+When you’re ready to make the join type dynamic, don’t touch DH. Just have Angular call the same endpoint with a different `joinType`:
+
+```ts
+// angular service (pseudo)
+changeJoinType(joinType: 'LEFT_OUTER' | 'NATURAL' | 'EXACT') {
+  return this.http.post('/control', {
+    topicA: this.currentTopicA,
+    topicB: this.currentTopicB,
+    joinType
+  });
+}
+```
+
+The Spring endpoint publishes a new control message; DH receives it and rebuilds the join accordingly.
+
+---
+
+## Notes & gotchas
+
+- **Debouncing control events**: `last_by(["topicA","topicB","joinType"])` ensures we only apply the newest unique combination.
+    
+- **Schema safety**: topics A and B must match the `USER_VALUE_SPEC` and `ACCOUNT_VALUE_SPEC`. If you switch to different columns later, either (a) add specs to DH, or (b) send a richer control message with a types map and parse it (we can extend easily).
+    
+- **Resource churn**: The script replaces references without closing old tables, which avoids the “table closed” errors you’ve seen. If you expect hundreds of reconfigs, we can add explicit `.close()` on older tables once the new ones are live.
+    
+- **Angular data hookup**: keep using your existing `exposeToAngular()` call to fetch the three tables. No extra imports needed.
+    
+
+If you want, I can also add **validation + error status** in `control_status` so you can see failures (bad topic names, etc.) right in the DH IDE.
