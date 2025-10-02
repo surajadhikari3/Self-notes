@@ -2191,3 +2191,221 @@ const [A, B, J] = await Promise.all([
 ```
 
 Now your three tables are guaranteed to have columns from the start (typed placeholders), and they’ll swap to live streaming once your control message is consumed.
+
+---------------------------------------------------------------
+
+
+Here’s a **clean, copy-paste** App Mode setup that (1) always exports placeholders immediately so Panels/JS never fail, (2) consumes your control topic, (3) builds two Kafka streams + the join, and (4) rebinds the exports safely. The earlier `update_view` error is fixed.
+
+---
+
+# 1) `app/stream_join.app`
+
+```
+type=script
+scriptType=python
+enabled=true
+id=stream.join.demo
+name=Stream Join Demo
+file=stream_join_app.py
+```
+
+---
+
+# 2) `app/stream_join_app.py`
+
+```python
+# ----------------- Imports -----------------
+from typing import Callable
+from deephaven.appmode import ApplicationState, initialize
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table, new_table, Column
+from deephaven.experimental.outer_joins import left_outer_join
+
+# ----------------- Config ------------------
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string,  # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,
+})
+
+# ----------------- Placeholder table builders (fixed update_view) -----------------
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "name=(String)null",
+        "email=(String)null",
+        "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "accountType=(String)null",
+        "balance=(double)NaN",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null",
+        "accountType=(String)null",
+        "balance=(double)NaN",
+        "name=(String)null",
+        "email=(String)null",
+        "age=(long)NULL_LONG",
+    ])
+
+# ----------------- Utilities -----------------
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    """
+    LEFT_OUTER uses experimental function; NATURAL/EXACT use table methods.
+    """
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+def _export_tables(app: ApplicationState, A, B, J):
+    """Idempotently (re)bind the three exports."""
+    app["first_scope_ui"]  = A
+    app["second_scope_ui"] = B
+    app["final_ui"]        = J
+
+# ----------------- Build & Apply -----------------
+def _apply(topA: str, topB: str, joinType: str, app: ApplicationState):
+    """
+    Create/replace the two consumers and the join, then re-export the three UI tables.
+    On failure, keep previous exports and surface the error in control_status/last_error.
+    """
+    try:
+        left_raw = kc.consume(
+            KAFKA_CONFIG, topA,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=USER_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+        right_raw = kc.consume(
+            KAFKA_CONFIG, topB,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=ACCOUNT_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+
+        A = left_raw.view(["userId", "name", "email", "age"])
+        B = right_raw.view(["userId", "accountType", "balance"])
+
+        J = _join_by_type(joinType, A, B, on_cols=["userId"], join_cols=["accountType", "balance"])
+        J = J.view(["userId", "accountType", "balance", "name", "email", "age"])
+
+        _export_tables(app, A, B, J)
+        app["control_status"] = new_table([Column("status", ["OK"])])
+    except Exception as e:
+        app["control_status"] = new_table([Column("status", [f"ERR: {e}"])])
+        app["last_error"] = new_table([Column("error", [str(e)])])
+
+# ----------------- Control stream wiring -----------------
+def _wire_control(app: ApplicationState):
+    ctrl_cfg = dict(KAFKA_CONFIG)
+    ctrl_cfg["auto.offset.reset"] = "earliest"  # catch messages sent before app start
+
+    control_raw = kc.consume(
+        ctrl_cfg, CONTROL_TOPIC,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=CONTROL_SPEC,
+        table_type=kc.TableType.append(),
+    )
+    app["control_raw"]   = control_raw
+    app["control_debug"] = control_raw.tail(10)
+
+    control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+    app["control_latest"] = control_latest
+
+    # call _apply on each change; return a small status string
+    def _dispatch(topicA, topicB, joinType):
+        _apply(topicA, topicB, joinType, app)
+        return "applied"
+
+    app["control_status"] = control_latest.update(['status = _dispatch(topicA, topicB, joinType)'])
+
+# ----------------- App entrypoint -----------------
+def start(app: ApplicationState):
+    # 1) Export placeholders immediately so Panels/JS can always open them (no DEPENDENCY_FAILED)
+    _export_tables(app, _empty_users(), _empty_accounts(), _empty_joined())
+    app["last_error"] = new_table([Column("error", [])])  # visible slot for any future exception
+
+    # 2) Wire the control stream; exports will be rebound when a valid control row arrives
+    _wire_control(app)
+
+# Register with App Mode
+initialize(start)
+```
+
+---
+
+## How to use / verify
+
+1. Put both files in the `app/` folder and (re)start Deephaven.
+    
+2. Open Panels → you should see `first_scope_ui`, `second_scope_ui`, `final_ui`, `control_raw`, `control_debug`, `control_latest`, `control_status`, `last_error`.
+    
+    - The three `*_ui` tables will be empty but **open without errors** (placeholders).
+        
+3. Publish a control message (JSON object, not a quoted string) to the control topic:
+    
+    ```json
+    {
+      "topicA": "ccd01_sb_its_esp_tap3507_bishowocaseraw",
+      "topicB": "ccd01_sb_its_esp_tap3507_bishowcasecurated",
+      "joinType": "LEFT_OUTER",
+      "ts": 1730412345123
+    }
+    ```
+    
+4. In Panels:
+    
+    - `control_debug` shows your row with non-null fields.
+        
+    - `control_status` becomes `OK`.
+        
+    - `first_scope_ui`, `second_scope_ui`, `final_ui` populate with live data.
+        
+    - If anything fails, `control_status` shows `ERR: …` and `last_error` contains the exception text.
+        
+
+This pattern avoids the dependency and session pitfalls, and it’s the standard way to expose dynamic content in **Application Mode**.
