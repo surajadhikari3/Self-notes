@@ -1095,3 +1095,184 @@ def exposeToAngular():
 ```
 
 Paste the script, publish the control message, and you’ll get live `A_ui`, `B_ui`, and `J_ui`.
+
+----------------------------------
+
+
+Got it—here’s a **ready-to-run** Deephaven script using your requirement:
+
+- **LEFT_OUTER** uses the function from `deephaven.experimental.outer_joins`
+    
+- **NATURAL** and **EXACT** use the **table methods** (`lhs.natural_join(...)`, `lhs.exact_join(...)`)
+    
+- No `query_scope` needed (Option 2). It also includes control-topic debugging so you can see what DH received.
+    
+
+```python
+# ================== Imports ==================
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt
+from deephaven.experimental.outer_joins import left_outer_join  # only LEFT_OUTER from experimental
+
+# ================== Config ===================
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3567_metadata"  # <— your control topic carrying topicA/topicB/joinType
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # for data topics; control uses 'earliest' below
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# Value specs for your two data topics
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+# Control topic schema (primitive fields only)
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,
+    "topicB": dt.string,
+    "joinType": dt.string,   # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,
+})
+
+# ================== Join helper ==================
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    """
+    LEFT_OUTER -> experimental function
+    NATURAL / EXACT -> table methods on lhs
+    """
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)
+    if jt == "NATURAL":
+        # table method
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)
+    if jt == "EXACT":
+        # table method
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# ================== Apply current config ==================
+def _apply(topicA: str, topicB: str, joinType: str):
+    """
+    (Re)create two consumers and the join.
+    Binds A_ui, B_ui, J_ui at module top-level (no query_scope needed).
+    """
+    # Consumers (append mode for streaming)
+    left_raw = kc.consume(
+        KAFKA_CONFIG, topicA,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=USER_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+    right_raw = kc.consume(
+        KAFKA_CONFIG, topicB,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=ACCOUNT_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+
+    # UI projections
+    left_ui = left_raw.view(["userId", "name", "email", "age"])
+    right_ui = right_raw.view(["userId", "accountType", "balance"])
+
+    # Join using required API per type
+    joined = _join_by_type(joinType, left_ui, right_ui,
+                           on_cols=["userId"], join_cols=["accountType", "balance"])
+    joined_ui = joined.view(["userId", "accountType", "balance", "name", "email", "age"])
+
+    # Expose as top-level vars (visible to IDE / JS API)
+    global A_ui, B_ui, J_ui
+    A_ui, B_ui, J_ui = left_ui, right_ui, joined_ui
+    return "OK"
+
+# ================== Control stream & dispatcher ==================
+# For control only, read from earliest so you catch messages sent before this script started.
+CONTROL_KAFKA_CONFIG = dict(KAFKA_CONFIG)
+CONTROL_KAFKA_CONFIG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CONTROL_KAFKA_CONFIG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Debug: tail of control messages so you can verify the payload DH received
+control_debug = control_raw.tail(10)
+
+# Keep latest unique config and apply
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+def _dispatch(topicA, topicB, joinType):
+    try:
+        return _apply(topicA, topicB, joinType)
+    except Exception as e:
+        return f"ERR: {e!s}"
+
+control_status = control_latest.update(['status = _dispatch(topicA, topicB, joinType)'])
+
+# ================== Optional: counts & heads to eyeball data ==================
+from deephaven import empty_table
+try:
+    A_ui
+except NameError:
+    A_ui = empty_table(0).update_view("userId=(String)null", "name=(String)null",
+                                      "email=(String)null", "age=(long)NULL_LONG")
+    B_ui = empty_table(0).update_view("userId=(String)null", "accountType=(String)null",
+                                      "balance=(double)NaN")
+    J_ui = empty_table(0).update_view("userId=(String)null", "accountType=(String)null",
+                                      "balance=(double)NaN", "name=(String)null",
+                                      "email=(String)null", "age=(long)NULL_LONG")
+
+A_count = A_ui.count_by("rows")
+B_count = B_ui.count_by("rows")
+J_count = J_ui.count_by("rows")
+
+A_head = A_ui.head(5)
+B_head = B_ui.head(5)
+J_head = J_ui.head(5)
+
+# Angular/JS bridge
+def exposeToAngular():
+    return A_ui, B_ui, J_ui
+```
+
+### How to verify quickly
+
+1. **Publish a proper JSON object** (not a quoted string) to the control topic:
+    
+    ```json
+    {"topicA":"ccd01_sb_its_esp_tap3507_bishowocaseraw","topicB":"ccd01_sb_its_esp_tap3507_bishowcasecurated","joinType":"LEFT_OUTER","ts":1730412345123}
+    ```
+    
+2. In the DH IDE open:
+    
+    - `control_debug` → should show your row with non-null `topicA/topicB/joinType`.
+        
+    - `control_status` → `status` should be `OK` (or an error message if schemas/columns mismatch).
+        
+    - `A_head`, `B_head`, `J_head` & `A_count/B_count/J_count` to see live data and counts.
+        
+
+If you still see an error, it’ll now surface in `control_status.status`. Share that one line and I’ll pinpoint the fix.
