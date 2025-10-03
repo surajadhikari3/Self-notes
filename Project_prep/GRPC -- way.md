@@ -1697,3 +1697,167 @@ private static String pyStr(String s) {
     
 
 If anything else throws at `build()`, paste the _first_ cause message — it will name the exact missing parameter, and I’ll adjust again.
+
+--------------------------------------------
+
+
+UNAUTHENTICATED means the server rejected the creds. With 0.39.8 there are a couple of valid ways to send PSK, and different deployments enable different handlers. Let’s make your client **try the common variants automatically** and you’ll stop tripping on which one your server expects.
+
+## What usually causes this
+
+- Server isn’t actually running with PSK (`DH_AUTH_TYPE=psk`, `DH_PSK=...`)
+    
+- Wrong “type+value” string (class FQCN vs shorthand `psk`)
+    
+- Extra quotes / spaces around the key
+    
+- TLS/plaintext mismatch (less likely, that’s usually `UNAVAILABLE`, not `UNAUTHENTICATED`)
+    
+
+## Drop-in: resilient auth attempts (0.39.8 API, Java 11)
+
+Replace your current `setTopics(...)` body with this. It will:
+
+1. Build the gRPC channel (TLS or plaintext per your config)
+    
+2. Try **FQCN + key**, then **`psk` + key**, then **Authorization header** (Bearer)
+    
+3. On first success, it opens a **console("python")** and executes your snippet.
+    
+
+```java
+public void setTopics(String userTopic, String accountTopic, String joinType) throws Exception {
+  String jt = (joinType == null) ? "left" : joinType.trim().toLowerCase().replace(' ', '_');
+  if (!jt.startsWith("left")) jt = "left";
+
+  final String code =
+      "from orchestrator_dh import set_topics\n" +
+      "set_topics(" + pyStr(userTopic) + ", " + pyStr(accountTopic) + ", " + pyStr(jt) + ")\n";
+
+  // ---- Build channel (once) ----
+  ManagedChannelBuilder<?> mcb = ManagedChannelBuilder.forAddress(host, port);
+  if (useSsl) mcb.useTransportSecurity(); else mcb.usePlaintext();
+
+  // we’ll add an interceptor later only for the header attempt
+  ManagedChannel channel = mcb.build();
+
+  // Required by your 0.39.8 builder: scheduler
+  java.util.concurrent.ScheduledExecutorService scheduler =
+      java.util.concurrent.Executors.newScheduledThreadPool(2, r -> {
+        Thread t = new Thread(r, "dh-client-scheduler");
+        t.setDaemon(true);
+        return t;
+      });
+
+  // 3 auth strategies we’ll try in order
+  String[] typeAndValueVariants = new String[] {
+      // 1) FQCN + key (most common)
+      "io.deephaven.authentication.psk.PskAuthenticationHandler " + psk,
+      // 2) shorthand "psk" + key (some servers accept this)
+      "psk " + psk
+  };
+
+  boolean success = false;
+  StatusRuntimeException lastAuthErr = null;
+
+  // --- Attempt 1 & 2: typeAndValue variants ---
+  for (String tav : typeAndValueVariants) {
+    try {
+      SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+          .factoryBuilder()
+          .managedChannel(channel)
+          .scheduler(scheduler)
+          .authenticationTypeAndValue(tav)
+          .build();
+
+      try (Session session = sub.newSession()) {
+        // Your API has console(String)
+        java.util.concurrent.CompletableFuture<? extends ConsoleSession> fut =
+            session.console("python");
+        try (ConsoleSession py = fut.get(15, java.util.concurrent.TimeUnit.SECONDS)) {
+          py.executeCode(code);
+          success = true;
+          break;
+        }
+      }
+    } catch (StatusRuntimeException sre) {
+      if (sre.getStatus().getCode() == io.grpc.Status.Code.UNAUTHENTICATED) {
+        lastAuthErr = sre; // try next variant
+      } else {
+        // not an auth error – rethrow
+        throw sre;
+      }
+    }
+  }
+
+  // --- Attempt 3: Authorization header (Bearer <key>) ---
+  if (!success) {
+    // rebuild channel with header interceptor
+    channel.shutdown();
+    channel.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS);
+
+    Metadata.Key<String> AUTH = Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
+    Metadata md = new Metadata();
+    md.put(AUTH, "Bearer " + psk); // some PSK deployments accept this form
+
+    ManagedChannelBuilder<?> mcb2 = ManagedChannelBuilder.forAddress(host, port);
+    if (useSsl) mcb2.useTransportSecurity(); else mcb2.usePlaintext();
+    mcb2.intercept(io.grpc.stub.MetadataUtils.newAttachHeadersInterceptor(md));
+    channel = mcb2.build();
+
+    try {
+      SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+          .factoryBuilder()
+          .managedChannel(channel)
+          .scheduler(scheduler)
+          .authenticationTypeAndValue("") // header-only path
+          .build();
+
+      try (Session session = sub.newSession()) {
+        java.util.concurrent.CompletableFuture<? extends ConsoleSession> fut =
+            session.console("python");
+        try (ConsoleSession py = fut.get(15, java.util.concurrent.TimeUnit.SECONDS)) {
+          py.executeCode(code);
+          success = true;
+        }
+      }
+    } catch (StatusRuntimeException sre) {
+      lastAuthErr = sre;
+    }
+  }
+
+  try {
+    if (!success) {
+      String msg = (lastAuthErr != null)
+          ? "Authentication failed: " + lastAuthErr.getStatus() + " (check DH_AUTH_TYPE/DH_PSK, type string, and TLS/plaintext)"
+          : "Authentication failed (unknown)";
+      throw new IllegalStateException(msg, lastAuthErr);
+    }
+  } finally {
+    channel.shutdown();
+    scheduler.shutdown();
+    channel.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+    scheduler.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+  }
+}
+
+private static String pyStr(String s) {
+  if (s == null) return "None";
+  return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+}
+```
+
+## Quick checks on the server side
+
+On the Deephaven server (logs / env) confirm:
+
+- `DH_AUTH_TYPE=psk`
+    
+- `DH_PSK=<exact key>` (no quotes)
+    
+- Your gRPC port matches (`10000` by default)
+    
+- TLS vs plaintext matches your client’s `useSsl`
+    
+
+If you still see UNAUTHENTICATED after these three attempts, paste the **first few lines** from the Deephaven server logs around authentication—there’s usually a message like “Using auth handler …” or “PSK mismatch.” That will pinpoint whether it wants the FQCN, shorthand, or header form.
