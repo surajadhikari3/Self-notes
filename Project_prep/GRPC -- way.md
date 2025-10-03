@@ -476,3 +476,420 @@ curl -X POST http://localhost:8080/api/dh/topics \
 ```
 
 If your client library is slightly different, use whichever of the two PSK lines compiles in step (2). Everything else remains identical.
+
+-------------------------------------------------------
+
+You got it. Here’s a **ready-to-run Spring Boot setup** that:
+
+- connects to **Deephaven via PSK auth**
+    
+- posts **dynamic topics** and **dynamic value specs (schemas)**
+    
+- executes the Python `set_topics(...)` on the DH server
+    
+
+It’s end-to-end and minimal. Copy → paste → run.
+
+---
+
+# 0) Quick project layout
+
+```
+src/
+ └─ main/
+     ├─ java/com/example/dh/
+     │   ├─ DhApplication.java
+     │   ├─ controller/DeephavenController.java
+     │   ├─ dto/TopicUpdateRequest.java
+     │   └─ service/DeephavenControlService.java
+     └─ resources/
+         └─ application.yml
+pom.xml
+```
+
+---
+
+# 1) `pom.xml`
+
+> Match `deephaven-client` version to your DH server build if needed.
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example</groupId>
+  <artifactId>dh-psk-dynamic-spec</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <java.version>17</java.version>
+    <spring-boot.version>3.3.3</spring-boot.version>
+    <!-- Adjust to match your DH server if needed -->
+    <deephaven.client.version>0.35.0</deephaven.client.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Spring Web + Validation + Jackson -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <!-- Deephaven Java client -->
+    <dependency>
+      <groupId>io.deephaven</groupId>
+      <artifactId>deephaven-client</artifactId>
+      <version>${deephaven.client.version}</version>
+    </dependency>
+
+    <!-- Optional: Lombok for less boilerplate (remove if not using) -->
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+```
+
+---
+
+# 2) `src/main/resources/application.yml`
+
+```yaml
+server:
+  port: 8080
+
+deephaven:
+  host: ${DH_HOST:localhost}
+  port: ${DH_PORT:10000}     # Deephaven gRPC
+  useSsl: ${DH_SSL:false}
+  auth:
+    type: psk                # PSK auth to Deephaven server
+    token: ${DH_PSK:MY_SUPER_SECRET_KEY}
+```
+
+> ⚠️ This PSK is **for Deephaven server auth**. Your **Kafka** security (OAuth/SASL, etc.) stays in the DH Python app script.
+
+---
+
+# 3) `DhApplication.java`
+
+```java
+package com.example.dh;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DhApplication {
+  public static void main(String[] args) {
+    SpringApplication.run(DhApplication.class, args);
+  }
+}
+```
+
+---
+
+# 4) DTO: `TopicUpdateRequest.java`
+
+```java
+package com.example.dh.dto;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+
+import java.util.Map;
+
+public record TopicUpdateRequest(
+    @NotBlank String userTopic,
+    @NotBlank String accountTopic,
+
+    // e.g. {"userId":"string","name":"string","email":"string","age":"long"}
+    @NotNull Map<String,String> userSchema,
+
+    // e.g. {"userId":"string","accountType":"string","balance":"double"}
+    @NotNull Map<String,String> accountSchema,
+
+    // optional; defaults to "left"
+    String joinType
+) {}
+```
+
+---
+
+# 5) Service: `DeephavenControlService.java`
+
+- Builds a **PSK session** to DH
+    
+- Sends a **tiny Python program** that:
+    
+    - imports your orchestrator (`orchestrator_dh.py` must be loaded on DH)
+        
+    - parses the schemas (sent as JSON)
+        
+    - calls `set_topics(userTopic, accountTopic, userSchema, accountSchema, joinType)`
+        
+
+```java
+package com.example.dh.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.deephaven.client.impl.Session;
+import io.deephaven.client.impl.SessionFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.nio.charset.StandardCharsets;
+
+@Service
+public class DeephavenControlService {
+
+  private final String host;
+  private final int port;
+  private final boolean useSsl;
+  private final String authType; // expect "psk"
+  private final String psk;
+  private final ObjectMapper mapper;
+
+  public DeephavenControlService(
+      @Value("${deephaven.host}") String host,
+      @Value("${deephaven.port}") int port,
+      @Value("${deephaven.useSsl}") boolean useSsl,
+      @Value("${deephaven.auth.type}") String authType,
+      @Value("${deephaven.auth.token}") String psk,
+      ObjectMapper mapper
+  ) {
+    this.host = host;
+    this.port = port;
+    this.useSsl = useSsl;
+    this.authType = authType;
+    this.psk = psk;
+    this.mapper = mapper;
+  }
+
+  public void setTopics(
+      String userTopic,
+      String accountTopic,
+      Object userSchema,
+      Object accountSchema,
+      String joinType
+  ) throws Exception {
+
+    final String jt = (joinType == null || joinType.isBlank()) ? "left" : joinType;
+
+    final String userSchemaJson = toJson(userSchema);
+    final String accountSchemaJson = toJson(accountSchema);
+
+    // Safer to send JSON and parse it in Python (avoids quoting bugs)
+    final String pyCode =
+        """
+        import json
+        from orchestrator_dh import set_topics
+        _user_schema = json.loads(%s)
+        _account_schema = json.loads(%s)
+        set_topics(%s, %s, _user_schema, _account_schema, %s)
+        """.
+            formatted(
+                pyString(userSchemaJson),
+                pyString(accountSchemaJson),
+                pyString(userTopic),
+                pyString(accountTopic),
+                pyString(jt)
+            );
+
+    final SessionFactory.Builder builder = SessionFactory.builder()
+        .host(host)
+        .port(port);
+
+    if (useSsl) {
+      builder.secure(true);
+    }
+
+    // ---------- PSK AUTH ----------
+    // Newer clients (preferred):
+    boolean configured = false;
+    try {
+      builder.authenticationType(authType)   // "psk"
+             .authenticationValue(psk);
+      configured = true;
+    } catch (Throwable ignored) {
+      // Fallback for older builds: some accept PSK as Bearer token header
+      // Only use if your client exposes addHeader; if not, keep the newer path above.
+      try {
+        builder.addHeader("Authorization", "Bearer " + psk);
+        configured = true;
+      } catch (Throwable t) {
+        // If neither API exists, inform the caller
+        throw new IllegalStateException("Deephaven client version doesn't expose PSK auth setters.");
+      }
+    }
+
+    if (!configured) {
+      throw new IllegalStateException("Failed to configure PSK authentication");
+    }
+
+    try (Session session = builder.build().newSession()) {
+      session.console().executeCode(pyCode.getBytes(StandardCharsets.UTF_8));
+    }
+  }
+
+  private String toJson(Object obj) throws JsonProcessingException {
+    return mapper.writeValueAsString(obj);
+  }
+
+  private static String pyString(String s) {
+    // Single-quoted Python literal with escaping
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+  }
+}
+```
+
+---
+
+# 6) Controller: `DeephavenController.java`
+
+```java
+package com.example.dh.controller;
+
+import com.example.dh.dto.TopicUpdateRequest;
+import com.example.dh.service.DeephavenControlService;
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/dh")
+public class DeephavenController {
+
+  private final DeephavenControlService service;
+
+  public DeephavenController(DeephavenControlService service) {
+    this.service = service;
+  }
+
+  @PostMapping("/topics")
+  public ResponseEntity<?> updateTopics(@Valid @RequestBody TopicUpdateRequest req) {
+    try {
+      service.setTopics(
+          req.userTopic(),
+          req.accountTopic(),
+          req.userSchema(),
+          req.accountSchema(),
+          req.joinType()
+      );
+      return ResponseEntity.ok(
+          "Deephaven rewired: users='" + req.userTopic() + "', accounts='" +
+              req.accountTopic() + "', join='" + (req.joinType() == null ? "left" : req.joinType()) + "'"
+      );
+    } catch (Exception e) {
+      return ResponseEntity.internalServerError().body("Failed to set topics: " + e.getMessage());
+    }
+  }
+}
+```
+
+---
+
+# 7) Start everything
+
+**Deephaven server** must:
+
+- load your **`/app/orchestrator_dh.py`** on boot (Application Mode or startup script)
+    
+- be started **with PSK auth**, e.g. in Docker:
+    
+
+```yaml
+services:
+  deephaven:
+    image: ghcr.io/deephaven/server
+    ports: ["10000:10000"]
+    environment:
+      - DH_AUTH_TYPE=psk
+      - DH_PSK=MY_SUPER_SECRET_KEY
+    volumes:
+      - ./app:/app           # contains orchestrator_dh.py
+    command: ["--scripts", "/app/orchestrator_dh.py"]
+```
+
+> Your **Kafka** config (OAuth/SASL, etc.) stays inside `orchestrator_dh.py` (that’s independent of PSK).
+
+**Spring Boot**:
+
+```bash
+DH_HOST=localhost \
+DH_PORT=10000 \
+DH_PSK=MY_SUPER_SECRET_KEY \
+./mvnw spring-boot:run
+```
+
+---
+
+# 8) Example request
+
+```bash
+curl -X POST http://localhost:8080/api/dh/topics \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "userTopic": "topic_users",
+        "accountTopic": "topic_accounts",
+        "userSchema":   { "userId":"string", "name":"string", "email":"string", "age":"long" },
+        "accountSchema":{ "userId":"string", "accountType":"string", "balance":"double" },
+        "joinType": "left"
+      }'
+```
+
+If your Angular subscribes to `users_ui`, `accounts_ui`, and `final_ui` by name, it will see the new streams immediately after this call (no reloads).
+
+---
+
+## Hardening tips (optional but recommended)
+
+- **Whitelist schemas** (column names / dtypes) before sending to DH to avoid invalid types.
+    
+- Enforce an **allowed topics** list on the API (avoid arbitrary Kafka topics).
+    
+- Add **AuthN/AuthZ** on `/api/dh/topics` (e.g., token check) to prevent unauthorized rewires.
+    
+- Log the **effective Python code** you send for audit (but not secrets).
+    
+
+---
+
+If you want, I can also drop in a **simple Angular service** that auto-opens those 3 tables and streams rows into ag-Grid without page refresh.
