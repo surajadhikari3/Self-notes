@@ -1532,3 +1532,80 @@ Your Angular app should keep subscribing to the **fixed table names** (`users_ui
     
 
 If you want me to add **dynamic schemas** again later, we’ll just extend the `code` string to pass JSON schemas and parse them in Python.
+
+---------------------------------------------
+
+
+Yep—I can see from where it’s blowing up that the Dagger **factoryBuilder().build()** is still missing a required dependency.  
+In **0.39.8**, the client factory needs **both**:
+
+- a `ScheduledExecutorService` (we added), **and**
+    
+- a general-purpose `Executor` (thread pool)
+    
+
+If either is absent, `build()` throws (that’s what you’re seeing).
+
+Here’s the drop-in fix for your `setTopics(...)`—I’ve added the missing `executor(...)` and proper shutdown. Nothing else changes.
+
+```java
+public void setTopics(String userTopic, String accountTopic, String joinType) throws Exception {
+  String jt = (joinType == null) ? "left" : joinType.trim().toLowerCase().replace(" ", "_");
+  if (!jt.startsWith("left")) jt = "left";
+
+  final String code =
+      "from orchestrator_dh import set_topics\n" +
+      "set_topics(" + pyStr(userTopic) + ", " + pyStr(accountTopic) + ", " + pyStr(jt) + ")\n";
+
+  // --- gRPC channel ---
+  ManagedChannelBuilder<?> mcb = ManagedChannelBuilder.forAddress(host, port);
+  if (useSsl) mcb.useTransportSecurity(); else mcb.usePlaintext();
+  ManagedChannel channel = mcb.build();
+
+  // REQUIRED by 0.39.x factory:
+  // 1) general-purpose executor
+  java.util.concurrent.Executor exec =
+      java.util.concurrent.Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "dh-client-exec");
+        t.setDaemon(true);
+        return t;
+      });
+
+  // 2) scheduled executor
+  java.util.concurrent.ScheduledExecutorService scheduler =
+      java.util.concurrent.Executors.newScheduledThreadPool(2, r -> {
+        Thread t = new Thread(r, "dh-client-scheduler");
+        t.setDaemon(true);
+        return t;
+      });
+
+  final String typeAndValue = authType + " " + psk; // e.g. "io.deephaven.authentication.psk.PskAuthenticationHandler <key>"
+
+  // --- Dagger factory (acts as SessionFactory) ---
+  SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+      .factoryBuilder()
+      .managedChannel(channel)
+      .executor(exec)                 // <-- add this
+      .scheduler(scheduler)           // <-- and this
+      .authenticationTypeAndValue(typeAndValue)
+      .build();
+
+  try (Session session = sub.newSession()) {
+    ConsoleService consoleService = session.console();
+    java.util.concurrent.CompletableFuture<? extends ConsoleSession> fut =
+        consoleService.console("python");
+    try (ConsoleSession py = fut.get(15, java.util.concurrent.TimeUnit.SECONDS)) {
+      py.executeCode(code); // or py.executeCodeFuture(code).get(30, TimeUnit.SECONDS);
+    }
+  } finally {
+    channel.shutdown();
+    ((java.util.concurrent.ExecutorService) exec).shutdown();
+    scheduler.shutdown();
+    channel.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+    ((java.util.concurrent.ExecutorService) exec).awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+    scheduler.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+  }
+}
+```
+
+If `build()` still throws, print the full root cause (it usually says exactly which dependency is missing). But in 0.39.8, the common misses are precisely `executor(...)` and `scheduler(...)`, so the above should unblock you.
