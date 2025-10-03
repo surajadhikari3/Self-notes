@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/orch...md",
+                "file": "Project_prep/GRPC -- way.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "orch.."
+              "title": "GRPC -- way"
             }
           }
         ]
@@ -196,8 +196,9 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
-    "Project_prep/test1.md",
     "Project_prep/orch...md",
+    "Project_prep/GRPC -- way.md",
+    "Project_prep/test1.md",
     "Project_prep/test........md",
     "Project_prep/rt-dh.md",
     "Project_prep/pls-goddd...md",
@@ -221,7 +222,6 @@
     "interview-prep/Prep Notes.md",
     "Cloud/Open-shift.md",
     "Cloud/Kubernets.md",
-    "Interviews/On-class interview -Mohan.md",
     "Pasted image 20250914211139.png",
     "interview-prep",
     "Project_prep/ui/single-user-gap.svg",
