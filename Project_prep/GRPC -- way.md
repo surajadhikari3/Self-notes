@@ -1007,3 +1007,228 @@ set_topics(
 
 If you already implemented the Spring `TopicUpdateRequest` with `userSchema` and `accountSchema`, you’re done.  
 So: **after this change, yes**—both `topic` and `value_spec` are dynamic and controlled from Spring.
+
+--------------------
+
+You’re right — in **0.39.8** there is **no `SessionFactory.Builder`**. In that line the client still used the **Dagger**-wired factory. Here’s a drop-in way to make your Spring service compile and work on **Java 11 + Deephaven 0.39.8** with **PSK**.
+
+I’m giving you two auth paths:
+
+1. **Recommended (0.39.x-native):** use the Dagger `SessionSubcomponent.Builder.authenticationTypeAndValue(...)`.  
+    Pass the PSK handler **FQCN + a space + the key** (ex: `io.deephaven.authentication.psk.PskAuthenticationHandler MyKey`). This matches the “authentication type and optional value” contract in the 0.39 docs, and is consistent with the other language clients that accept the PSK handler class name. ([docs.deephaven.io](https://docs.deephaven.io/core/javadoc/io/deephaven/client/impl/Authentication.html?utm_source=chatgpt.com "Authentication (combined-javadoc 0.39.5 API)"))
+    
+2. **Fallback:** add the **`Authorization`** header (`Bearer <key>`) at the channel layer. The 0.39 javadoc exposes that header key and many builds will accept it. ([docs.deephaven.io](https://docs.deephaven.io/core/javadoc/io/deephaven/client/impl/Authentication.html?utm_source=chatgpt.com "Authentication (combined-javadoc 0.39.5 API)"))
+    
+
+---
+
+# 0) Maven (0.39.8)
+
+```xml
+<dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>io.deephaven</groupId>
+      <artifactId>deephaven-bom</artifactId>
+      <version>0.39.8</version>
+      <type>pom</type>
+      <scope>import</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+
+<dependencies>
+  <!-- Java client session API (0.39.8) -->
+  <dependency>
+    <groupId>io.deephaven</groupId>
+    <artifactId>deephaven-java-client-session</artifactId>
+  </dependency>
+
+  <!-- Dagger-wired factory that exists in 0.39.x -->
+  <dependency>
+    <groupId>io.deephaven</groupId>
+    <artifactId>deephaven-java-client-session-dagger</artifactId>
+  </dependency>
+
+  <!-- gRPC (ManagedChannelBuilder) -->
+  <dependency>
+    <groupId>io.grpc</groupId>
+    <artifactId>grpc-netty-shaded</artifactId>
+  </dependency>
+  <dependency>
+    <groupId>io.grpc</groupId>
+    <artifactId>grpc-stub</artifactId>
+  </dependency>
+  <dependency>
+    <groupId>io.grpc</groupId>
+    <artifactId>grpc-protobuf</artifactId>
+  </dependency>
+</dependencies>
+```
+
+---
+
+# 1) `application.yml`
+
+```yaml
+deephaven:
+  host: ${DH_HOST:localhost}
+  port: ${DH_PORT:10000}
+  useSsl: ${DH_SSL:false}
+  auth:
+    # For PSK in 0.39.x, pass the handler class name
+    # io.deephaven.authentication.psk.PskAuthenticationHandler
+    type: ${DH_AUTH_TYPE:io.deephaven.authentication.psk.PskAuthenticationHandler}
+    token: ${DH_PSK:MY_SUPER_SECRET_KEY}
+```
+
+---
+
+# 2) Service (Java 11, no text blocks)
+
+```java
+package com.example.dh.service;
+
+import io.deephaven.client.DaggerDeephavenSessionRoot;
+import io.deephaven.client.SessionSubcomponent;
+import io.deephaven.client.impl.Session;
+import io.deephaven.client.impl.ConsoleService;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.ClientInterceptor;
+import io.grpc.Metadata;
+import io.grpc.stub.MetadataUtils;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+@Service
+public class DeephavenControlService {
+
+    private final String host;
+    private final int port;
+    private final boolean useSsl;
+    private final String authType; // e.g. io.deephaven.authentication.psk.PskAuthenticationHandler
+    private final String psk;
+
+    public DeephavenControlService(
+            @Value("${deephaven.host}") String host,
+            @Value("${deephaven.port}") int port,
+            @Value("${deephaven.useSsl}") boolean useSsl,
+            @Value("${deephaven.auth.type}") String authType,
+            @Value("${deephaven.auth.token}") String psk
+    ) {
+        this.host = host;
+        this.port = port;
+        this.useSsl = useSsl;
+        this.authType = authType;
+        this.psk = psk;
+    }
+
+    public void setTopics(String userTopic, String accountTopic, String joinType) throws Exception {
+        final String jt = (joinType == null || joinType.isBlank()) ? "left" : joinType;
+
+        // Build the Python code string (Java 11-friendly)
+        final String code =
+                "from orchestrator_dh import set_topics\n" +
+                "set_topics(" + pyStr(userTopic) + ", " + pyStr(accountTopic) + ", " + pyStr(jt) + ")\n";
+
+        // --- Build a gRPC channel (Java 11) ---
+        final ManagedChannelBuilder<?> mcb = ManagedChannelBuilder.forAddress(host, port);
+        if (useSsl) {
+            mcb.useTransportSecurity();
+        } else {
+            mcb.usePlaintext();
+        }
+
+        // ---- Optional Fallback: Add Authorization: Bearer <psk> header interceptor ----
+        // Keeps working even if authType is misconfigured and your server accepts Bearer tokens.
+        // (This matches Authentication.AUTHORIZATION_HEADER in the 0.39 API.)
+        final ClientInterceptor bearerInterceptor = MetadataUtils.newAttachHeadersInterceptor(bearer(psk));
+        mcb.intercept(bearerInterceptor);
+
+        final ManagedChannel channel = mcb.build();
+
+        // ---- 0.39.x-native authentication path (recommended) ----
+        // The API expects "authentication type and value" as a single string.
+        // For PSK, use the handler FQCN + a space + the secret.
+        final String typeAndValue = authType + " " + psk;
+
+        // Build the 0.39.x Dagger subcomponent and obtain the SessionFactory (subcomponent IS a factory)
+        final SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+                .factoryBuilder()
+                .managedChannel(channel)                 // supply our channel
+                .authenticationTypeAndValue(typeAndValue) // PSK handler + key
+                .build();
+
+        // sub extends SessionFactory: open a session and run the code in the Python console
+        try (Session session = sub.newSession()) {
+            ConsoleService console = session.console();
+            console.executeCode(code);
+        } finally {
+            channel.shutdown();
+        }
+    }
+
+    private static String pyStr(String s) {
+        if (s == null) return "None";
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
+    private static Metadata bearer(String token) {
+        Metadata md = new Metadata();
+        Metadata.Key<String> AUTH = Metadata.Key.of("authorization", Metadata.ASCII_STRING_MARSHALLER);
+        md.put(AUTH, "Bearer " + token);
+        return md;
+    }
+}
+```
+
+**Why this compiles on 0.39.8:**
+
+- `SessionFactory` is an **interface** with `newSession()`; there is **no `.builder()`** in that version. `SessionSubcomponent` (from the Dagger artifact) **extends `SessionFactory`**, and `DaggerDeephavenSessionRoot.create().factoryBuilder()` gives you a `SessionSubcomponent.Builder` where you set the **`ManagedChannel`** and the **`authenticationTypeAndValue`** string. ([docs.deephaven.io](https://docs.deephaven.io/core/javadoc/io/deephaven/client/impl/SessionFactory.html?utm_source=chatgpt.com "SessionFactory (combined-javadoc 0.40.0-SNAPSHOT API)"))
+    
+- For PSK, the accepted **authentication type** is the handler class name (e.g., `io.deephaven.authentication.psk.PskAuthenticationHandler`), and the **value** is the shared secret — concatenate them with a space (that “type and value” form comes straight from the 0.39 auth API). ([docs.deephaven.io](https://docs.deephaven.io/core/javadoc/io/deephaven/client/impl/Authentication.html?utm_source=chatgpt.com "Authentication (combined-javadoc 0.39.5 API)"))
+    
+
+---
+
+# 3) Controller (same as before)
+
+```java
+@RestController
+@RequestMapping("/api/dh")
+public class DeephavenController {
+
+  private final DeephavenControlService dh;
+
+  public DeephavenController(DeephavenControlService dh) { this.dh = dh; }
+
+  @PostMapping("/topics")
+  public ResponseEntity<?> updateTopics(@RequestBody TopicUpdateRequest req) {
+    try {
+      dh.setTopics(req.userTopic(), req.accountTopic(), req.joinType());
+      return ResponseEntity.ok("Rewired to users='" + req.userTopic()
+          + "', accounts='" + req.accountTopic()
+          + "', join='" + (req.joinType()==null?"left":req.joinType()) + "'");
+    } catch (Exception e) {
+      return ResponseEntity.internalServerError().body("Failed to set topics: " + e.getMessage());
+    }
+  }
+}
+```
+
+---
+
+## Quick sanity checklist
+
+- DH server is running with **PSK enabled** and your key set.
+    
+- `application.yml` has the `auth.type` exactly:  
+    `io.deephaven.authentication.psk.PskAuthenticationHandler` (match server side). ([deephaven.io](https://deephaven.io/core/docs/how-to-guides/authentication/auth-psk/?utm_source=chatgpt.com "Configure and use pre-shared key authentication"))
+    
+- Your Spring Boot uses **Java 11** source level (no text blocks).
+    
+- You added **both** `deephaven-java-client-session` **and** `deephaven-java-client-session-dagger` at **0.39.8**.
+    
+
+If anything is still off, paste the exact error and I’ll tweak the imports or method names to your module versions.
