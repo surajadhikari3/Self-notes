@@ -893,3 +893,117 @@ If your Angular subscribes to `users_ui`, `accounts_ui`, and `final_ui` by name,
 ---
 
 If you want, I can also drop in a **simple Angular service** that auto-opens those 3 tables and streams rows into ag-Grid without page refresh.
+
+---------------------------------------
+
+Short answer: **not yet**.  
+Your current `set_topics(user_topic, account_topic, join_type)` still hard-codes the value specs (`USER_VALUE_SPEC`, `ACCOUNT_VALUE_SPEC`). To make both **topic and value_spec dynamic**, change the DH orchestrator to accept schemas (or fully-built specs) from Spring, then build `kc.json_spec` at runtime.
+
+Here’s the **minimal change** on the Deephaven side:
+
+```python
+# /app/orchestrator_dh.py
+from deephaven import dtypes as dt
+from deephaven.stream.kafka import consumer as kc
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import time as dhtime
+
+BASE_KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-1k30p.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class":
+        "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.oauthbearer.token.endpoint.url":
+        "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "kc-y8yWMP",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.oauthbearer.token.endpoint.algo": "https",
+}
+
+# map simple strings -> Deephaven dtypes
+_DTYPE = {
+    "string": dt.string, "int": dt.int32, "long": dt.int64,
+    "double": dt.double, "float": dt.float32, "bool": dt.bool_
+}
+
+def _json_spec_from(schema: dict):
+    # schema example: {"userId":"string","name":"string","age":"long"}
+    spec = {k: _DTYPE[v.lower()] for k, v in schema.items()}
+    return kc.json_spec(spec)
+
+_state = {"resources": [], "last_ok": None}
+
+def _consume_table(topic: str, value_spec):
+    cfg = dict(BASE_KAFKA_CONFIG)
+    return kc.consume(
+        config=cfg, topics=topic,
+        key_spec=kc.IGNORE, value_spec=value_spec,
+        table_type=kc.TABLE_TYPE_APPEND
+    )
+
+def _safe_close(objs):
+    for o in objs or []:
+        try: o.close()
+        except: pass
+
+def set_topics(user_topic: str, account_topic: str,
+               user_schema: dict, account_schema: dict,
+               join_type: str = "left"):
+    """
+    Hot-swap consumers with DYNAMIC schemas.
+    Exports: users_ui, accounts_ui, final_ui
+    """
+    global users_ui, accounts_ui, final_ui, _state
+
+    if not user_topic or not account_topic:
+        raise ValueError("Both user_topic and account_topic are required")
+    if not user_schema or not account_schema:
+        raise ValueError("Both user_schema and account_schema are required")
+
+    new_resources = []
+    try:
+        user_spec    = _json_spec_from(user_schema)
+        account_spec = _json_spec_from(account_schema)
+
+        users_raw    = _consume_table(user_topic, user_spec);    new_resources.append(users_raw)
+        accounts_raw = _consume_table(account_topic, account_spec); new_resources.append(accounts_raw)
+
+        users_view    = users_raw.view(list(user_schema.keys()))
+        accounts_view = accounts_raw.view(list(account_schema.keys()))
+        new_resources += [users_view, accounts_view]
+
+        # choose join on the shared key (assumes 'userId' exists in both; make it a param if needed)
+        adds = [c for c in account_schema.keys() if c != "userId"]
+        final_tbl = left_outer_join(users_view, accounts_view, on="userId", adds=adds)
+        new_resources.append(final_tbl)
+
+        users_ui, accounts_ui, final_ui = users_view, accounts_view, final_tbl
+
+        _safe_close(_state.get("resources"))
+        _state.update({"resources": new_resources, "last_ok": dhtime.now()})
+        print(f"[orchestrator] topics set users='{user_topic}', accounts='{account_topic}', join='{join_type}'")
+    except Exception as e:
+        _safe_close(new_resources)
+        raise
+```
+
+### Spring Boot (what you send)
+
+Post your topics **and** schemas; your existing PSK/OAuth session code just needs to execute:
+
+```python
+from orchestrator_dh import set_topics
+set_topics(
+  'topic_users', 'topic_accounts',
+  {'userId':'string','name':'string','email':'string','age':'long'},
+  {'userId':'string','accountType':'string','balance':'double'},
+  'left'
+)
+```
+
+If you already implemented the Spring `TopicUpdateRequest` with `userSchema` and `accountSchema`, you’re done.  
+So: **after this change, yes**—both `topic` and `value_spec` are dynamic and controlled from Spring.
