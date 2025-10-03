@@ -1609,3 +1609,91 @@ public void setTopics(String userTopic, String accountTopic, String joinType) th
 ```
 
 If `build()` still throws, print the full root cause (it usually says exactly which dependency is missing). But in 0.39.8, the common misses are precisely `executor(...)` and `scheduler(...)`, so the above should unblock you.
+
+--------------------------------------------
+
+Thanks for the screenshots — they tell us exactly which 0.39.8 API variant you’ve got:
+
+- `Session.console(String)` (not `Session.console()` → `ConsoleService`)
+    
+- Dagger factory builder with **only**: `.managedChannel(...)`, `.scheduler(...)`, `.authenticationTypeAndValue(...)`  
+    (no `.executor(...)`)
+    
+
+So fix two things:
+
+1. **Don’t pass an executor** to `factoryBuilder()` (your variant doesn’t have it).
+    
+2. **Call the console like this**: `session.console("python")` → returns a `CompletableFuture<? extends ConsoleSession>`.
+    
+
+Here’s your **drop-in corrected `setTopics`** (Java 11 + DH 0.39.8 + PSK), matching your API:
+
+```java
+public void setTopics(String userTopic, String accountTopic, String joinType) throws Exception {
+  // normalize joinType (accepts "LEFT OUTER", "left_outer", "left")
+  String jt = (joinType == null) ? "left"
+      : joinType.trim().toLowerCase().replace(' ', '_');
+  if (!jt.startsWith("left")) jt = "left";
+
+  final String code =
+      "from orchestrator_dh import set_topics\n" +
+      "set_topics(" + pyStr(userTopic) + ", " + pyStr(accountTopic) + ", " + pyStr(jt) + ")\n";
+
+  // ---- gRPC channel ----
+  ManagedChannelBuilder<?> mcb = ManagedChannelBuilder.forAddress(host, port);
+  if (useSsl) mcb.useTransportSecurity(); else mcb.usePlaintext();
+  ManagedChannel channel = mcb.build();
+
+  // ---- REQUIRED by your 0.39.8 builder: a scheduler ----
+  java.util.concurrent.ScheduledExecutorService scheduler =
+      java.util.concurrent.Executors.newScheduledThreadPool(2, r -> {
+        Thread t = new Thread(r, "dh-client-scheduler");
+        t.setDaemon(true);
+        return t;
+      });
+
+  // PSK auth: "<handler FQCN> <secret>"
+  final String typeAndValue = authType + " " + psk;
+
+  // ---- Dagger factory (acts as SessionFactory) ----
+  SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+      .factoryBuilder()
+      .managedChannel(channel)
+      .scheduler(scheduler)                          // <-- your builder has this
+      .authenticationTypeAndValue(typeAndValue)
+      .build();
+
+  try (Session session = sub.newSession()) {
+    // IMPORTANT: your Session has console(String) directly
+    java.util.concurrent.CompletableFuture<? extends ConsoleSession> fut =
+        session.console("python");
+
+    try (ConsoleSession py =
+             fut.get(15, java.util.concurrent.TimeUnit.SECONDS)) {
+      // run the snippet (blocking variant)
+      py.executeCode(code);
+      // or: py.executeCodeFuture(code).get(30, TimeUnit.SECONDS);
+    }
+  } finally {
+    channel.shutdown();
+    scheduler.shutdown();
+    channel.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+    scheduler.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+  }
+}
+
+private static String pyStr(String s) {
+  if (s == null) return "None";
+  return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+}
+```
+
+### Why this fixes your errors
+
+- The builder error was because your `factoryBuilder()` **doesn’t support** `.executor(...)`. We removed it and kept only `.scheduler(...)`, which your stack trace previously said was required.
+    
+- The console error “expected 1 argument” is because **your** `Session` exposes `console(String)` directly. We now call `session.console("python")` and `get(...)` the `ConsoleSession` future before `executeCode(...)`.
+    
+
+If anything else throws at `build()`, paste the _first_ cause message — it will name the exact missing parameter, and I’ll adjust again.
