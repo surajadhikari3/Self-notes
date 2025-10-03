@@ -3587,3 +3587,241 @@ await ide.runCode('status = apply_join("ccd01_sb_its_esp_tap3507_bishowcasecurat
     
 
 This sidesteps the missing `query_scope`/`query_library` callable registration entirely and runs reliably on your build.
+
+
+---------------------------------------------------------------
+
+You can make the switch happen **automatically** whenever a new control message arrives by wiring your control stream to **call a registered Python function**. Since your build doesn’t have `query_scope` or a callable-friendly `query_library`, the most robust way is to register the Python function into **Java QueryScope** and invoke it from a formula. That lets Deephaven call your Python on each control update without Angular involvement.
+
+Below is a **drop-in, ready-to-run script** that:
+
+- Keeps `first_scope_ui`, `second_scope_ui`, `final_ui` always available (placeholders first).
+    
+- Consumes the **control** topic from **earliest**.
+    
+- Registers `apply_join(topicA, topicB, joinType)` into **Java QueryScope** so a formula can call it.
+    
+- Automatically calls `apply_join(...)` whenever `control_latest` changes (no Angular call).
+    
+- Exposes debug tails and counters so you can see whether the two data topics are streaming.
+    
+
+> If anything goes wrong, open `apply_status` and `apply_err` tabs—they’ll show the latest action and full error text.
+
+---
+
+### Paste this in `/ide` and run
+
+```python
+# ================== Auto-apply on control updates (no Angular call needed) ==================
+
+# --- Imports ---
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table
+from deephaven.experimental.outer_joins import left_outer_join
+import jpy
+
+# ---------- Control topic ----------
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"  # payload: {"topicA","topicB","joinType","ts"}
+
+# ---------- Kafka config (your values) ----------
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # used for data topics; control uses 'earliest' below
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# ---------- JSON specs ----------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,          # left-stream topic
+    "topicB": dt.string,          # right-stream topic
+    "joinType": dt.string,        # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,               # optional producer timestamp
+})
+
+# ---------- Helpers ----------
+def _err_table(msg: str):
+    msg = (msg or "").replace("`", "\\`")
+    return empty_table(1).update_view([f"msg=`{msg}`"])
+
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null", "name=(String)null",
+        "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+        "name=(String)null", "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+def _count_table(t):
+    # lightweight running count (keeps one row; grows as data arrives)
+    return t.update_view(["one=1"]).cum_sum(cols=["one"]).view(["rows=one"]).tail(1)
+
+# ---------- Bind UI placeholders so tabs open immediately ----------
+first_scope_ui  = _empty_users()
+second_scope_ui = _empty_accounts()
+final_ui        = _empty_joined()
+
+# status/error single-row tables you can click
+apply_status = _err_table("idle")
+apply_err    = _err_table("")
+
+# optional debug tails/counters (become real tables after first apply)
+left_raw_tail  = empty_table(0)
+right_raw_tail = empty_table(0)
+left_count     = empty_table(0)
+right_count    = empty_table(0)
+
+# ---------- Join selector ----------
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)          # experimental fn
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)              # table method
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)                # table method
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# ---------- Apply function (re)creates consumers and updates the 3 UI tables ----------
+def apply_join(topicA: str, topicB: str, joinType: str):
+    """
+    Automatically called by a formula whenever control_latest changes.
+    Builds two Kafka consumers (EARLIEST) and updates first/second/final UI views.
+    """
+    global first_scope_ui, second_scope_ui, final_ui
+    global apply_status, apply_err
+    global left_raw_tail, right_raw_tail, left_count, right_count
+
+    try:
+        apply_status = _err_table(f"building: {topicA}, {topicB}, {joinType}")
+
+        # For data topics, read from earliest so you see rows immediately
+        DATA_CFG = dict(KAFKA_CONFIG)
+        DATA_CFG["auto.offset.reset"] = "earliest"
+
+        left_raw = kc.consume(
+            DATA_CFG, topicA,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=USER_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+        right_raw = kc.consume(
+            DATA_CFG, topicB,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=ACCOUNT_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+
+        # Debug tails/counters to verify ingestion
+        left_raw_tail  = left_raw.tail(10)
+        right_raw_tail = right_raw.tail(10)
+        left_count     = _count_table(left_raw)
+        right_count    = _count_table(right_raw)
+
+        A = left_raw.view(["userId", "name", "email", "age"])
+        B = right_raw.view(["userId", "accountType", "balance"])
+
+        J = _join_by_type(joinType, A, B, on_cols=["userId"], join_cols=["accountType", "balance"]) \
+              .view(["userId", "accountType", "balance", "name", "email", "age"])
+
+        first_scope_ui, second_scope_ui, final_ui = A, B, J
+        apply_err    = _err_table("")
+        apply_status = _err_table("OK")
+        return "OK"
+
+    except Exception as e:
+        apply_err    = _err_table(str(e))
+        apply_status = _err_table(f"ERR: {e}")
+        return f"ERR: {e}"
+
+# ---------- Register the Python callable into Java QueryScope ----------
+QueryScope = jpy.get_type("io.deephaven.engine.util.QueryScope")
+QueryScope.addParam("apply_join", apply_join)   # now formulas may call apply_join(...)
+
+# ---------- Control consumer (earliest so we catch messages sent before the script started) ----------
+CTRL_CFG = dict(KAFKA_CONFIG)
+CTRL_CFG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CTRL_CFG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# Last unique control row
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+# Show latest control values in a simple table
+control_vals = control_latest.view(["topicA", "topicB", "joinType"])
+
+# ---------- Auto-apply on each control change ----------
+# This formula calls our registered Python function on the engine thread.
+# No Angular involvement needed.
+control_status = control_latest.update([
+    "status = (String)apply_join(topicA, topicB, joinType)"
+])
+
+# ---------- Optional: return the three UI tables to a JS client if it asks ----------
+def exposeToAngular():
+    return first_scope_ui, second_scope_ui, final_ui
+```
+
+---
+
+## How this meets your requirements
+
+- **Automatic**: Every time a message lands in `CONTROL_TOPIC`, `control_latest` updates → the formula runs → `apply_join(...)` is called. No Angular/JS call required.
+    
+- **Streaming tables**: `first_scope_ui`, `second_scope_ui`, and `final_ui` are **streaming views** over the two Kafka consumers and their join.
+    
+- **Keeps current topics until changed**: The consumers remain on the last applied topics; when a new control message arrives, they are rebuilt for the new pair.
+    
+- **Easy debugging**: Open these tabs:
+    
+    - `control_vals` – confirms what topicA/topicB/joinType are being used
+        
+    - `apply_status` – “OK”, or “building: …”, or “ERR: …”
+        
+    - `apply_err` – full exception text if anything fails
+        
+    - `left_raw_tail` / `right_raw_tail` – last 10 rows being ingested
+        
+    - `left_count` / `right_count` – running row counts
+        
+    - `first_scope_ui` / `second_scope_ui` / `final_ui` – the UI tables you care about
+        
+
+If your two data topics already had data, you’ll see it immediately (because we set **earliest** for the data consumers inside `apply_join`). If you prefer to only see **new** data, change that line back to `"auto.offset.reset": "latest"` inside `apply_join`.
