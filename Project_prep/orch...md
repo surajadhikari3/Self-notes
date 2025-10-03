@@ -3825,3 +3825,294 @@ def exposeToAngular():
         
 
 If your two data topics already had data, you’ll see it immediately (because we set **earliest** for the data consumers inside `apply_join`). If you prefer to only see **new** data, change that line back to `"auto.offset.reset": "latest"` inside `apply_join`.
+
+
+------------------------------------------------------------------------------------
+
+Got it—your build doesn’t have `query_scope`, and its `query_library` can’t register Python callables. So the “formula calls Python” trick won’t work on this version.
+
+Here’s a **version-agnostic approach** that does **not** rely on either `query_scope` or `query_library`. We attach a **Java update listener** (via `jpy`) directly to the `control_latest` table. Every time a new control message lands, the listener:
+
+1. reads `topicA`, `topicB`, `joinType`;
+    
+2. (re)creates the two Kafka consumers from those topics;
+    
+3. refreshes the three UI tables: `first_scope_ui`, `second_scope_ui`, `final_ui`;
+    
+4. writes status or errors into small, easy-to-inspect tables.
+    
+
+> This runs completely inside Deephaven; Angular doesn’t need to call anything.
+
+---
+
+### Drop-in script (paste into `/ide` and run)
+
+```python
+# ================== Auto-apply on control updates (no Angular call; no query_scope) ==================
+
+# --- Imports ---
+from deephaven.stream.kafka import consumer as kc
+from deephaven import dtypes as dt, empty_table
+from deephaven.experimental.outer_joins import left_outer_join
+import jpy
+
+# ---------- Topics ----------
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"      # produced by Spring: {"topicA","topicB","joinType","ts"}
+
+# ---------- Kafka config (yours) ----------
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-k13op.canadacentral.azure.confluent.cloud:9092",
+    "auto.offset.reset": "latest",  # we'll override to "earliest" for data topics at apply-time
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;",
+    "sasl.oauthbearer.token.endpoint.url": "https://fedsit.rastest.tdbank.ca/as/token.oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "sasl.oauthbearer.extensions.logicalCluster": "lkc-ygvwwp",
+    "sasl.oauthbearer.extensions.identityPoolId": "pool-NRk1",
+    "sasl.endpoint.identification.algorithm": "https",
+}
+
+# ---------- JSON specs ----------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+CONTROL_SPEC = kc.json_spec({
+    "topicA": dt.string,          # left-stream topic
+    "topicB": dt.string,          # right-stream topic
+    "joinType": dt.string,        # LEFT_OUTER | NATURAL | EXACT
+    "ts": dt.int64,               # optional producer timestamp
+})
+
+# ---------- Small helpers ----------
+def _err_table(msg: str):
+    msg = (msg or "").replace("`", "\\`")
+    return empty_table(1).update_view([f"msg=`{msg}`"])
+
+def _empty_users():
+    return empty_table(0).update_view([
+        "userId=(String)null", "name=(String)null",
+        "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+def _empty_accounts():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+    ])
+
+def _empty_joined():
+    return empty_table(0).update_view([
+        "userId=(String)null", "accountType=(String)null",
+        "balance=(double)NULL_DOUBLE",
+        "name=(String)null", "email=(String)null", "age=(long)NULL_LONG",
+    ])
+
+def _count_table(t):
+    # lightweight running count (single-row table that grows as data arrive)
+    return t.update_view(["one=1"]).cum_sum(cols=["one"]).view(["rows=one"]).tail(1)
+
+# ---------- Bind UI placeholders so tabs exist immediately ----------
+first_scope_ui  = _empty_users()
+second_scope_ui = _empty_accounts()
+final_ui        = _empty_joined()
+
+# status & error rows you can click
+apply_status = _err_table("idle")
+apply_err    = _err_table("")
+
+# debug tables (filled after first apply)
+left_raw_tail  = empty_table(0)
+right_raw_tail = empty_table(0)
+left_count     = empty_table(0)
+right_count    = empty_table(0)
+
+# ---------- Join selector ----------
+def _join_by_type(jtype: str, lhs, rhs, on_cols, join_cols):
+    jt = (jtype or "LEFT_OUTER").upper()
+    if jt == "LEFT_OUTER":
+        return left_outer_join(lhs, rhs, on=on_cols, joins=join_cols)          # experimental fn
+    if jt == "NATURAL":
+        return lhs.natural_join(rhs, on=on_cols, joins=join_cols)              # table method
+    if jt == "EXACT":
+        return lhs.exact_join(rhs, on=on_cols, joins=join_cols)                # table method
+    raise ValueError(f"Unknown joinType: {jtype}")
+
+# ---------- The apply function (re)creates the consumers and updates the UI tables ----------
+def _apply(topicA: str, topicB: str, joinType: str):
+    global first_scope_ui, second_scope_ui, final_ui
+    global apply_status, apply_err
+    global left_raw_tail, right_raw_tail, left_count, right_count
+
+    try:
+        apply_status = _err_table(f"building: {topicA}, {topicB}, {joinType}")
+
+        DATA_CFG = dict(KAFKA_CONFIG)
+        DATA_CFG["auto.offset.reset"] = "earliest"   # see immediately; change to "latest" if preferred
+
+        left_raw = kc.consume(
+            DATA_CFG, topicA,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=USER_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+        right_raw = kc.consume(
+            DATA_CFG, topicB,
+            key_spec=kc.KeyValueSpec.IGNORE,
+            value_spec=ACCOUNT_VALUE_SPEC,
+            table_type=kc.TableType.append(),
+        )
+
+        # quick ingestion visibility
+        left_raw_tail  = left_raw.tail(10)
+        right_raw_tail = right_raw.tail(10)
+        left_count     = _count_table(left_raw)
+        right_count    = _count_table(right_raw)
+
+        A = left_raw.view(["userId", "name", "email", "age"])
+        B = right_raw.view(["userId", "accountType", "balance"])
+
+        J = _join_by_type(joinType, A, B, on_cols=["userId"], join_cols=["accountType", "balance"]) \
+              .view(["userId", "accountType", "balance", "name", "email", "age"])
+
+        first_scope_ui, second_scope_ui, final_ui = A, B, J
+        apply_err    = _err_table("")
+        apply_status = _err_table("OK")
+    except Exception as e:
+        apply_err    = _err_table(str(e))
+        apply_status = _err_table(f"ERR: {e}")
+
+# ---------- Control consumer (EARLIEST so we see pre-start messages) ----------
+CTRL_CFG = dict(KAFKA_CONFIG)
+CTRL_CFG["auto.offset.reset"] = "earliest"
+
+control_raw = kc.consume(
+    CTRL_CFG, CONTROL_TOPIC,
+    key_spec=kc.KeyValueSpec.IGNORE,
+    value_spec=CONTROL_SPEC,
+    table_type=kc.TableType.append(),
+)
+
+# The latest unique configuration (1 row)
+control_latest = control_raw.last_by(["topicA", "topicB", "joinType"])
+
+# A convenient projection to view in Panels
+control_vals = control_latest.view(["topicA", "topicB", "joinType"])
+
+# ---------- Low-level Java update listener that calls _apply on each control change ----------
+# We'll implement the Java interface: io.deephaven.engine.table.TableUpdateListener
+TableUpdateListener = jpy.get_type("io.deephaven.engine.table.TableUpdateListener")
+RowSet = jpy.get_type("io.deephaven.engine.rowset.RowSet")
+
+jt = control_latest.j_table
+
+# We'll capture column sources once (they update as the table ticks)
+col_topicA  = jt.getColumnSource("topicA")
+col_topicB  = jt.getColumnSource("topicB")
+col_join    = jt.getColumnSource("joinType")
+
+# helper to read the single row (if present)
+def _read_latest_row():
+    rs = jt.getRowSet()
+    if rs.isEmpty():
+        return None
+    key = rs.lastRowKey()
+    a = col_topicA.get(key)
+    b = col_topicB.get(key)
+    j = col_join.get(key)
+    # convert Java objects to Python strings (they're usually java.lang.String already)
+    return (str(a) if a is not None else None,
+            str(b) if b is not None else None,
+            str(j) if j is not None else None)
+
+# Python methods that the Java proxy will call
+def _on_update(upd, is_replay):
+    vals = _read_latest_row()
+    if not vals:
+        return
+    a, b, j = vals
+    if a and b:
+        _apply(a, b, j or "LEFT_OUTER")
+
+def _on_failure(ex):
+    # surface listener failures
+    global apply_err, apply_status
+    apply_err    = _err_table(f"listener failed: {ex}")
+    apply_status = _err_table("ERR: listener")
+
+def _on_dispose():
+    pass
+
+listener = jpy.JProxy(
+    "io.deephaven.engine.table.TableUpdateListener",
+    dict(onUpdate=_on_update, onFailure=_on_failure, dispose=_on_dispose)
+)
+
+# Attach the listener
+jt.addUpdateListener(listener)
+
+# Also fire once at start if there is already a row
+_initial = _read_latest_row()
+if _initial:
+    _apply(*_initial)
+
+# ---------- Optional function for Angular (still works if you want it) ----------
+def exposeToAngular():
+    return first_scope_ui, second_scope_ui, final_ui
+```
+
+---
+
+## How to verify
+
+1. In Panels, open:
+    
+    - `control_vals` – shows the latest `{topicA, topicB, joinType}` Deephaven is using.
+        
+    - `apply_status` – will say “OK”, “building: …”, or “ERR: …”.
+        
+    - `apply_err` – full error text if something breaks.
+        
+    - `left_raw_tail` / `right_raw_tail` – last 10 ingested rows for each data topic.
+        
+    - `left_count` / `right_count` – running counts (1 row each).
+        
+    - `first_scope_ui`, `second_scope_ui`, `final_ui` – your three live UI tables.
+        
+2. Produce a new control message. You should see:
+    
+    - `control_vals` update to the new topics,
+        
+    - `apply_status` briefly show “building: …” then “OK”,
+        
+    - The three UI tables switch to the new streams and start ticking.
+        
+
+---
+
+### Notes
+
+- If you prefer to only consume **new** rows after the switch, change
+    
+    ```python
+    DATA_CFG["auto.offset.reset"] = "latest"
+    ```
+    
+    inside `_apply`.
+    
+- If your interface class differs (some very old builds used a different name), search the classpath for `TableUpdateListener` in the IDE “Command History / Logs”; but the fully-qualified name above is used in modern builds.
+    
+
+This avoids `query_scope` entirely and should work on the environment you’ve shown.
