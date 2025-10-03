@@ -1232,3 +1232,303 @@ public class DeephavenController {
     
 
 If anything is still off, paste the exact error and I’ll tweak the imports or method names to your module versions.
+
+-------------------------
+
+
+Awesome — here’s a **clean, Java-11 + Deephaven 0.39.8 + PSK** working set.  
+It includes the minimal `pom.xml` deps, `application.yml`, a DTO, a controller, and the **fixed** service that uses `ConsoleService.startConsole("python")` → `ConsoleSession.executeCode(...)`.
+
+---
+
+# 1) `pom.xml` (only what you need for 0.39.8)
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example</groupId>
+  <artifactId>dh-psk-0398</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <java.version>11</java.version>
+    <spring-boot.version>2.7.18</spring-boot.version> <!-- Java 11-friendly -->
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+
+      <!-- Pin ALL Deephaven artifacts to the same line -->
+      <dependency>
+        <groupId>io.deephaven</groupId>
+        <artifactId>deephaven-bom</artifactId>
+        <version>0.39.8</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- Spring Web + Validation -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <!-- Deephaven Java client (0.39.8) -->
+    <dependency>
+      <groupId>io.deephaven</groupId>
+      <artifactId>deephaven-java-client-session</artifactId>
+    </dependency>
+    <!-- Dagger wiring that exposes SessionSubcomponent.factoryBuilder() -->
+    <dependency>
+      <groupId>io.deephaven</groupId>
+      <artifactId>deephaven-java-client-session-dagger</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+```
+
+---
+
+# 2) `src/main/resources/application.yml`
+
+```yaml
+server:
+  port: 8080
+
+deephaven:
+  host: ${DH_HOST:localhost}
+  port: ${DH_PORT:10000}
+  useSsl: ${DH_SSL:false}
+  auth:
+    # 0.39.x expects "authentication type and value" (class name + space + secret)
+    type: ${DH_AUTH_TYPE:io.deephaven.authentication.psk.PskAuthenticationHandler}
+    token: ${DH_PSK:MY_SUPER_SECRET_KEY}
+```
+
+---
+
+# 3) `src/main/java/com/example/dh/DhApplication.java`
+
+```java
+package com.example.dh;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class DhApplication {
+  public static void main(String[] args) {
+    SpringApplication.run(DhApplication.class, args);
+  }
+}
+```
+
+---
+
+# 4) DTO: `src/main/java/com/example/dh/dto/TopicUpdateRequest.java`
+
+```java
+package com.example.dh.dto;
+
+import jakarta.validation.constraints.NotBlank;
+
+public record TopicUpdateRequest(
+    @NotBlank String userTopic,
+    @NotBlank String accountTopic,
+    String joinType   // optional; defaults to "left"
+) {}
+```
+
+---
+
+# 5) Controller: `src/main/java/com/example/dh/controller/DeephavenController.java`
+
+```java
+package com.example.dh.controller;
+
+import com.example.dh.dto.TopicUpdateRequest;
+import com.example.dh.service.DeephavenControlService;
+import jakarta.validation.Valid;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/dh")
+public class DeephavenController {
+
+  private final DeephavenControlService dh;
+
+  public DeephavenController(DeephavenControlService dh) {
+    this.dh = dh;
+  }
+
+  @PostMapping("/topics")
+  public ResponseEntity<?> updateTopics(@Valid @RequestBody TopicUpdateRequest req) {
+    try {
+      dh.setTopics(req.userTopic(), req.accountTopic(), req.joinType());
+      return ResponseEntity.ok(
+          "Rewired to users='" + req.userTopic() + "', accounts='" +
+              req.accountTopic() + "', join='" + (req.joinType()==null?"left":req.joinType()) + "'"
+      );
+    } catch (Exception e) {
+      return ResponseEntity.internalServerError().body("Failed to set topics: " + e.getMessage());
+    }
+  }
+}
+```
+
+---
+
+# 6) **Service (fixed console path)**: `src/main/java/com/example/dh/service/DeephavenControlService.java`
+
+```java
+package com.example.dh.service;
+
+import io.deephaven.client.DaggerDeephavenSessionRoot;
+import io.deephaven.client.SessionSubcomponent;
+import io.deephaven.client.impl.ConsoleService;
+import io.deephaven.client.impl.ConsoleSession;
+import io.deephaven.client.impl.Session;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+@Service
+public class DeephavenControlService {
+
+  private final String host;
+  private final int port;
+  private final boolean useSsl;
+  private final String authType; // e.g. io.deephaven.authentication.psk.PskAuthenticationHandler
+  private final String psk;
+
+  public DeephavenControlService(
+      @Value("${deephaven.host}") String host,
+      @Value("${deephaven.port}") int port,
+      @Value("${deephaven.useSsl}") boolean useSsl,
+      @Value("${deephaven.auth.type}") String authType,
+      @Value("${deephaven.auth.token}") String psk
+  ) {
+    this.host = host;
+    this.port = port;
+    this.useSsl = useSsl;
+    this.authType = authType;
+    this.psk = psk;
+  }
+
+  public void setTopics(String userTopic, String accountTopic, String joinType) throws Exception {
+    final String jt = (joinType == null || joinType.isBlank()) ? "left" : joinType;
+
+    // Build the tiny Python program (Java 11-friendly)
+    final String code =
+        "from orchestrator_dh import set_topics\n" +
+        "set_topics(" + pyStr(userTopic) + ", " + pyStr(accountTopic) + ", " + pyStr(jt) + ")\n";
+
+    // gRPC channel to Deephaven server
+    ManagedChannelBuilder<?> mcb = ManagedChannelBuilder.forAddress(host, port);
+    if (useSsl) mcb.useTransportSecurity(); else mcb.usePlaintext();
+    ManagedChannel channel = mcb.build();
+
+    // 0.39.x expects "authentication type and value" as one string:
+    // "<handler FQCN> <secret>"
+    final String typeAndValue = authType + " " + psk;
+
+    // Dagger factory -> Session
+    SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+        .factoryBuilder()
+        .managedChannel(channel)
+        .authenticationTypeAndValue(typeAndValue)
+        .build();
+
+    try (Session session = sub.newSession()) {
+      // IMPORTANT: open a console session and execute the code there
+      ConsoleService consoleService = session.console();
+      try (ConsoleSession py = consoleService.startConsole("python")) {
+        py.executeCode(code);
+      }
+    } finally {
+      channel.shutdown();
+    }
+  }
+
+  private static String pyStr(String s) {
+    if (s == null) return "None";
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+  }
+}
+```
+
+---
+
+## Run it
+
+1. Start Deephaven with **PSK enabled** and ensure your `orchestrator_dh.py` is loaded (Application Mode or `--scripts`):
+    
+
+- Env for server:
+    
+    - `DH_AUTH_TYPE=psk`
+        
+    - `DH_PSK=MY_SUPER_SECRET_KEY`
+        
+
+2. Start Spring:
+    
+
+```bash
+DH_HOST=localhost \
+DH_PORT=10000 \
+DH_PSK=MY_SUPER_SECRET_KEY \
+./mvnw spring-boot:run
+```
+
+3. Call the endpoint:
+    
+
+```bash
+curl -X POST http://localhost:8080/api/dh/topics \
+  -H 'Content-Type: application/json' \
+  -d '{"userTopic":"topic_users","accountTopic":"topic_accounts","joinType":"left"}'
+```
+
+Your Angular app should keep subscribing to the **fixed table names** (`users_ui`, `accounts_ui`, `final_ui`), and they’ll flip to the new topics right after the POST.
+
+---
+
+### Notes / gotchas
+
+- If your orchestrator is named differently, change the import line in `code` from `from orchestrator_dh import set_topics` to match.
+    
+- Keep the **Deephaven client version** aligned to your server’s minor (you’re on **0.39.8**, all good).
+    
+- We did **not** include any extra GRPC or DH modules explicitly; the two DH client artifacts + BOM handle the graph and avoid version clashes.
+    
+
+If you want me to add **dynamic schemas** again later, we’ll just extend the `code` string to pass JSON schemas and parse them in Python.
