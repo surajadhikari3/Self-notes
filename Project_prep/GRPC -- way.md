@@ -1861,3 +1861,116 @@ On the Deephaven server (logs / env) confirm:
     
 
 If you still see UNAUTHENTICATED after these three attempts, paste the **first few lines** from the Deephaven server logs around authentication—there’s usually a message like “Using auth handler …” or “PSK mismatch.” That will pinpoint whether it wants the FQCN, shorthand, or header form.
+
+----------------------------
+
+debugging.............
+
+
+Great—thanks for the screenshots. You’re launching Deephaven with:
+
+- data/config dirs under `C:\dhdata\...`
+    
+- `deephaven server --port 10000`
+    
+- (trying) to set `PYTHONPATH` before starting
+    
+
+To make `from orchestrator_dh import set_topics` work, the **Deephaven server process** must have the folder that _contains_ `orchestrator_dh.py` on its Python path. You have two clean choices. Pick one.
+
+# Option 1 (recommended): put it on the path via `app.properties`
+
+Since you already point `DEEPHAVEN_CONFIG_DIR` to `C:\dhdata\config`, do this:
+
+1. Place your file here (or keep your existing folder):
+    
+
+```
+C:\Users\TAP3507\source\dh-dash\scripts\orchestrator_dh.py
+```
+
+2. Create (or edit) `C:\dhdata\config\app.properties` and add a line:
+    
+
+```
+python.path=C:\Users\TAP3507\source\dh-dash\scripts
+```
+
+- If there’s already a value, append with `;`:
+    
+    ```
+    python.path=<existing>;C:\Users\TAP3507\source\dh-dash\scripts
+    ```
+    
+
+3. Fully restart Deephaven.
+    
+
+That’s it. Now the import works everywhere (UI, Java console sessions, etc.).
+
+# Option 2: set `PYTHONPATH` in the _same_ shell you start the server
+
+This only works if the env var is actually inherited by the Deephaven process.
+
+- **Git Bash / MSYS** (your path in the note looks like this):
+    
+    ```bash
+    export DEEPHAVEN_CONFIG_DIR="C:/dhdata/config"
+    export PYTHONPATH="/c/Users/TAP3507/source/dh-dash/scripts:$PYTHONPATH"
+    deephaven server --port 10000
+    ```
+    
+- **PowerShell**:
+    
+    ```powershell
+    $env:DEEPHAVEN_CONFIG_DIR = "C:\dhdata\config"
+    $env:PYTHONPATH = "C:\Users\TAP3507\source\dh-dash\scripts;$env:PYTHONPATH"
+    deephaven server --port 10000
+    ```
+    
+- **cmd.exe**:
+    
+    ```cmd
+    set DEEPHAVEN_CONFIG_DIR=C:\dhdata\config
+    set PYTHONPATH=C:\Users\TAP3507\source\dh-dash\scripts;%PYTHONPATH%
+    deephaven server --port 10000
+    ```
+    
+
+⚠️ Make sure you start Deephaven **from the same terminal** where you set the env vars. If you click/run it from somewhere else, those exports won’t apply.
+
+# Where exactly to place the file?
+
+- Put `orchestrator_dh.py` in **any** folder you add to the path (e.g., `C:\Users\TAP3507\source\dh-dash\scripts`).
+    
+- Do **not** point to the file itself in `python.path`/`PYTHONPATH`; point to the **directory** that _contains_ it.
+    
+
+# Quick verification inside Deephaven (Python console)
+
+Run this once after restart:
+
+```python
+import sys, importlib.util
+print([p for p in sys.path if 'dh-dash' in p or 'dhdata' in p])
+print('found?', importlib.util.find_spec('orchestrator_dh') is not None)
+from orchestrator_dh import set_topics  # should import without error
+```
+
+If `found?` is `False`, either:
+
+- wrong folder (path must be the parent of `orchestrator_dh.py`)
+    
+- you didn’t restart after editing `app.properties`
+    
+- or you set `PYTHONPATH` in a different shell than the one that launched the server.
+    
+
+Once this passes, your Java call:
+
+```python
+from orchestrator_dh import set_topics
+set_topics(user_topic, account_topic, join_type)
+```
+
+will import cleanly.
