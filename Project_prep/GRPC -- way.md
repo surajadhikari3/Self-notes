@@ -2295,3 +2295,280 @@ const finalHandle = await app.getTable("final_ui");
 ---
 
 If you still prefer not to use Application Mode, the only other path is the **control-topic listener in the IDE session** (previous message). But with this app setup you get a clean, shared surface and your “gRPC from Spring Boot” requirement is satisfied.
+
+-------------------------------------------------------------
+
+Awesome—here’s a **drop-in `orchestrator_dh.py`** that is **compatible with Deephaven 0.39.x**, loads automatically at server start (via `data/app.d/`), exposes global tables for the IDE & Angular, and **updates itself** whenever your Spring Boot publishes a control message (so no session headaches).
+
+# Where to put it
+
+Save this file as:
+
+```
+C:\dhdata\data\app.d\orchestrator_dh.py
+```
+
+Then restart Deephaven:
+
+```
+deephaven server --port 10000
+```
+
+# What it gives you
+
+- `users_ui`, `accounts_ui`, `final_ui` exported globally (visible to IDE & Angular).
+    
+- A safe **hot-swap** `set_topics(users, accounts, join)` that closes old resources.
+    
+- A **control-topic listener**. When Spring Boot publishes JSON like:
+    
+    ```json
+    {"usersTopic":"...", "accountsTopic":"...", "joinType":"left"}
+    ```
+    
+    the script updates the streams **inside this same IDE/global session**.
+    
+
+---
+
+```python
+# orchestrator_dh.py  (Deephaven 0.39.x)
+
+from deephaven import ApplicationState
+import deephaven.dtypes as dt
+from deephaven.stream.kafka import consumer as kc
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import time as dhtime
+
+# -----------------------------
+# 1) STATIC / SHARED CONFIG
+# -----------------------------
+
+# <<< EDIT THESE THREE >>>
+TOPIC_USERS   = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+TOPIC_ACCTS   = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Your Kafka client config (fill yours in)
+KAFKA_CONFIG = {
+    "bootstrap.servers": "your-bootstrap:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    # … add/keep your other oauth / ssl properties exactly as you already use …
+}
+
+# Value JSON schemas
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({  # control messages from Spring Boot
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string
+})
+
+# -----------------------------
+# 2) STATE & HELPERS
+# -----------------------------
+
+# Globals the UI / Angular will read
+users_ui   = None
+accounts_ui = None
+final_ui   = None
+
+# Internal state for safe hot-swaps
+_state = {
+    "users_raw": None,
+    "accounts_raw": None,
+    "final_tbl": None,
+    "resources": [],   # anything AutoCloseable (Table, TableHandle, listener disposables)
+    "last_ok": None
+}
+
+def _consume_table(topic: str, value_spec):
+    """Create a streaming (append) table from Kafka topic."""
+    cfg = dict(KAFKA_CONFIG)  # shallow copy
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append()
+    )
+
+def _safe_close(objs):
+    for o in objs or []:
+        try:
+            o.close()   # TableHandle, Table, Blink, listeners, etc. are AutoCloseable
+        except Exception:
+            pass
+
+# -----------------------------
+# 3) set_topics(): hot-swap
+# -----------------------------
+
+def set_topics(user_topic: str, account_topic: str, join_type: str = "left"):
+    """
+    Hot-swap the Kafka consumers + joined view.
+    Exports/updates globals: users_ui, accounts_ui, final_ui
+    """
+    global users_ui, accounts_ui, final_ui, _state
+
+    if not user_topic or not account_topic:
+        raise ValueError("Both user_topic and account_topic are required")
+
+    new_resources = []
+    try:
+        # Build new raw consumers
+        users_raw    = _consume_table(user_topic, USER_VALUE_SPEC);    new_resources.append(users_raw)
+        accounts_raw = _consume_table(account_topic, ACCOUNT_VALUE_SPEC); new_resources.append(accounts_raw)
+
+        # UI projections (only columns Angular needs)
+        users_view    = users_raw.view(["userId", "name", "email", "age"])
+        accounts_view = accounts_raw.view(["userId", "accountType", "balance"])
+        new_resources.extend([users_view, accounts_view])
+
+        # Join strategy (extend to inner/right/full later if needed)
+        jt = (join_type or "left").lower()
+        if jt.startswith("left"):
+            final_tbl = left_outer_join(
+                users_view, accounts_view,
+                on="userId", joins=["accountType", "balance"]
+            )
+        else:
+            # default/fallback: left outer join
+            final_tbl = left_outer_join(
+                users_view, accounts_view,
+                on="userId", joins=["accountType", "balance"]
+            )
+        new_resources.append(final_tbl)
+
+        # Atomically swap the globals the clients read
+        users_ui    = users_view
+        accounts_ui = accounts_view
+        final_ui    = final_tbl
+
+        # Close old after swap to avoid "table already closed" during paints
+        _safe_close(_state.get("resources"))
+
+        _state.update({
+            "users_raw": users_raw,
+            "accounts_raw": accounts_raw,
+            "final_tbl": final_tbl,
+            "resources": new_resources,
+            "last_ok": dhtime.dh_now()
+        })
+
+        print(f"[orchestrator] Topics set ➜ users='{user_topic}', accounts='{account_topic}', join='{jt}'")
+
+    except Exception as e:
+        # If anything failed, dispose newly created resources and keep old ones alive
+        _safe_close(new_resources)
+        print("[orchestrator] Error in set_topics:", e)
+        raise
+
+# -----------------------------
+# 4) Control-topic listener
+# -----------------------------
+
+def _start_control_listener(control_topic: str):
+    """
+    Consume control messages; on each new row, call set_topics(...) in THIS session.
+    """
+    ctrl_tbl = kc.consume(
+        dict(KAFKA_CONFIG),
+        control_topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=CONTROL_VALUE_SPEC,
+        table_type=kc.TableType.append()
+    )
+
+    # We register a small listener that reacts on each append
+    from deephaven.table_listener import listen
+
+    def _on_update(_update):
+        try:
+            # take last row and snapshot to pandas for simple access
+            last = ctrl_tbl.tail(1).snapshot()
+            if last.size() == 0:
+                return
+            df = last.to_pandas()
+            row = df.iloc[0]
+            users = str(row.get("usersTopic") or "").strip()
+            accts = str(row.get("accountsTopic") or "").strip()
+            join  = str(row.get("joinType") or "left").strip()
+            if users and accts:
+                set_topics(users, accts, join)
+        except Exception as e:
+            print("[orchestrator] control listener error:", e)
+
+    disp = listen(ctrl_tbl, _on_update, replay_initial=True)  # keep reference to avoid GC
+    print(f"[orchestrator] control listener started on '{control_topic}'")
+    return ctrl_tbl, disp
+
+# -----------------------------
+# 5) Boot: initial topics + listener
+# -----------------------------
+
+try:
+    set_topics(TOPIC_USERS, TOPIC_ACCTS, "left")
+except Exception as boot_err:
+    print("[orchestrator] Initial wiring failed:", boot_err)
+
+_ctrl_tbl, _ctrl_disp = _start_control_listener(CONTROL_TOPIC)
+
+# -----------------------------
+# 6) Export tables as an "Application" in 0.39.x
+# -----------------------------
+
+app = ApplicationState()
+app["users_ui"]    = users_ui
+app["accounts_ui"] = accounts_ui
+app["final_ui"]    = final_ui
+print("[orchestrator] exported users_ui / accounts_ui / final_ui")
+```
+
+---
+
+## Spring Boot side (control message)
+
+Produce JSON to `CONTROL_TOPIC` (above). Example (Jackson + Kafka):
+
+```java
+record TopicUpdate(String usersTopic, String accountsTopic, String joinType) {}
+
+kafkaTemplate.send(CONTROL_TOPIC, objectMapper.writeValueAsString(
+    new TopicUpdate(
+        "ccd01_sb_its_esp_tap3507_bishowcaseraw",
+        "ccd01_sb_its_esp_tap3507_bishowcasecurated",
+        "left"
+)));
+```
+
+That’s it—no gRPC console needed from Spring Boot anymore. The **IDE / Angular** keep reading `users_ui / accounts_ui / final_ui`, and **the orchestrator updates those tables inside the same global session** whenever a new control message arrives.
+
+---
+
+### Quick checklist
+
+- Put the file in `data/app.d/` (0.39.x startup loader).
+    
+- Fill in your **real** `KAFKA_CONFIG` (the OAuth / SSL bits you already use).
+    
+- Restart DH. In the IDE, the “Applications” pane will show the app; Angular can read the same three global tables.
+    
+- From Spring Boot, publish to the **control topic** to switch topics live.
+    
+
+If you want, send me your current `KAFKA_CONFIG` (redact secrets) and the exact control topic name, and I’ll tailor the constants at the top for you.
