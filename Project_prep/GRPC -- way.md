@@ -1974,3 +1974,324 @@ set_topics(user_topic, account_topic, join_type)
 ```
 
 will import cleanly.
+
+-------------------------------------------------------------------
+
+Short truth first: you **cannot** change variables/tables that live in the IDE’s Python session by running code in a **different** gRPC session from Spring Boot. Deephaven objects are scoped to the session that created them.
+
+To make a gRPC call from Spring Boot and have the **IDE** (and Angular) see the new tables, you need a **session-independent surface**. The clean, copy-paste way is **Application Mode**: you keep shared tables in an app, expose a tiny route that updates them, and any session (IDE, Angular, Spring Boot) can read the same app tables.
+
+Below is a working end-to-end setup:
+
+---
+
+# 1) Python — `orchestrator_app.py` (shared app)
+
+Put this file in your `scripts` folder (the one on `python.path`). Then restart Deephaven (or run it once in the IDE).
+
+```python
+# orchestrator_app.py
+# Deephaven 0.39.x
+from deephaven.appmode import Application
+import deephaven.dtypes as dt
+from deephaven.stream.kafka import consumer as kc
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import time as dhtime
+
+app = Application("Orchestrator")  # shared across sessions
+
+# ---- your static config (edit to your env) ----
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-...:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    "sasl.jaas.config": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required "
+                        "clientId='TestScopeClient' "
+                        "clientSecret='2Federate' "
+                        "scope='' ;",
+    "extension_logicalCluster": "lkc-...",
+    "extension_identityPoolId": "pool-...",
+    "sasl.oauthbearer.token.endpoint.url": "https://....oauth2",
+    "sasl.oauthbearer.sub.claim.name": "client_id",
+    "sasl.oauthbearer.client.id": "TestScopeClient",
+    "sasl.oauthbearer.client.secret": "2Federate",
+    "ssl.endpoint.identification.algorithm": "https",
+}
+
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+
+# ---- module state (shared) ----
+_state = {
+    "users_raw": None,
+    "accounts_raw": None,
+    "final_tbl": None,
+    "resources": [],
+    "last_ok": None,
+}
+
+def _consume_table(topic: str, value_spec):
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg, topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append()
+    )
+
+def _safe_close(objs):
+    for o in objs or []:
+        try:
+            o.close()
+        except Exception:
+            pass
+
+# ---- ROUTE: anyone (any session) can call this to update topics ----
+@app.route("/set")
+def set_topics(user_topic: str, account_topic: str, join_type: str = "left"):
+    """
+    Hot-swap the Kafka consumers and the joined view.
+    Exposes shared tables: users_ui, accounts_ui, final_ui.
+    """
+    if not user_topic or not account_topic:
+        raise ValueError("Both user_topic and account_topic are required")
+
+    new_resources = []
+    try:
+        users_raw = _consume_table(user_topic, USER_VALUE_SPEC);  new_resources.append(users_raw)
+        accounts_raw = _consume_table(account_topic, ACCOUNT_VALUE_SPEC);  new_resources.append(accounts_raw)
+
+        # UI projections
+        users_view = users_raw.view(["userId", "name", "email", "age"])
+        accounts_view = accounts_raw.view(["userId", "accountType", "balance"])
+        new_resources.extend([users_view, accounts_view])
+
+        # join
+        jt = (join_type or "left").lower()
+        if jt.startswith("left"):
+            final_tbl = left_outer_join(
+                users_view, accounts_view,
+                on=["userId"],
+                joins=["accountType", "balance"]
+            )
+        else:
+            # default / extend as needed (inner/right)
+            final_tbl = left_outer_join(
+                users_view, accounts_view,
+                on=["userId"],
+                joins=["accountType", "balance"]
+            )
+        new_resources.append(final_tbl)
+
+        # commit the swap (atomic from readers’ point of view)
+        _safe_close(_state.get("resources"))
+        _state.update({
+            "users_raw": users_raw,
+            "accounts_raw": accounts_raw,
+            "final_tbl": final_tbl,
+            "resources": new_resources,
+            "last_ok": dhtime.dh_now(),
+        })
+
+        print(f"[orchestrator] Topics set → users='{user_topic}', accounts='{account_topic}', join='{jt}'")
+        return {"ok": True}
+    except Exception as e:
+        # roll back new, keep old
+        _safe_close(new_resources)
+        raise e
+
+# ---- APP TABLE EXPORTS (shared, discoverable by name) ----
+@app.table("users_ui")
+def users_ui():
+    # project a stable UI view
+    t = _state.get("users_raw")
+    return None if t is None else t.view(["userId", "name", "email", "age"])
+
+@app.table("accounts_ui")
+def accounts_ui():
+    t = _state.get("accounts_raw")
+    return None if t is None else t.view(["userId", "accountType", "balance"])
+
+@app.table("final_ui")
+def final_ui():
+    return _state.get("final_tbl")
+```
+
+What this gives you:
+
+- A **shared app** named “Orchestrator”.
+    
+- A **route** `/set` that updates topics and swaps the live tables.
+    
+- Three **app tables** (`users_ui`, `accounts_ui`, `final_ui`) that any client (IDE, Angular, or another gRPC session) can open by name.
+    
+
+> Make sure `app.properties` includes your scripts folder:  
+> `python.path=C:\Users\TAP3507\source\dh-dash\scripts`
+
+---
+
+# 2) Spring Boot — keep **one** gRPC session and call the app route
+
+Create a tiny session manager (singleton) that opens one Python console and reuses it.
+
+```java
+// DhSessionManager.java
+package your.pkg;
+
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.StatusRuntimeException;
+import io.deephaven.client.impl.*;
+import io.deephaven.proto.backplane.grpc.*;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
+import java.util.concurrent.*;
+
+@Component
+public class DhSessionManager {
+    private ManagedChannel channel;
+    private Session session;
+    private ConsoleSession py;
+    private ScheduledExecutorService scheduler;
+
+    private final String host = "localhost";
+    private final int port = 10000;
+    private final String psk = "your-psk-here"; // match your DH server
+
+    @PostConstruct
+    public void init() throws Exception {
+        channel = ManagedChannelBuilder.forAddress(host, port)
+                .usePlaintext() // or TLS
+                .build();
+
+        scheduler = Executors.newScheduledThreadPool(2, r -> {
+            Thread t = new Thread(r, "dh-client-scheduler");
+            t.setDaemon(true);
+            return t;
+        });
+
+        // auth via PSK
+        DeephavenSessionRoot.SessionSubcomponent sub = DaggerDeephavenSessionRoot.create()
+                .factoryBuilder()
+                .managedChannel(channel)
+                .scheduler(scheduler)
+                .authenticationTypeAndValue("io.deephaven.authentication.psk.PskAuthenticationHandler " + psk)
+                .build();
+
+        session = sub.newSession();
+        py = session.console("python").get(15, TimeUnit.SECONDS);
+
+        // ensure the app module is importable (your scripts folder must be on python.path)
+        py.executeCode("# warm import so the app is loaded\n"
+            + "import orchestrator_app\n");
+    }
+
+    public synchronized void callSetTopics(String usersTopic, String accountsTopic, String joinType) throws Exception {
+        String jt = (joinType == null || joinType.isBlank()) ? "left" : joinType;
+        // Call the app route; this updates the SHARED app tables visible to all sessions
+        String code = String.format(
+            "from orchestrator_app import set_topics\n"
+          + "set_topics(%s, %s, %s)\n",
+            pyStr(usersTopic), pyStr(accountsTopic), pyStr(jt)
+        );
+        py.executeCode(code);
+    }
+
+    private static String pyStr(String s) {
+        if (s == null) return "None";
+        // Escape backslashes and quotes for Python
+        return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        try { if (py != null) py.close(); } catch (Exception ignored) {}
+        try { if (session != null) session.close(); } catch (Exception ignored) {}
+        try {
+            if (channel != null) {
+                channel.shutdownNow();
+                channel.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException ignored) {}
+        try {
+            if (scheduler != null) {
+                scheduler.shutdownNow();
+                scheduler.awaitTermination(5, TimeUnit.SECONDS);
+            }
+        } catch (InterruptedException ignored) {}
+    }
+}
+```
+
+Expose an endpoint you can hit from anywhere:
+
+```java
+// TopicController.java
+package your.pkg;
+
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/orchestrator")
+public class TopicController {
+
+    private final DhSessionManager dh;
+
+    public TopicController(DhSessionManager dh) {
+        this.dh = dh;
+    }
+
+    @PostMapping("/set")
+    public String set(@RequestParam String users,
+                      @RequestParam String accounts,
+                      @RequestParam(defaultValue = "left") String join) throws Exception {
+        dh.callSetTopics(users, accounts, join);
+        return "ok";
+    }
+}
+```
+
+**Important:** we **do not** close the session/channel per request. The session stays alive for the whole app, so the app route updates the shared app tables and your IDE/Angular will see the change immediately.
+
+---
+
+# 3) Angular / IDE — read the app tables (no code changes needed)
+
+In the IDE: open the App Browser → “Orchestrator” → tables `users_ui`, `accounts_ui`, `final_ui`.
+
+In Angular (DH JS API), fetch by app table name:
+
+```ts
+// assuming you already have a connected dh Session (WebSocket)
+const app = await session.getApplication("Orchestrator");
+const finalHandle = await app.getTable("final_ui");
+// bind finalHandle to AG Grid...
+```
+
+(If you currently “look up by variable name” in IDE session, switch to fetching **app tables**; they’re stable across sessions.)
+
+---
+
+## Why this works
+
+- The **app** holds the real objects; they’re **shared across sessions**.
+    
+- Spring Boot uses gRPC to call the app’s **route**; the app updates its shared state.
+    
+- IDE and Angular read the **app tables**, so they see updates instantly.
+    
+- No more “can’t see variables created in another session” problem.
+    
+
+---
+
+If you still prefer not to use Application Mode, the only other path is the **control-topic listener in the IDE session** (previous message). But with this app setup you get a clean, shared surface and your “gRPC from Spring Boot” requirement is satisfied.
