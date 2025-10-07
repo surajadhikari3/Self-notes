@@ -2572,3 +2572,330 @@ That’s it—no gRPC console needed from Spring Boot anymore. The **IDE / Angul
     
 
 If you want, send me your current `KAFKA_CONFIG` (redact secrets) and the exact control topic name, and I’ll tailor the constants at the top for you.
+----------------------------------
+
+
+
+Gotcha. Here’s a **ready-to-paste** setup for Deephaven **0.39.x** that:
+
+- loads automatically from `data/app.d/`
+    
+- exports `users_ui`, `accounts_ui`, `final_ui` (globally visible to IDE + Angular)
+    
+- listens to a **Kafka control topic**; when Spring Boot publishes a JSON command, it **hot-swaps** to the new topics (no gRPC, no session issues)
+    
+
+---
+
+# 1) `C:\dhdata\data\app.d\orchestrator_dh.py`
+
+```python
+# Deephaven 0.39.x orchestrator — drop this file into:
+#   C:\dhdata\data\app.d\orchestrator_dh.py
+# Then restart:  deephaven server --port 10000
+
+from deephaven import ApplicationState
+import deephaven.dtypes as dt
+from deephaven.stream.kafka import consumer as kc
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import time as dhtime
+
+# =========================
+# 1) EDIT THESE CONSTANTS
+# =========================
+TOPIC_USERS   = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+TOPIC_ACCTS   = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Your Kafka client config (fill real values; keep keys you already use)
+KAFKA_CONFIG = {
+    "bootstrap.servers": "pkc-xxxx.region.confluent.cloud:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    # ---- OAuth / SSL (EXAMPLE placeholders) ----
+    # "sasl.login.callback.handler.class":
+    #   "org.apache.kafka.common.security.oauthbearer.secured.OAuthBearerLoginCallbackHandler",
+    # "sasl.jaas.config":
+    #   "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required ;",
+    # "sasl.oauthbearer.token.endpoint.url": "https://.../token.oauth2",
+    # "sasl.oauthbearer.client.id": "TestScopeClient",
+    # "sasl.oauthbearer.client.secret": "2Federate",
+    # "sasl.oauthbearer.scope": "your-scope",
+    # "ssl.endpoint.identification.algorithm": "https",
+}
+
+# =========================
+# 2) VALUE SPECS
+# =========================
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,   # e.g. "left"
+})
+
+# =========================
+# 3) GLOBALS & HELPERS
+# =========================
+users_ui = None
+accounts_ui = None
+final_ui = None
+
+_state = {
+    "users_raw": None,
+    "accounts_raw": None,
+    "final_tbl": None,
+    "resources": [],   # AutoCloseable items to close on swap
+    "last_ok": None,
+}
+
+def _consume_table(topic: str, value_spec):
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+def _safe_close(objs):
+    for o in objs or []:
+        try:
+            o.close()
+        except Exception:
+            pass
+
+# =========================
+# 4) HOT-SWAP LOGIC
+# =========================
+def set_topics(user_topic: str, account_topic: str, join_type: str = "left"):
+    """
+    Build new consumers, new projections, and atomically swap the globals
+    (users_ui, accounts_ui, final_ui) that clients read.
+    """
+    global users_ui, accounts_ui, final_ui, _state
+
+    if not user_topic or not account_topic:
+        raise ValueError("Both user_topic and account_topic are required")
+
+    new_resources = []
+    try:
+        users_raw = _consume_table(user_topic, USER_VALUE_SPEC);       new_resources.append(users_raw)
+        accounts_raw = _consume_table(account_topic, ACCOUNT_VALUE_SPEC); new_resources.append(accounts_raw)
+
+        users_view = users_raw.view(["userId", "name", "email", "age"])
+        accounts_view = accounts_raw.view(["userId", "accountType", "balance"])
+        new_resources.extend([users_view, accounts_view])
+
+        jt = (join_type or "left").lower()
+        # extend with other join types later if needed; default left outer
+        final_tbl = left_outer_join(
+            users_view, accounts_view,
+            on="userId", joins=["accountType", "balance"]
+        )
+        new_resources.append(final_tbl)
+
+        # Atomic swap of globals (what IDE/Angular read)
+        users_ui, accounts_ui, final_ui = users_view, accounts_view, final_tbl
+
+        # Close old after successful swap (avoid "table already closed" during paints)
+        _safe_close(_state.get("resources"))
+
+        _state.update({
+            "users_raw": users_raw,
+            "accounts_raw": accounts_raw,
+            "final_tbl": final_tbl,
+            "resources": new_resources,
+            "last_ok": dhtime.dh_now(),
+        })
+
+        print(f"[orchestrator] Topics set ➜ users='{user_topic}', accounts='{account_topic}', join='{jt}'")
+
+    except Exception as e:
+        _safe_close(new_resources)   # rollback new resources only
+        print("[orchestrator] Error in set_topics:", e)
+        raise
+
+# =========================
+# 5) CONTROL LISTENER (0.39.x)
+# =========================
+def _start_control_listener(control_topic: str):
+    """
+    Listen to CONTROL_TOPIC and call set_topics(...) in THIS session on each message.
+    0.39.x 'listen' has no replay_initial kwarg.
+    """
+    cfg = dict(KAFKA_CONFIG)
+    cfg.setdefault("group.id", "dh-orchestrator-control")  # IMPORTANT on 0.39.x
+
+    ctrl_tbl = kc.consume(
+        cfg,
+        control_topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=CONTROL_VALUE_SPEC,
+        table_type=kc.TableType.append(),
+    )
+
+    from deephaven.table_listener import listen
+
+    def _apply_latest():
+        try:
+            snap = ctrl_tbl.tail(1).snapshot()
+            if snap.size() == 0:
+                return
+            row = snap.to_pandas().iloc[0]
+            users = (row.get("usersTopic") or "").strip()
+            accts = (row.get("accountsTopic") or "").strip()
+            join  = (row.get("joinType") or "left").strip()
+            if users and accts:
+                set_topics(users, accts, join)
+        except Exception as e:
+            print("[orchestrator] control error:", e)
+
+    def _on_update(_update):
+        _apply_latest()
+
+    disp = listen(ctrl_tbl, _on_update)
+    print(f"[orchestrator] control listener started on '{control_topic}'")
+
+    # Run once at boot in case a command already exists
+    _apply_latest()
+    return ctrl_tbl, disp
+
+# =========================
+# 6) BOOT + EXPORT APP
+# =========================
+try:
+    set_topics(TOPIC_USERS, TOPIC_ACCTS, "left")
+except Exception as boot_err:
+    print("[orchestrator] Initial wiring failed:", boot_err)
+
+_ctrl_tbl, _ctrl_disp = _start_control_listener(CONTROL_TOPIC)
+
+# Export to Applications pane (visible to IDE + Angular)
+app = ApplicationState()
+app["users_ui"]    = users_ui
+app["accounts_ui"] = accounts_ui
+app["final_ui"]    = final_ui
+print("[orchestrator] exported users_ui / accounts_ui / final_ui")
+```
+
+---
+
+# 2) Spring Boot – publish control messages (no gRPC needed)
+
+**Producer config** (you already have Kafka config; just ensure a String serializer on value):
+
+```java
+// application.yml (example)
+spring:
+  kafka:
+    bootstrap-servers: pkc-xxxx.region.confluent.cloud:9092
+    properties:
+      security.protocol: SASL_SSL
+      sasl.mechanism: OAUTHBEARER
+      # ... your OAuth/SSL props here ...
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+```
+
+**DTO + producer method:**
+
+```java
+// TopicUpdate.java
+public record TopicUpdate(String usersTopic, String accountsTopic, String joinType) { }
+```
+
+```java
+// ControlPublisher.java
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.stereotype.Component;
+
+@Component
+@RequiredArgsConstructor
+public class ControlPublisher {
+  private final KafkaTemplate<String, String> kafka;
+  private final ObjectMapper mapper;
+
+  private static final String CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata";
+
+  public void sendUpdate(TopicUpdate update) {
+    try {
+      String json = mapper.writeValueAsString(update);
+      kafka.send(CONTROL_TOPIC, json);
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to send control update", e);
+    }
+  }
+}
+```
+
+**Example usage (REST):**
+
+```java
+// TopicController.java
+import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequiredArgsConstructor
+@RequestMapping("/orchestrator")
+public class TopicController {
+
+  private final ControlPublisher publisher;
+
+  @PostMapping("/set-topics")
+  public String setTopics(@RequestBody TopicUpdate req) {
+    publisher.sendUpdate(req);
+    return "queued";
+  }
+}
+```
+
+**Sample POST body:**
+
+```json
+{
+  "usersTopic": "ccd01_sb_its_esp_tap3507_bishowcaseraw",
+  "accountsTopic": "ccd01_sb_its_esp_tap3507_bishowcasecurated",
+  "joinType": "left"
+}
+```
+
+---
+
+## Test checklist
+
+1. Place the Python file in `C:\dhdata\data\app.d\orchestrator_dh.py`.
+    
+2. Start DH: `deephaven server --port 10000`.
+    
+    - Console should show:
+        
+        - `control listener started on '...'`
+            
+        - (after a POST) `[orchestrator] Topics set ➜ users='...', accounts='...', join='left'`
+            
+3. In the IDE “Applications” pane, you’ll see `users_ui / accounts_ui / final_ui`.  
+    They should be **refreshing**; Angular can keep streaming from them.
+    
+4. POST the JSON above to your Spring Boot endpoint → watch tables swap without any gRPC.
+    
+
+That’s it—copy/paste, fill your real Kafka security props, and you’re live.
