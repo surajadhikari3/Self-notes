@@ -2899,3 +2899,217 @@ public class TopicController {
     
 
 That’s it—copy/paste, fill your real Kafka security props, and you’re live.
+
+-------------------------
+
+You’re running **server mode** on a 0.39.x launcher that doesn’t support `--property` and isn’t enabling the **Application loader**. That’s why nothing in `data/app.d` runs.
+
+Two ways to get your code to run automatically on 0.39.x:
+
+---
+
+## Option A (easiest): use `startup.d` with server mode
+
+`startup.d` **is loaded by `deephaven server`** without any special flags. The code runs inside the IDE’s default Python session, so Angular will see the same globals.
+
+1. Move your file here:
+    
+
+```
+C:\dhdata\data\startup.d\orchestrator_dh.py
+```
+
+2. Remove any `ApplicationState` usage (that’s only for Application Mode). Keep your tables as **plain globals**:
+    
+
+```python
+# orchestrator_dh.py  (server mode / startup.d on 0.39.x)
+
+import deephaven.dtypes as dt
+from deephaven.stream.kafka import consumer as kc
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import time as dhtime
+
+# --- config ---
+TOPIC_USERS   = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+TOPIC_ACCTS   = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "your-bootstrap:9092",
+    "auto.offset.reset": "latest",
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    # ... your oauth / ssl props ...
+}
+
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string
+})
+
+# --- globals Angular/IDE will read ---
+users_ui = None
+accounts_ui = None
+final_ui = None
+
+_state = {"users_raw": None, "accounts_raw": None, "final_tbl": None, "resources": [], "last_ok": None}
+
+def _consume_table(topic, value_spec):
+    return kc.consume(dict(KAFKA_CONFIG), topic,
+                      key_spec=kc.KeyValueSpec.IGNORE,
+                      value_spec=value_spec,
+                      table_type=kc.TableType.append())
+
+def _safe_close(objs):
+    for o in objs or []:
+        try: o.close()
+        except Exception: pass
+
+def set_topics(user_topic: str, account_topic: str, join_type: str = "left"):
+    global users_ui, accounts_ui, final_ui, _state
+    if not user_topic or not account_topic:
+        raise ValueError("Both user_topic and account_topic are required")
+
+    new_resources = []
+    try:
+        users_raw    = _consume_table(user_topic, USER_VALUE_SPEC);     new_resources.append(users_raw)
+        accounts_raw = _consume_table(account_topic, ACCOUNT_VALUE_SPEC); new_resources.append(accounts_raw)
+
+        users_view    = users_raw.view(["userId","name","email","age"]);           new_resources.append(users_view)
+        accounts_view = accounts_raw.view(["userId","accountType","balance"]);     new_resources.append(accounts_view)
+
+        jt = (join_type or "left").lower()
+        final_tbl = left_outer_join(users_view, accounts_view, on="userId", joins=["accountType","balance"])
+        new_resources.append(final_tbl)
+
+        users_ui, accounts_ui, final_ui = users_view, accounts_view, final_tbl
+        _safe_close(_state.get("resources"))
+        _state.update({"users_raw": users_raw, "accounts_raw": accounts_raw, "final_tbl": final_tbl,
+                       "resources": new_resources, "last_ok": dhtime.dh_now()})
+        print(f"[orchestrator] Topics set ➜ users='{user_topic}', accounts='{account_topic}', join='{jt}'")
+    except Exception as e:
+        _safe_close(new_resources)
+        print("[orchestrator] Error in set_topics:", e)
+        raise
+
+# ---- control-topic listener (0.39-safe) ----
+def _start_control_listener(control_topic: str):
+    cfg = dict(KAFKA_CONFIG)
+    cfg.setdefault("group.id", "dh-orchestrator-control")
+
+    ctrl_tbl = kc.consume(cfg, control_topic,
+                          key_spec=kc.KeyValueSpec.IGNORE,
+                          value_spec=CONTROL_VALUE_SPEC,
+                          table_type=kc.TableType.append())
+
+    from deephaven.table_listener import listen
+
+    def _apply_latest():
+        snap = ctrl_tbl.tail(1).snapshot()
+        if snap.size() == 0: return
+        row = snap.to_pandas().iloc[0]
+        users = (row.get("usersTopic") or "").strip()
+        accts = (row.get("accountsTopic") or "").strip()
+        join  = (row.get("joinType") or "left").strip()
+        if users and accts:
+            set_topics(users, accts, join)
+
+    def _on_update(_update): _apply_latest()
+
+    disp = listen(ctrl_tbl, _on_update)  # 0.39: no replay_initial kwarg
+    print(f"[orchestrator] control listener started on '{control_topic}'")
+    _apply_latest()  # run once at boot
+    return ctrl_tbl, disp
+
+# ---- boot ----
+try:
+    set_topics(TOPIC_USERS, TOPIC_ACCTS, "left")
+except Exception as e:
+    print("[orchestrator] Initial wiring failed:", e)
+
+_ctrl_tbl, _ctrl_disp = _start_control_listener(CONTROL_TOPIC)
+
+print("[orchestrator] startup.d script loaded")
+```
+
+3. Restart DH in **server mode** (your usual command). On startup you should see:
+    
+
+```
+Executing startup script: orchestrator_dh.py
+[orchestrator] startup.d script loaded
+[orchestrator] control listener started on '...'
+```
+
+In the IDE variables pane, you’ll see `users_ui`, `accounts_ui`, `final_ui`. Angular keeps using those names in the IDE session.
+
+> If you don’t see “Executing startup script…”, your server isn’t pointed at the `data` dir you think. Double-check you’re launching from the shell where `DEEPHAVEN_DATA_DIR=C:\dhdata\data` is set.
+
+---
+
+## Option B: enable **Application Mode**
+
+If you prefer the Applications pane, your launcher doesn’t support `--property`, so use one of these:
+
+- Add to `C:\dhdata\config\app.properties`:
+    
+    ```
+    application.dir=C:/dhdata/data/app.d
+    ```
+    
+    (Use forward slashes. No quotes.)
+    
+- Or set env var before starting:  
+    **PowerShell**
+    
+    ```powershell
+    $env:APPLICATION_DIR = "C:/dhdata/data/app.d"
+    ```
+    
+    **Git Bash**
+    
+    ```bash
+    export APPLICATION_DIR="C:/dhdata/data/app.d"
+    ```
+    
+
+Then start:
+
+```powershell
+deephaven app --port 10000
+```
+
+If your launcher still doesn’t have `app`, stick with **Option A (startup.d)**—it’s fully supported in 0.39.x and works with your Angular IDE session.
+
+---
+
+## Quick diagnostics (run exactly)
+
+- Confirm DH is using your **data dir**:
+    
+    - On startup logs you should see:
+        
+        ```
+        deephaven.dataDir: C:\dhdata\data
+        ```
+        
+- Prove the loader works: drop a tiny file  
+    `C:\dhdata\data\startup.d\hello.py`
+    
+    ```python
+    print("[startup] hello loaded")
+    foo = 42
+    ```
+    
+    Restart; you should see the print, and `foo` in IDE variables.
+    
+
+---
+
+With `startup.d` you don’t need ApplicationState or the Applications pane, and you don’t need gRPC. Spring Boot just publishes the JSON control message; this script hot-swaps topics inside the single IDE session that Angular already reads from.
