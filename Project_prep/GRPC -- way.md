@@ -3113,3 +3113,250 @@ If your launcher still doesn’t have `app`, stick with **Option A (startup.d)**
 ---
 
 With `startup.d` you don’t need ApplicationState or the Applications pane, and you don’t need gRPC. Spring Boot just publishes the JSON control message; this script hot-swaps topics inside the single IDE session that Angular already reads from.
+
+--------------------------------
+
+tail.........
+
+Great—now that you’re on **0.40.2** and your `C:\Deephaven\config\deephaven.prop` is good, run your pipeline in **Application Mode** so Angular & the IDE always see the same global tables (no “session drift”).
+
+Below is a **drop-in 0.40.2 app** that:
+
+- consumes two Kafka topics (users + accounts) as **ticking tables**
+    
+- exports `users_ui`, `accounts_ui`, `final_ui` as **global** outputs via `ApplicationState`
+    
+- listens to a **control topic**; publishing JSON there hot-swaps the topics live (no new session)
+    
+
+---
+
+## 1) Create the app (descriptor + script)
+
+Git Bash (copy-paste; adjust Kafka config + default topics):
+
+```bash
+# App folder (you already pointed deephaven.application.dir here)
+mkdir -p /c/Deephaven/app.d
+
+# orchestrator.app  (0.40 format)
+cat > /c/Deephaven/app.d/orchestrator.app <<'APP'
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+file_0=orchestrator.py
+APP
+
+# orchestrator.py
+cat > /c/Deephaven/app.d/orchestrator.py <<'PY'
+from threading import Lock
+import deephaven.dtypes as dt
+from deephaven.appmode import ApplicationState, get_app_state
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ---------- EDIT THESE ----------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "YOUR_BOOTSTRAP:9092",
+    "auto.offset.reset": "latest",
+    # add your real security props:
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.config": "..."
+}
+# ---------- /EDIT --------------
+
+USER_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string
+})
+
+def consume_append(topic: str, spec):
+    return kc.consume(
+        dict(KAFKA_CONFIG), topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=spec,
+        table_type=kc.TableType.append(),
+    )
+
+class Orchestrator:
+    def __init__(self, app: ApplicationState):
+        self.app = app
+        self.lock = Lock()
+        self.resources = []  # close on swap
+
+    def _close_all(self, xs):
+        for x in xs or []:
+            try:
+                x.close()
+            except Exception:
+                pass
+
+    def set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        if not users_topic or not accounts_topic:
+            raise ValueError("Both users_topic and accounts_topic are required")
+        with self.lock:
+            new_res = []
+            try:
+                users_raw = consume_append(users_topic, USER_SPEC);    new_res.append(users_raw)
+                accts_raw = consume_append(accounts_topic, ACCOUNT_SPEC); new_res.append(accts_raw)
+
+                users = users_raw.view(["userId", "name", "email", "age"]); new_res.append(users)
+                accts = accts_raw.view(["userId", "accountType", "balance"]); new_res.append(accts)
+
+                jt = (join_type or "left").lower()
+                if jt.startswith("inner"):
+                    final = users.join(accts, on=["userId"], joins=["accountType", "balance"])
+                else:
+                    # Deephaven's natural_join is left-join semantics (single match)
+                    final = users.natural_join(accts, on=["userId"], joins=["accountType", "balance"])
+                new_res.append(final)
+
+                # Export to Application outputs: visible to IDE + all JS clients
+                self.app["users_ui"] = users
+                self.app["accounts_ui"] = accts
+                self.app["final_ui"] = final
+
+                # Swap resources atomically
+                self._close_all(self.resources)
+                self.resources = new_res
+                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{jt}'")
+            except Exception as e:
+                self._close_all(new_res)
+                print("[orchestrator] set_topics error:", e)
+                raise
+
+    def start_control_listener(self, control_topic: str):
+        ctrl = consume_append(control_topic, CONTROL_SPEC)
+        def on_update(_upd):
+            try:
+                snap = ctrl.tail(1).snapshot()
+                if snap.size() == 0:
+                    return
+                df = snap.to_pandas()
+                row = df.iloc[0]
+                self.set_topics(
+                    str(row.get("usersTopic") or "").strip(),
+                    str(row.get("accountsTopic") or "").strip(),
+                    str(row.get("joinType") or "left").strip(),
+                )
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+        disp = listen(ctrl, on_update, replay_initial=True)
+        self.resources.extend([ctrl, disp])
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+app = get_app_state()
+orc = Orchestrator(app)
+try:
+    orc.set_topics(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+except Exception as boot_err:
+    print("[orchestrator] initial wiring failed:", boot_err)
+orc.start_control_listener(CONTROL_TOPIC)
+print("[orchestrator] ready")
+PY
+```
+
+---
+
+## 2) Start Deephaven (localhost) and verify
+
+You already configured `C:\Deephaven\config\deephaven.prop` with:
+
+```
+deephaven.application.dir=C:\\Deephaven\\app.d
+web.storage.layout.directory=layouts
+web.storage.notebook.directory=formats/notebooks
+deephaven.server.layout.subdir=layouts
+deephaven.server.notebook.subdir=formats/notebooks
+```
+
+Run:
+
+```bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000
+```
+
+Open `http://localhost:10000/ide/` → Panels → **Applications** → “Kafka Orchestrator”.  
+You’ll see `users_ui`, `accounts_ui`, `final_ui` as app outputs.
+
+---
+
+## 3) How Angular/JS should read it (one session for all)
+
+Because the tables are exported via **ApplicationState**, they are **global**—any browser session or your Angular app will see the same `users_ui` / `accounts_ui` / `final_ui` objects.
+
+Minimal JS/TS sketch (with `@deephaven/jsapi`):
+
+```ts
+import dh from '@deephaven/jsapi';
+
+async function getFinal() {
+  // If your Angular app is served from the same origin as the DH server, auth is automatic.
+  // If not, pass your PSK from the server log or IDE URL (?psk=...) using a bearer token auth.
+  const client = await dh.Client.connect({ url: 'http://localhost:10000' });
+  const session = await client.getAsSession(); // or client.session in older jsapi
+  // "final_ui" is the export name we added via app["final_ui"] = ...
+  const table = await session.getTable({ name: 'final_ui' });
+  return table;
+}
+```
+
+> If your app runs on a different origin (Angular dev server), you may need to include the PSK in headers or proxy to the DH origin. Keep same-origin if possible for now.
+
+---
+
+## 4) Updating topics from Spring Boot (no session issues)
+
+Publish a control JSON to `CONTROL_TOPIC`:
+
+```json
+{"usersTopic":"<new-users>", "accountsTopic":"<new-accounts>", "joinType":"left"}
+```
+
+The **orchestrator** updates its exports in-place (same app state), so:
+
+- IDE panels keep working
+    
+- Angular sees the new stream **without reconnecting**
+    
+
+---
+
+## 5) One-liner launcher (optional)
+
+```bash
+cat > ~/dh.sh <<'EOF'
+#!/usr/bin/env bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000 "$@"
+EOF
+chmod +x ~/dh.sh
+# run:
+~/dh.sh
+```
+
+---
+
+### Troubleshooting quickies
+
+- `Unexpected type python` → your `.app` used `type=python`. Use `type=script` + `scriptType=python`.
+    
+- App doesn’t show → check `deephaven.application.dir` path and file names; look for prints in server terminal.
+    
+- Layouts error → you already fixed via `web.storage.*` + `deephaven.server.*` lines (no leading slashes).
+    
+
+If you share your real Kafka props (with secrets redacted) and exact field names, I can tailor the specs & joins precisely.
