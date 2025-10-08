@@ -3360,3 +3360,189 @@ chmod +x ~/dh.sh
     
 
 If you share your real Kafka props (with secrets redacted) and exact field names, I can tailor the specs & joins precisely.
+
+----------------------
+
+Good catch — that stack trace is from `listen(...)`:
+
+> **TypeError: got an unexpected keyword argument `replay_initial`**
+
+In **0.40.2** the simple `deephaven.table_listener.listen` doesn’t accept `replay_initial`. Fix: remove that kwarg and do a one-time “apply last control row” right after you attach the listener.
+
+Here’s a drop-in update for your app.
+
+---
+
+## 1) `orchestrator.app` (correct 0.40 format)
+
+```properties
+# C:\Deephaven\app.d\orchestrator.app
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+file_0=orchestrator.py
+```
+
+## 2) `orchestrator.py` (no replay_initial; manual first apply)
+
+```python
+# C:\Deephaven\app.d\orchestrator.py
+from threading import Lock
+import deephaven.dtypes as dt
+from deephaven.appmode import ApplicationState, get_app_state
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ----- EDIT THESE -----
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "YOUR_BOOTSTRAP:9092",
+    "auto.offset.reset": "latest",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.config": "...",
+}
+# ----------------------
+
+USER_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string
+})
+
+def consume_append(topic: str, spec):
+    return kc.consume(
+        dict(KAFKA_CONFIG), topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=spec,
+        table_type=kc.TableType.append(),
+    )
+
+class Orchestrator:
+    def __init__(self, app: ApplicationState):
+        self.app = app
+        self.lock = Lock()
+        self.resources = []
+
+    def _close_all(self, xs):
+        for x in xs or []:
+            try: x.close()
+            except Exception: pass
+
+    def set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        if not users_topic or not accounts_topic:
+            raise ValueError("Both users_topic and accounts_topic are required")
+        with self.lock:
+            new_res = []
+            try:
+                users_raw = consume_append(users_topic, USER_SPEC);        new_res.append(users_raw)
+                accts_raw = consume_append(accounts_topic, ACCOUNT_SPEC);   new_res.append(accts_raw)
+
+                users = users_raw.view(["userId","name","email","age"]);    new_res.append(users)
+                accts = accts_raw.view(["userId","accountType","balance"]); new_res.append(accts)
+
+                jt = (join_type or "left").lower()
+                if jt.startswith("inner"):
+                    final = users.join(accts, on=["userId"], joins=["accountType","balance"])
+                else:
+                    final = users.natural_join(accts, on=["userId"], joins=["accountType","balance"])
+                new_res.append(final)
+
+                self.app["users_ui"] = users
+                self.app["accounts_ui"] = accts
+                self.app["final_ui"] = final
+
+                self._close_all(self.resources)
+                self.resources = new_res
+                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{jt}'")
+            except Exception as e:
+                self._close_all(new_res)
+                print("[orchestrator] set_topics error:", e)
+                raise
+
+    def _apply_last_control(self, ctrl_tbl):
+        snap = ctrl_tbl.tail(1).snapshot()
+        if snap.size() == 0: 
+            return
+        df = snap.to_pandas()
+        row = df.iloc[0]
+        self.set_topics(
+            str(row.get("usersTopic") or "").strip(),
+            str(row.get("accountsTopic") or "").strip(),
+            str(row.get("joinType") or "left").strip(),
+        )
+
+    def start_control_listener(self, control_topic: str):
+        ctrl = consume_append(control_topic, CONTROL_SPEC)
+        def on_update(_upd):
+            try:
+                self._apply_last_control(ctrl)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+        disp = listen(ctrl, on_update)  # no replay_initial in 0.40.2
+        # do an initial apply manually (equivalent to “replay initial”)
+        try:
+            self._apply_last_control(ctrl)
+        except Exception as e:
+            print("[orchestrator] initial apply err:", e)
+        self.resources.extend([ctrl, disp])
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+app = get_app_state()
+orc = Orchestrator(app)
+try:
+    orc.set_topics(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+except Exception as boot_err:
+    print("[orchestrator] initial wiring failed:", boot_err)
+orc.start_control_listener(CONTROL_TOPIC)
+print("[orchestrator] ready")
+```
+
+---
+
+## 3) Launch
+
+You already have:
+
+```
+deephaven.application.dir=C:\\Deephaven\\app.d
+web.storage.layout.directory=layouts
+web.storage.notebook.directory=formats/notebooks
+deephaven.server.layout.subdir=layouts
+deephaven.server.notebook.subdir=formats/notebooks
+```
+
+Run:
+
+```bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000
+```
+
+Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)** → Panels → **Applications** → “Kafka Orchestrator”.
+
+---
+
+## 4) Angular & Spring Boot
+
+- Angular reads `users_ui`, `accounts_ui`, `final_ui` (global app exports) via JSAPI — no session drift.
+    
+- Spring Boot changes topics by publishing:
+    
+
+```json
+{"usersTopic":"<new-users>","accountsTopic":"<new-accounts>","joinType":"left"}
+```
+
+to the control topic. The app hot-swaps streams in-place.
+
+If you hit another error, share just the first 15–20 lines after “Starting Deephaven server…”.
