@@ -3619,3 +3619,111 @@ The server console should print:
 and your Angular client (reading the exported tables) will see the new streams in the same session.
 
 If anything else blows up, paste the first ~15 lines after “Starting Deephaven server…” and I’ll tweak further.
+
+---------------------------------------------------------------------------------
+namo
+
+Thanks—this one’s coming from our control-row parsing. In 0.40.x we accidentally let a Pandas object flow into a boolean check, which yields:
+
+> “**ValueError: truth value of … is ambiguous**”
+
+Let’s make the control-message parsing bullet-proof and also avoid re-applying the same topics over and over.
+
+### Patch (minimal, safe)
+
+Open `C:\Deephaven\app.d\orchestrator.py` and **replace** the two methods below.
+
+```python
+from deephaven.pandas import to_pandas
+import pandas as pd
+import math
+
+def _scalar_str(val: object, default: str = "") -> str:
+    """Return a clean string for scalar-like values, handling pandas/NumPy NA."""
+    try:
+        if val is None:
+            return default
+        # pd.isna handles np.nan, pd.NA, etc.
+        if isinstance(val, (float, int)) and isinstance(val, bool) is False:
+            # leave numbers alone unless NaN
+            if isinstance(val, float) and math.isnan(val):
+                return default
+        if pd.isna(val):
+            return default
+        return str(val).strip()
+    except Exception:
+        return default
+
+def _apply_last_control(self, ctrl_tbl):
+    snap = ctrl_tbl.tail(1).snapshot()
+    # NOTE: size is an attribute in 0.40.x
+    if snap.size == 0:
+        return
+    df = to_pandas(snap)
+    row = df.iloc[0]
+
+    users_topic   = _scalar_str(row.get("usersTopic"))
+    accounts_topic = _scalar_str(row.get("accountsTopic"))
+    join_type     = _scalar_str(row.get("joinType"), "left") or "left"
+
+    # Only update when both are present AND something actually changed
+    if users_topic and accounts_topic:
+        last = getattr(self, "_last_topics", (None, None, None))
+        if (users_topic, accounts_topic, join_type) != last:
+            self.set_topics(users_topic, accounts_topic, join_type)
+            self._last_topics = (users_topic, accounts_topic, join_type)
+
+def start_control_listener(self, control_topic: str):
+    ctrl = consume_append(control_topic, CONTROL_SPEC)
+
+    # 0.40.x: callback must accept (update, is_replay)
+    def on_update(_update, _is_replay):
+        try:
+            self._apply_last_control(ctrl)
+        except Exception as e:
+            print("[orchestrator] control listener err:", e)
+
+    disp = listen(ctrl, on_update)  # no replay_initial kwarg in 0.40.x
+    # Initial apply (equivalent to replaying the last message once)
+    try:
+        self._apply_last_control(ctrl)
+    except Exception as e:
+        print("[orchestrator] initial apply err:", e)
+
+    self.resources.extend([ctrl, disp])
+    print(f"[orchestrator] control listener on '{control_topic}'")
+```
+
+Then restart:
+
+```bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000
+```
+
+You should see the spammy “bool value is ambiguous” errors disappear. When Spring Boot publishes a control JSON, the console logs a single:
+
+```
+[orchestrator] topics set users='<new-users>' accounts='<new-accounts>' join='<type>'
+```
+
+and `users_ui / accounts_ui / final_ui` update in place (so Angular sees the change without a new session).
+
+---
+
+### The **red Kafka** errors on the right
+
+Those are separate and mean the client can’t fetch metadata/partitions (wrong `bootstrap.servers`, missing SASL/SSL config, or no ACLs / topic doesn’t exist). Quick checks:
+
+- `bootstrap.servers` is reachable from your PC (host/port, firewall).
+    
+- Security matches the cluster:
+    
+    - PLAINTEXT dev → **no** SASL/SSL keys.
+        
+    - SASL_SSL/OAUTH → include the proper `security.protocol`, `sasl.mechanism`, JAAS / token settings, and truststore.
+        
+- Topics exist and your identity has READ permission for all three topics (users, accounts, control).
+    
+
+If you paste your current `KAFKA_CONFIG` **with secrets redacted** and one sample control message, I’ll tailor the exact properties & value spec for you.
