@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/GRPC -- way.md",
+                "file": "Project_prep/stream-ag.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "GRPC -- way"
+              "title": "stream-ag"
             }
           }
         ]
@@ -196,8 +196,9 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
-    "Project_prep/orch...md",
     "Project_prep/GRPC -- way.md",
+    "Project_prep/stream-ag.md",
+    "Project_prep/orch...md",
     "Project_prep/test1.md",
     "Project_prep/test........md",
     "Project_prep/rt-dh.md",
@@ -221,7 +222,6 @@
     "Cloud/AWS.md",
     "interview-prep/Prep Notes.md",
     "Cloud/Open-shift.md",
-    "Cloud/Kubernets.md",
     "Pasted image 20250914211139.png",
     "interview-prep",
     "Project_prep/ui/single-user-gap.svg",
