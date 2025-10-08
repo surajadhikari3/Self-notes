@@ -3546,3 +3546,76 @@ Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)** → Panels �
 to the control topic. The app hot-swaps streams in-place.
 
 If you hit another error, share just the first 15–20 lines after “Starting Deephaven server…”.
+
+------------
+
+You’re hitting the callback signature change in 0.40.x.
+
+**What the error means:**  
+`deephaven.table_listener.listen` in 0.40 expects your callback to take **two** parameters:
+
+```python
+def on_update(update, is_replay): ...
+```
+
+Your current function only takes one (`_upd`), so the loader throws:
+
+> TypeError: listener function must have 2 (update, is_replay) parameters
+
+### Fix (drop-in patch)
+
+Update just the `start_control_listener` method in your `orchestrator.py` to use the two-arg callback. Everything else can stay the same.
+
+```python
+def start_control_listener(self, control_topic: str):
+    ctrl = consume_append(control_topic, CONTROL_SPEC)
+
+    # must accept TWO args in 0.40.x: (update, is_replay)
+    def on_update(_update, _is_replay):
+        try:
+            self._apply_last_control(ctrl)
+        except Exception as e:
+            print("[orchestrator] control listener err:", e)
+
+    disp = listen(ctrl, on_update)  # no replay_initial kw in 0.40.x
+
+    # one-time initial apply (equivalent to "replay_initial")
+    try:
+        self._apply_last_control(ctrl)
+    except Exception as e:
+        print("[orchestrator] initial apply err:", e)
+
+    self.resources.extend([ctrl, disp])
+    print(f"[orchestrator] control listener on '{control_topic}'")
+```
+
+If you prefer the full, corrected file, replace your current `start_control_listener` with the above; no other changes are required.
+
+### Restart & verify
+
+```bash
+# in Git Bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000
+```
+
+Open `http://localhost:10000/ide/` → Panels → **Applications** → “Kafka Orchestrator”.  
+You should see the three exports: `users_ui`, `accounts_ui`, `final_ui`.
+
+### Sanity test (control message)
+
+Publish to your control topic:
+
+```json
+{"usersTopic":"<new-users>", "accountsTopic":"<new-accounts>", "joinType":"left"}
+```
+
+The server console should print:
+
+```
+[orchestrator] topics set users='<new-users>' accounts='<new-accounts>' join='left'
+```
+
+and your Angular client (reading the exported tables) will see the new streams in the same session.
+
+If anything else blows up, paste the first ~15 lines after “Starting Deephaven server…” and I’ll tweak further.
