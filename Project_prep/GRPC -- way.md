@@ -3727,3 +3727,252 @@ Those are separate and mean the client can’t fetch metadata/partitions (wrong 
     
 
 If you paste your current `KAFKA_CONFIG` **with secrets redacted** and one sample control message, I’ll tailor the exact properties & value spec for you.
+
+-----
+You’ve got two problems mixed together:
+
+1. Your **listener is fine now**, but the new spam:
+    
+    ```
+    Orchestrator.scalar_str() takes from 0 to 2 positional arguments but 3 were given
+    ```
+    
+    means `_scalar_str` ended up **inside the class** and you’re calling it as  
+    `self._scalar_str(...)`. In Python that adds `self` as an extra arg → boom.  
+    Keep `_scalar_str` as a **module-level** function and call it **without** `self`.
+    
+2. The **red Kafka** lines (metadata / partitions / auth) are cluster config issues  
+    (bootstrap/security/topic ACLs). They won’t crash the app, but they’re unrelated  
+    to the Python fixes below.
+    
+
+---
+
+# Clean, working 0.40.2 app (drop-in)
+
+Do this exactly (Git Bash). It removes the old app, writes a correct one, and starts DH.
+
+```bash
+# 0) stop server (Ctrl+C)
+
+# 1) app folder
+mkdir -p /c/Deephaven/app.d
+rm -f /c/Deephaven/app.d/*.app /c/Deephaven/app.d/*.py 2>/dev/null
+
+# 2) descriptor (0.40 format)
+cat > /c/Deephaven/app.d/orchestrator.app <<'APP'
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+file_0=orchestrator.py
+APP
+
+# 3) python (module-level helpers; correct listener signature; no .size())
+cat > /c/Deephaven/app.d/orchestrator.py <<'PY'
+from threading import Lock
+import math
+import pandas as pd
+import deephaven.dtypes as dt
+from deephaven.appmode import ApplicationState, get_app_state
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+from deephaven.pandas import to_pandas
+
+# --------- EDIT THESE (your real topics + Kafka props) ----------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    "bootstrap.servers": "localhost:9092",
+    "auto.offset.reset": "latest",
+    # Example for Confluent Cloud (uncomment & fill):
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "PLAIN",
+    # "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required "
+    #                     'username="<API_KEY>" '
+    #                     'password="<API_SECRET>";'
+}
+# ---------------------------------------------------------------
+
+USER_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string
+})
+
+def consume_append(topic: str, spec):
+    return kc.consume(
+        dict(KAFKA_CONFIG), topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=spec,
+        table_type=kc.TableType.append(),
+    )
+
+# ---- module-level helper (NOT inside the class!) ----
+def _scalar_str(val, default=""):
+    """Return a clean string for scalar-like values; handle NaN / pd.NA."""
+    try:
+        if val is None:
+            return default
+        # handle pandas/NumPy NA
+        try:
+            if pd.isna(val):
+                return default
+        except Exception:
+            pass
+        # leave numbers alone unless NaN
+        if isinstance(val, float) and math.isnan(val):
+            return default
+        return str(val).strip()
+    except Exception:
+        return default
+# -----------------------------------------------------
+
+class Orchestrator:
+    def __init__(self, app: ApplicationState):
+        self.app = app
+        self.lock = Lock()
+        self.resources = []
+        self._last_topics = (None, None, None)
+
+    def _close_all(self, xs):
+        for x in xs or []:
+            try:
+                x.close()
+            except Exception:
+                pass
+
+    def set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        if not users_topic or not accounts_topic:
+            raise ValueError("Both users_topic and accounts_topic are required")
+        with self.lock:
+            new_res = []
+            try:
+                users_raw = consume_append(users_topic, USER_SPEC);         new_res.append(users_raw)
+                accts_raw = consume_append(accounts_topic, ACCOUNT_SPEC);   new_res.append(accts_raw)
+
+                users = users_raw.view(["userId","name","email","age"]);    new_res.append(users)
+                accts = accts_raw.view(["userId","accountType","balance"]); new_res.append(accts)
+
+                jt = (join_type or "left").lower()
+                if jt.startswith("inner"):
+                    final = users.join(accts, on=["userId"], joins=["accountType","balance"])
+                else:
+                    # natural_join = left-join semantics (single match)
+                    final = users.natural_join(accts, on=["userId"], joins=["accountType","balance"])
+                new_res.append(final)
+
+                # export as app outputs (global for IDE & JS clients)
+                self.app["users_ui"] = users
+                self.app["accounts_ui"] = accts
+                self.app["final_ui"] = final
+
+                self._close_all(self.resources)
+                self.resources = new_res
+                self._last_topics = (users_topic, accounts_topic, jt)
+                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{jt}'")
+            except Exception as e:
+                self._close_all(new_res)
+                print("[orchestrator] set_topics error:", e)
+                raise
+
+    def _apply_last_control(self, ctrl_tbl):
+        snap = ctrl_tbl.tail(1).snapshot()
+        if snap.size == 0:  # size is an attribute in 0.40.x
+            return
+        row = to_pandas(snap).iloc[0]
+        users   = _scalar_str(row.get("usersTopic"))
+        accts   = _scalar_str(row.get("accountsTopic"))
+        join    = _scalar_str(row.get("joinType"), "left") or "left"
+        if users and accts and (users, accts, join) != self._last_topics:
+            self.set_topics(users, accts, join)
+
+    def start_control_listener(self, control_topic: str):
+        ctrl = consume_append(control_topic, CONTROL_SPEC)
+
+        # 0.40.x: callback must accept (update, is_replay)
+        def on_update(_update, _is_replay):
+            try:
+                self._apply_last_control(ctrl)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        disp = listen(ctrl, on_update)
+        # initial apply (equivalent to replaying the last row once)
+        try:
+            self._apply_last_control(ctrl)
+        except Exception as e:
+            print("[orchestrator] initial apply err:", e)
+
+        self.resources.extend([ctrl, disp])
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+# boot
+_app = get_app_state()
+_orc = Orchestrator(_app)
+try:
+    _orc.set_topics(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+except Exception as boot_err:
+    print("[orchestrator] initial wiring failed:", boot_err)
+_orc.start_control_listener(CONTROL_TOPIC)
+print("[orchestrator] ready")
+PY
+```
+
+**Start the server** (your config already points to `C:\Deephaven\app.d`):
+
+```bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000
+```
+
+Open `http://localhost:10000/ide/` → Panels → **Applications** → _Kafka Orchestrator_.  
+You’ll see **users_ui**, **accounts_ui**, **final_ui**.
+
+---
+
+## Why your last error happened
+
+- You (accidentally) indented `_scalar_str` **inside** the class, then called it as  
+    `self._scalar_str(...)`. Python added `self` → the error  
+    “takes from 0 to 2 positional arguments but 3 were given.”
+    
+- The code above defines `_scalar_str` at **module level** and calls it as  
+    `_scalar_str(...)` — no `self`, no error.
+    
+
+---
+
+## Kafka (red logs) quick checklist
+
+Those come from the Java consumer, not the Python code. Verify:
+
+- `bootstrap.servers` is reachable from your PC (host/port correct; firewall open).
+    
+- Security matches the cluster:
+    
+    - **Local dev / PLAINTEXT** → **no** SASL/SSL keys.
+        
+    - **Confluent Cloud** → usually `SASL_SSL` + `PLAIN` with `sasl.jaas.config` (API key/secret).
+        
+    - **OAuth/OIDC** clusters → `OAUTHBEARER` + proper token/JAAS settings.
+        
+- Topics exist and your principal has **READ** on the three topics.
+    
+
+Once those are correct you’ll stop seeing the red Kafka lines, and the control JSON like
+
+```json
+{"usersTopic":"<new-users>","accountsTopic":"<new-accounts>","joinType":"left"}
+```
+
+will hot-swap the streams; Angular will keep reading the same `final_ui` export (no session drift).
+
+If you want, paste your current `KAFKA_CONFIG` **with secrets redacted**, and a sample control message, and I’ll tailor the exact config block.
