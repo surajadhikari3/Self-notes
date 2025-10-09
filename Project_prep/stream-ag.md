@@ -454,3 +454,279 @@ Keep producing:
     
 
 This combo (atomic swap + linger on the server, and rebind+retry on the client) is what keeps dashboards stable when sources change under load.
+
+------------------------------------------------------------------
+
+
+You’re seeing:
+
+```
+ApplicationState.__init__() missing 1 required positional argument: 'j_app_state'
+```
+
+because in **Deephaven 0.40.x** you **must not construct** `ApplicationState()` yourself. Instead, get the singleton with **`get_app_state()`**.
+
+Here’s your **drop-in, fixed file** (copy/paste over your current `orchestrator_dh.py`). The only functional change is using `get_app_state()`; I kept all the reliability bits (atomic export, linger, control listener, many-to-many-safe join).
+
+---
+
+### `C:\dhdata\data\app.d\orchestrator_dh.py`
+
+```python
+# orchestrator_dh.py – Deephaven 0.40.2
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Optional
+import threading, time
+
+# IMPORTANT: use get_app_state() in 0.40.x
+from deephaven.appmode import get_app_state
+import deephaven.dtypes as dt
+from deephaven import time as dhtime
+from deephaven.table import Table
+from deephaven.stream.kafka import consumer as kc
+from deephaven.table_listener import listen
+
+# ---------- EDIT FOR YOUR ENV ----------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"   # JSON control messages
+
+KAFKA_CONFIG = {
+    # Fill in your real values:
+    # 'bootstrap.servers': '...',
+    # 'security.protocol': 'SASL_SSL',
+    # 'sasl.mechanism': 'OAUTHBEARER',
+    # 'sasl.oauthbearer.method': 'oidc',
+    # 'sasl.oauthbearer.token.endpoint.url': '...',
+    # 'sasl.oauthbearer.client.id': '...',
+    # 'sasl.oauthbearer.client.secret': '...',
+    'auto.offset.reset': 'latest',
+}
+
+# Keep previous generation alive briefly so clients can rebind
+LINGER_SECONDS = 20
+
+# ---------- Specs ----------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int_,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,  # 'left' (default) or 'inner'
+})
+
+# ---------- Helpers ----------
+def _consume(topic: str, value_spec) -> Table:
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+def _normalize_users(t: Table) -> Table:
+    return t.update([
+        "userId = (userId == null) ? '∅' : string(userId)",
+        "name = (name == null) ? '' : name",
+        "email = (email == null) ? '' : email",
+    ])
+
+def _normalize_accounts(t: Table) -> Table:
+    return t.update([
+        "userId = (userId == null) ? '∅' : string(userId)",
+    ])
+
+def _left_like(users: Table, accounts: Table) -> Table:
+    # many-to-many tolerant "left-like" join
+    inner = users.join(accounts, on=["userId"])
+    unmatched = users.where("!in(userId, accounts, userId)") \
+                     .update(["accountType = (String) null", "balance = (Double) null"])
+    return inner.union(unmatched)
+
+# ---------- Orchestrator ----------
+@dataclass
+class Generation:
+    users_raw: Table
+    accounts_raw: Table
+    users_ui: Table
+    accounts_ui: Table
+    final_ui: Table
+    handles: List[object]
+
+class Orchestrator:
+    def __init__(self) -> None:
+        # ✔️ Correct for 0.40.x
+        self.app = get_app_state()
+
+        self.status = None
+        self.current: Optional[Generation] = None
+        self.previous: Optional[Generation] = None
+        self._lock = threading.Lock()
+
+        self._init_status()
+        self._apply(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+        self._start_control_listener(CONTROL_TOPIC)
+
+        print("[orchestrator] ready")
+
+    # ----- status export -----
+    def _init_status(self) -> None:
+        from deephaven import new_table
+        from deephaven.column import string_col
+        self.status = new_table([
+            string_col("usersTopic",   [DEFAULT_USERS_TOPIC]),
+            string_col("accountsTopic",[DEFAULT_ACCOUNTS_TOPIC]),
+            string_col("joinType",     ["left"]),
+            string_col("lastApplied",  [dhtime.to_iso8601(dhtime.dh_now())]),
+        ])
+        self.app["orchestrator_status"] = self.status
+
+    def _bump_status(self, users: str, accounts: str, join_type: str) -> None:
+        ts = dhtime.to_iso8601(dhtime.dh_now())
+        self.status = self.status.update([
+            f"usersTopic    = '{users}'",
+            f"accountsTopic = '{accounts}'",
+            f"joinType      = '{join_type}'",
+            f"lastApplied   = '{ts}'",
+        ])
+        self.app["orchestrator_status"] = self.status
+
+    # ----- build one generation -----
+    def _build(self, users_topic: str, accounts_topic: str, join_type: str) -> Generation:
+        u_raw = _consume(users_topic, USER_VALUE_SPEC)
+        a_raw = _consume(accounts_topic, ACCOUNT_VALUE_SPEC)
+
+        u_view = _normalize_users(u_raw).view(["userId", "name", "email", "age"])
+        a_view = _normalize_accounts(a_raw).view(["userId", "accountType", "balance"])
+
+        jt = (join_type or "left").lower()
+        if jt.startswith("inner"):
+            final = u_view.join(a_view, on=["userId"])
+        else:
+            final = _left_like(u_view, a_view)
+
+        return Generation(
+            users_raw=u_raw,
+            accounts_raw=a_raw,
+            users_ui=u_view,
+            accounts_ui=a_view,
+            final_ui=final,
+            handles=[],
+        )
+
+    def _close_generation(self, gen: Optional[Generation]) -> None:
+        if not gen:
+            return
+        for obj in [gen.users_ui, gen.accounts_ui, gen.final_ui, gen.users_raw, gen.accounts_raw, *gen.handles]:
+            try:
+                obj.close()
+            except Exception:
+                pass
+
+    def _apply(self, users_topic: str, accounts_topic: str, join_type: str) -> None:
+        with self._lock:
+            new_gen = self._build(users_topic, accounts_topic, join_type)
+
+            # 1) publish new exports first (atomic swap for clients)
+            self.app["users_ui"]    = new_gen.users_ui
+            self.app["accounts_ui"] = new_gen.accounts_ui
+            self.app["final_ui"]    = new_gen.final_ui
+
+            # 2) heartbeat so Angular can rebind
+            self._bump_status(users_topic, accounts_topic, join_type)
+            print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+
+            # 3) linger and then close old gen
+            old = self.current
+            self.previous = old
+            self.current = new_gen
+
+            if old:
+                def _linger():
+                    try:
+                        time.sleep(LINGER_SECONDS)
+                    finally:
+                        self._close_generation(old)
+                threading.Thread(target=_linger, daemon=True).start()
+
+    # ----- control topic -----
+    def _start_control_listener(self, control_topic: str) -> None:
+        ctrl = _consume(control_topic, CONTROL_VALUE_SPEC)
+
+        def _on_update(_upd):
+            try:
+                last = ctrl.tail(1).snapshot()
+                if last.size() == 0:
+                    return
+                df = last.to_pandas()
+                row = df.iloc[0]
+                u = (row.get("usersTopic") or "").strip()
+                a = (row.get("accountsTopic") or "").strip()
+                j = (row.get("joinType") or "left").strip()
+                if u and a:
+                    print(f"[orchestrator] applying control: users='{u}', accounts='{a}', join='{j}'")
+                    self._apply(u, a, j)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        disp = listen(ctrl, _on_update)  # works across 0.40.x
+        self.app["control_raw"] = ctrl
+        if self.current:
+            self.current.handles.append(disp)
+
+# Boot
+_orch = Orchestrator()
+```
+
+---
+
+### Quick sanity check
+
+1. Restart DH:
+    
+    ```
+    deephaven server --port 10000
+    ```
+    
+    Console should show:
+    
+    ```
+    [orchestrator] topics set users='...' accounts='...' join='left'
+    [orchestrator] control listener on '..._metadata'
+    [orchestrator] ready
+    ```
+    
+2. In the IDE “Applications” panel you’ll see the app; open `users_ui`, `accounts_ui`, `final_ui`, and `orchestrator_status`.
+    
+3. Publish a control message to the **control topic** (JSON):
+    
+    ```json
+    {"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+    ```
+    
+    You should see in the DH console:
+    
+    ```
+    [orchestrator] applying control: users='<NEW_USERS>' ...
+    [orchestrator] topics set users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
+    ```
+    
+    `orchestrator_status.lastApplied` updates immediately, and Angular can use that to rebind.
+    
+
+That’s it—this removes the `ApplicationState()` constructor error and keeps the rest of the hot-swap flow intact.
