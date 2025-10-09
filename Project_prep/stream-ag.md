@@ -990,3 +990,271 @@ deephaven server --port 10000
 ```
 
 This removes the `to_iso8601` error and keeps everything else working on **0.40.2**.
+
+
+-------------------------------------------------------------
+
+
+You’re hitting two 0.40.2‐specific gotchas:
+
+1. **Types in `kc.json_spec`** – use `dt.int64`, `dt.double`, etc. (not `dt.int_`).
+    
+2. **Formula string literals** – single-quoted literals can be parsed as non-strings in some contexts. Use **double quotes** and `iif/isNull` (or explicit casts) to keep types consistent. That’s what triggered the “cannot parse literal as a datetime” error when `""` was being inferred against an `Instant` metadata column.
+    
+
+Below is a drop-in, 0.40.2-compatible file that fixes both issues and keeps the hot-swap + linger logic.
+
+---
+
+### `C:\dhdata\data\app.d\orchestrator_dh.py`
+
+```python
+# Deephaven 0.40.2 – orchestrator with safe hot-swap + control-topic
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Optional
+import threading, time
+from datetime import datetime, timezone
+
+from deephaven.appmode import get_app_state
+from deephaven.table import Table
+import deephaven.dtypes as dt
+from deephaven.stream.kafka import consumer as kc
+from deephaven.table_listener import listen
+
+# ---------------- CONFIG ----------------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    # fill in your real security + bootstrap values:
+    # "bootstrap.servers": "...",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.method": "oidc",
+    # "sasl.oauthbearer.token.endpoint.url": "...",
+    # "sasl.oauthbearer.client.id": "...",
+    # "sasl.oauthbearer.client.secret": "...",
+    "auto.offset.reset": "latest",
+}
+
+LINGER_SECONDS = 20  # keep old generation alive for UIs while swapping
+
+# ---------------- SPECS -----------------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,          # <-- correct in 0.40.x
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,     # <-- correct in 0.40.x
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,    # "left" (default) or "inner"
+})
+
+# -------------- HELPERS -----------------
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _consume(topic: str, value_spec) -> Table:
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+def _normalize_users(t: Table) -> Table:
+    # Use double quotes + iif/isNull to keep string typing unambiguous
+    return t.update([
+        'userId = iif(isNull(userId), "∅", (String)userId)',
+        'name   = iif(isNull(name),   "", (String)name)',
+        'email  = iif(isNull(email),  "", (String)email)',
+    ])
+
+def _normalize_accounts(t: Table) -> Table:
+    return t.update([
+        'userId      = iif(isNull(userId), "∅", (String)userId)',
+        # leave accountType/balance as-is (can be nulls)
+    ])
+
+def _left_like(users: Table, accounts: Table) -> Table:
+    # inner rows
+    inner = users.join(accounts, on=["userId"])
+    # unmatched left rows padded with nulls
+    unmatched = users.where('!in(userId, accounts, userId)') \
+                     .update(['accountType = (String) null', 'balance = (Double) null'])
+    return inner.union(unmatched)
+
+# ------------- ORCHESTRATOR -------------
+@dataclass
+class Generation:
+    users_raw: Table
+    accounts_raw: Table
+    users_ui: Table
+    accounts_ui: Table
+    final_ui: Table
+    handles: List[object]
+
+class Orchestrator:
+    def __init__(self) -> None:
+        self.app = get_app_state()
+
+        self.status: Optional[Table] = None
+        self.current: Optional[Generation] = None
+        self.previous: Optional[Generation] = None
+        self._lock = threading.Lock()
+
+        self._init_status()
+        self._apply(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+        self._start_control_listener(CONTROL_TOPIC)
+
+        print("[orchestrator] ready")
+
+    # ---- status export ----
+    def _init_status(self) -> None:
+        from deephaven import new_table
+        from deephaven.column import string_col
+        self.status = new_table([
+            string_col("usersTopic",   [DEFAULT_USERS_TOPIC]),
+            string_col("accountsTopic",[DEFAULT_ACCOUNTS_TOPIC]),
+            string_col("joinType",     ["left"]),
+            string_col("lastApplied",  [iso_now()]),
+        ])
+        self.app["orchestrator_status"] = self.status
+
+    def _bump_status(self, users: str, accounts: str, join_type: str) -> None:
+        self.status = self.status.update([
+            f'usersTopic    = "{users}"',
+            f'accountsTopic = "{accounts}"',
+            f'joinType      = "{join_type}"',
+            f'lastApplied   = "{iso_now()}"',
+        ])
+        self.app["orchestrator_status"] = self.status
+
+    # ---- build one generation ----
+    def _build(self, users_topic: str, accounts_topic: str, join_type: str) -> Generation:
+        u_raw = _consume(users_topic, USER_VALUE_SPEC)
+        a_raw = _consume(accounts_topic, ACCOUNT_VALUE_SPEC)
+
+        u_view = _normalize_users(u_raw).view(["userId", "name", "email", "age"])
+        a_view = _normalize_accounts(a_raw).view(["userId", "accountType", "balance"])
+
+        jt = (join_type or "left").lower()
+        if jt.startswith("inner"):
+            final = u_view.join(a_view, on=["userId"])
+        else:
+            final = _left_like(u_view, a_view)
+
+        return Generation(
+            users_raw=u_raw, accounts_raw=a_raw,
+            users_ui=u_view, accounts_ui=a_view, final_ui=final,
+            handles=[],
+        )
+
+    def _close_generation(self, gen: Optional[Generation]) -> None:
+        if not gen:
+            return
+        for obj in [gen.users_ui, gen.accounts_ui, gen.final_ui, gen.users_raw, gen.accounts_raw, *gen.handles]:
+            try:
+                obj.close()
+            except Exception:
+                pass
+
+    def _apply(self, users_topic: str, accounts_topic: str, join_type: str) -> None:
+        with self._lock:
+            new_gen = self._build(users_topic, accounts_topic, join_type)
+
+            # publish new tables first (atomic swap for IDE/Angular)
+            self.app["users_ui"]    = new_gen.users_ui
+            self.app["accounts_ui"] = new_gen.accounts_ui
+            self.app["final_ui"]    = new_gen.final_ui
+
+            self._bump_status(users_topic, accounts_topic, join_type)
+            print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+
+            # linger and then close the old generation to avoid UI failures
+            old = self.current
+            self.previous = old
+            self.current = new_gen
+
+            if old:
+                def _linger():
+                    try:
+                        time.sleep(LINGER_SECONDS)
+                    finally:
+                        self._close_generation(old)
+                threading.Thread(target=_linger, daemon=True).start()
+
+    # ---- control topic ----
+    def _start_control_listener(self, control_topic: str) -> None:
+        ctrl = _consume(control_topic, CONTROL_VALUE_SPEC)
+
+        def _on_update(_upd):
+            try:
+                last = ctrl.tail(1).snapshot()
+                if last.size() == 0:
+                    return
+                df = last.to_pandas()
+                row = df.iloc[0]
+                users = (str(row.get("usersTopic") or "").strip())
+                accts = (str(row.get("accountsTopic") or "").strip())
+                join  = (str(row.get("joinType") or "left").strip())
+                if users and accts:
+                    print(f"[orchestrator] applying control: users='{users}', accounts='{accts}', join='{join}'")
+                    self._apply(users, accts, join)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        disp = listen(ctrl, _on_update)   # 0.40.2 signature
+        self.app["control_raw"] = ctrl
+        if self.current:
+            self.current.handles.append(disp)
+
+# Boot once on import (App Mode)
+_orch = Orchestrator()
+```
+
+**Notes / sanity checks**
+
+- Types now match 0.40.2 (`dt.int64`, `dt.double`).
+    
+- All formula strings use **double quotes** and `iif/isNull` so nothing is parsed as `Instant`.
+    
+- Listener uses `tail(1).snapshot()` (safe in callback) and we **linger** the old generation, which prevents the IDE/Angular from throwing “export already failed” while you’ve got panels/viewports open.
+    
+
+**Control message format (unchanged):**
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+**Verify the switch:**
+
+- Open the small table `orchestrator_status` in the IDE — it shows the current users/accounts/join and `lastApplied` ISO time.
+    
+- When you publish to the control topic, the console prints:
+    
+    ```
+    [orchestrator] applying control: users='...', accounts='...', join='left'
+    [orchestrator] topics set users='...' accounts='...' join='left'
+    ```
+    
+    and the `orchestrator_status` row updates immediately.
+    
+- Angular should just keep calling `getTable('users_ui' | 'accounts_ui' | 'final_ui')` — the names don’t change; the tables behind them do.
+    
+
+If you still see an error, paste the exact line shown in the stack (it will reference an `update([...])` formula). That will point to the specific column whose type inference is unhappy.
