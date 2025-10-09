@@ -328,3 +328,55 @@ ngOnInit() {
 - Server also replays the last N events so every client can catch up accurately.
     
 - Live messages continue as before.
+
+---------------
+
+here’s a clean controller you can drop in:
+
+```java
+package com.tdsecurities.bishowcase2025.controller;
+
+import com.tdsecurities.bishowcase2025.service.KafkaListenerService;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/kafka")
+@RequiredArgsConstructor
+@CrossOrigin(origins = "*") // adjust for your domains in prod
+public class KafkaController {
+
+    private final KafkaListenerService kafkaListenerService;
+
+    // SSE stream endpoint (Angular EventSource connects here)
+    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamEvents() {
+        return kafkaListenerService.streamEvents();
+    }
+
+    // Optional: fetch recent (server-side replay) to hydrate UI on refresh
+    @GetMapping("/recent")
+    public List<String> recent(@RequestParam(defaultValue = "100") int limit) {
+        return kafkaListenerService.getRecent(limit);
+    }
+
+    // Optional: simple health check (useful for debugging 503 vs 200)
+    @GetMapping("/health")
+    public String health() {
+        return "OK";
+    }
+}
+```
+
+If you also want a manual way to clear the buffer during testing:
+
+```java
+    @DeleteMapping("/recent")
+    public void clearRecent() { kafkaListenerService.clearRecent(); }
+```
+
+(Then add `public void clearRecent(){ recent.clear(); }` to the service.)
