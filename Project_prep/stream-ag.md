@@ -175,3 +175,156 @@ Template (your code is fine):
     
 
 After these tweaks, Angular’s first load should return HTTP 200 and your emitter list will contain at least one emitter; when Kafka messages arrive, they’ll be fanned out to the browser immediately.
+
+
+
+----------------------------------
+
+
+Yep—SSE is “live only.” On a browser refresh you lose in-memory state unless you (a) replay from the server or (b) hydrate from client storage. Do both for a great UX:
+
+## A) Server-side replay (authoritative)
+
+Keep a small ring buffer of the last N events; send that backlog to any new SSE subscriber before streaming live updates.
+
+```java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class KafkaListenerService {
+
+  private final CopyOnWriteArrayList<SseEmitter> emitters = new CopyOnWriteArrayList<>();
+
+  // ring buffer
+  private static final int MAX_RECENT = 500;
+  private final Deque<String> recent = new ConcurrentLinkedDeque<>();
+
+  public SseEmitter streamEvents() {
+    SseEmitter emitter = new SseEmitter(0L);
+    emitters.add(emitter);
+
+    emitter.onCompletion(() -> emitters.remove(emitter));
+    emitter.onTimeout(() -> emitters.remove(emitter));
+    emitter.onError(e -> { emitters.remove(emitter); });
+
+    try {
+      // 1) tell client we're on
+      emitter.send(SseEmitter.event().name("init").data("connected"));
+
+      // 2) REPLAY recent events
+      for (String msg : recent) {
+        emitter.send(SseEmitter.event().name("replay").data(msg));
+      }
+    } catch (Exception e) {
+      emitters.remove(emitter);
+      emitter.completeWithError(e);
+    }
+    return emitter;
+  }
+
+  @KafkaListener(topics = "${spring.kafka.consumer.properties.topic}")
+  public void onMessage(ConsumerRecord<String, Object> record, Acknowledgment ack) {
+    try {
+      String payload = (record.value() instanceof String s)
+          ? s
+          : new ObjectMapper().writeValueAsString(record.value());
+
+      // push into ring buffer
+      recent.addLast(payload);
+      while (recent.size() > MAX_RECENT) recent.pollFirst();
+
+      // fan out
+      for (SseEmitter emitter : emitters) {
+        try {
+          emitter.send(SseEmitter.event().name("message").data(payload));
+        } catch (Exception e) {
+          emitters.remove(emitter);
+        }
+      }
+      ack.acknowledge();
+
+    } catch (Exception e) {
+      log.error("Kafka handle error", e);
+    }
+  }
+
+  // Optional REST to fetch recent manually
+  public List<String> getRecent(int limit) {
+    return recent.stream().skip(Math.max(0, recent.size() - limit)).toList();
+  }
+}
+```
+
+Controller (optional REST):
+
+```java
+@GetMapping("/recent")
+public List<String> recent(@RequestParam(defaultValue = "100") int limit) {
+  return kafkaListenerService.getRecent(limit);
+}
+```
+
+## B) Client-side hydration (fast UX)
+
+Seed the UI from localStorage, then connect to SSE; keep caching as new events arrive so a refresh is instant.
+
+```ts
+@Injectable({ providedIn: 'root' })
+export class KafkaEventService {
+  private readonly KEY = 'kafka_events_v1';
+  private eventSource: EventSource | null = null;
+
+  loadCached(): string[] {
+    const raw = localStorage.getItem(this.KEY);
+    return raw ? JSON.parse(raw) : [];
+  }
+  saveCached(events: string[]) {
+    localStorage.setItem(this.KEY, JSON.stringify(events.slice(-500)));
+  }
+
+  connect(): Observable<string> {
+    return new Observable<string>((observer) => {
+      this.eventSource = new EventSource('http://localhost:8080/api/kafka/stream');
+
+      this.eventSource.onmessage = (e) => observer.next(e.data);
+      this.eventSource.onerror = (err) => { observer.error(err); this.eventSource?.close(); };
+
+      return () => this.eventSource?.close();
+    });
+  }
+}
+```
+
+Component:
+
+```ts
+events: string[] = [];
+
+ngOnInit() {
+  // 1) hydrate from cache
+  this.events = this.kafkaService.loadCached();
+
+  // 2) (optional) pull server backlog if you exposed /recent
+  // this.http.get<string[]>('/api/kafka/recent?limit=200').subscribe(list => {
+  //   this.events = list;
+  //   this.kafkaService.saveCached(this.events);
+  // });
+
+  // 3) live stream
+  this.eventSubscription = this.kafkaService.connect().subscribe({
+    next: (ev) => {
+      this.events.push(ev);
+      this.kafkaService.saveCached(this.events);
+    },
+    error: (err) => console.error(err)
+  });
+}
+```
+
+**Result:**
+
+- New tab/refresh immediately shows cached events.
+    
+- Server also replays the last N events so every client can catch up accurately.
+    
+- Live messages continue as before.
