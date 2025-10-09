@@ -380,3 +380,230 @@ If you also want a manual way to clear the buffer during testing:
 ```
 
 (Then add `public void clearRecent(){ recent.clear(); }` to the service.)
+
+
+-------------------------------
+
+gotcha—here’s a drop-in Angular setup that:
+
+- hydrates from the backend `/recent` (authoritative),
+    
+- keeps a rolling cache in `localStorage` so a refresh/tab reopen paints instantly,
+    
+- stays live via `/stream`,
+    
+- dedupes and caps to the last N events,
+    
+- needs no extra clicks after page refresh.
+    
+
+---
+
+# 1) app.module.ts
+
+```ts
+import { NgModule } from '@angular/core';
+import { BrowserModule } from '@angular/platform-browser';
+import { HttpClientModule } from '@angular/common/http';
+import { AppComponent } from './app.component';
+
+@NgModule({
+  declarations: [AppComponent],
+  imports: [BrowserModule, HttpClientModule],
+  bootstrap: [AppComponent],
+})
+export class AppModule {}
+```
+
+# 2) environment.ts
+
+```ts
+export const environment = {
+  production: false,
+  apiBase: 'http://localhost:8080/api/kafka'
+};
+```
+
+# 3) kafka-event.service.ts
+
+```ts
+import { Injectable, NgZone } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { BehaviorSubject, firstValueFrom } from 'rxjs';
+import { environment } from '../../environments/environment';
+
+@Injectable({ providedIn: 'root' })
+export class KafkaEventService {
+  private readonly KEY = 'kafka_events_v1';
+  private readonly MAX = 500;                 // keep last N
+  private eventSource: EventSource | null = null;
+  private saving = false;
+
+  private readonly eventsSubject = new BehaviorSubject<string[]>([]);
+  public readonly events$ = this.eventsSubject.asObservable();
+
+  constructor(private http: HttpClient, private zone: NgZone) {}
+
+  /** Call once (e.g., AppComponent ngOnInit) */
+  async init(): Promise<void> {
+    // 1) seed from local cache (instant paint)
+    const cached = this.loadCache();
+    this.eventsSubject.next(cached);
+
+    // 2) get authoritative backlog from server
+    try {
+      const recent = await firstValueFrom(
+        this.http.get<string[]>(`${environment.apiBase}/recent?limit=${this.MAX}`)
+      );
+      this.setAndPersist(this.mergeDedupe(cached, recent));
+    } catch (e) {
+      // backend might be starting; keep cached UI and continue
+      console.warn('recent fetch failed, using cache only for now', e);
+    }
+
+    // 3) open live stream (SSE auto-reconnects)
+    this.openStream();
+  }
+
+  private openStream() {
+    // Use NgZone to avoid Angular change detection storms
+    this.zone.runOutsideAngular(() => {
+      this.eventSource = new EventSource(`${environment.apiBase}/stream`);
+
+      this.eventSource.onmessage = (evt: MessageEvent) => {
+        const next = this.addEvent(evt.data);
+        // jump back into Angular zone to update UI
+        this.zone.run(() => this.eventsSubject.next(next));
+      };
+
+      this.eventSource.onerror = (err) => {
+        console.error('SSE error', err);
+        // Let browser auto-reconnect; do not close() here
+      };
+    });
+  }
+
+  /** Current list accessor if needed */
+  getSnapshot(): string[] {
+    return this.eventsSubject.getValue();
+  }
+
+  /** Cleanup (call on app destroy if you wish) */
+  close() {
+    this.eventSource?.close();
+    this.eventSource = null;
+  }
+
+  /** ---------- helpers ---------- */
+
+  private addEvent(e: string): string[] {
+    const curr = this.eventsSubject.getValue();
+    const next = [...curr, e].slice(-this.MAX);
+    this.persist(next);
+    return next;
+  }
+
+  private setAndPersist(list: string[]) {
+    const next = list.slice(-this.MAX);
+    this.eventsSubject.next(next);
+    this.persist(next);
+  }
+
+  private mergeDedupe(a: string[], b: string[]): string[] {
+    // simple string dedupe; if you later add IDs, dedupe by id
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const v of [...a, ...b]) {
+      if (!seen.has(v)) { seen.add(v); merged.push(v); }
+    }
+    return merged.slice(-this.MAX);
+  }
+
+  private loadCache(): string[] {
+    try {
+      const raw = localStorage.getItem(this.KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+
+  private persist(list: string[]) {
+    // throttle writes so we don’t hammer localStorage
+    if (this.saving) return;
+    this.saving = true;
+    queueMicrotask(() => {
+      try { localStorage.setItem(this.KEY, JSON.stringify(list)); }
+      finally { this.saving = false; }
+    });
+  }
+}
+```
+
+# 4) component usage
+
+## entity-list.component.ts (or any component showing events)
+
+```ts
+import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Subscription } from 'rxjs';
+import { KafkaEventService } from '../services/kafka-event.service';
+
+@Component({
+  selector: 'app-entity-list',
+  templateUrl: './entity-list.component.html'
+})
+export class EntityListComponent implements OnInit, OnDestroy {
+  events$ = this.kafkaSvc.events$;    // async stream for template
+  private sub: Subscription | null = null;
+
+  constructor(private kafkaSvc: KafkaEventService) {}
+
+  async ngOnInit() {
+    await this.kafkaSvc.init(); // hydrate + connect SSE
+    // If you need imperative access, you can also subscribe:
+    // this.sub = this.events$.subscribe(list => console.log('events size', list.length));
+  }
+
+  ngOnDestroy() {
+    this.sub?.unsubscribe();
+    // optional: do NOT close SSE here if other components also use it.
+    // If this is a global/singleton stream, leave it open.
+  }
+}
+```
+
+## entity-list.component.html
+
+```html
+<div class="container">
+  <ng-container *ngIf="events$ | async as events">
+    <ng-container *ngFor="let e of events">
+      <p>{{ e }}</p>
+    </ng-container>
+  </ng-container>
+</div>
+```
+
+---
+
+## how this keeps state across refresh/close
+
+- While running, every new event is pushed into a **BehaviorSubject** and **persisted to `localStorage`** (last 500 items).
+    
+- On a **refresh or tab reopen**, `init()`:
+    
+    1. paints the cached list immediately (fast UI),
+        
+    2. fetches `/recent` from your Spring controller to get the authoritative last N,
+        
+    3. reopens `/stream` for live updates (server also replays the ring buffer at connect).
+        
+- Because we persist on every event, closing the tab is safe—on next open, you still have a cache to paint instantly, and `/recent` reconciles any gap.
+    
+
+You can tune:
+
+- `MAX` (client) and `MAX_RECENT` (server) to your retention needs,
+    
+- switch to an object shape `{id, ts, payload}` later for perfect dedupe via `id`,
+    
+- scope the service as a true singleton (providedIn root) so the SSE stream is shared across pages in the same SPA session.
