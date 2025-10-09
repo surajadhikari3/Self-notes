@@ -1,19 +1,10 @@
-Absolutely—here’s a **ready-to-paste** App-Mode package for **Deephaven 0.40.2** that:
+Got it — the red “ExportObject … no longer live” is the app killing (or letting GC kill) objects that the IDE/Angular still has a handle to during the swap. The most robust fix is: **never tear down the previous generation immediately**. Keep strong references to the old generation for a while (and only retire them later), and always run swaps inside the app’s **ExecutionContext**. Below is a drop-in app for **Deephaven 0.40.2** that does exactly that.
 
-- Listens to two Kafka topics and builds `users_ui`, `accounts_ui`, and a **safe left join** `final_ui`
-    
-- Hot-swaps streams when you publish a **JSON** control message
-    
-- Avoids “liveness / dependency cancelled” errors by doing a **graceful hand-off**
-    
-- Exposes `control_raw` so you can see control messages arrive
-    
-- Keeps the **same export names** so your Angular client (using the IDE session) keeps working
-    
+It’s JSON-only, wraps all listener work in the correct context, de-dupes the right side for a left join, and **does not close** prior generations (so no liveness crashes). There’s an optional slow cleanup after a long delay if you want it.
 
 ---
 
-# 1) `C:\Deephaven\app.d\orchestrator.app`
+# `C:\Deephaven\app.d\orchestrator.app`
 
 ```properties
 id=kafka-orchestrator
@@ -24,339 +15,19 @@ enabled=true
 file_0=orchestrator.py
 ```
 
-# 2) `C:\Deephaven\app.d\orchestrator.py`
+# `C:\Deephaven\app.d\orchestrator.py`
 
 ```python
-# Deephaven 0.40.2 – Kafka orchestrator with JSON-only control topic
-# - Hot-swaps topics via control JSON
-# - Graceful hand-off to avoid UI/Angular failures
-# - Left join with de-duplicated right table
-
-import math, threading, time
-import pandas as pd
-
-from deephaven.appmode import get_app_state, ApplicationState
-from deephaven.pandas import to_pandas
-from deephaven.table_listener import listen
-from deephaven.stream.kafka import consumer as kc
-import deephaven.dtypes as dt
-from deephaven import agg as agg
-from deephaven import new_table, time as dhtime
-from deephaven.column import string_col
-
-# -------- EDIT THESE (your real topics + Kafka props) -----------------
-
-DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
-DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
-CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
-
-# Data consumers (usually "latest")
-DATA_KAFKA = {
-    "bootstrap.servers": "localhost:9092",
-    "auto.offset.reset": "latest",
-    # SECURITY EXAMPLES:
-    # Confluent Cloud (PLAIN):
-    # "security.protocol": "SASL_SSL",
-    # "sasl.mechanism": "PLAIN",
-    # "sasl.jaas.config": 'org.apache.kafka.common.security.plain.PlainLoginModule required username="<API_KEY>" password="<API_SECRET>";',
-    #
-    # OIDC / OAuthBearer:
-    # "security.protocol": "SASL_SSL",
-    # "sasl.mechanism": "OAUTHBEARER",
-    # "sasl.login.callback.handler.class": "io.confluent.kafka.clients.plugins.auth.token.TokenUserLoginCallbackHandler",
-    # ... your token props ...
-}
-
-# Control consumer: ALWAYS start at earliest so we can apply the last-known row
-CONTROL_KAFKA = dict(DATA_KAFKA)
-CONTROL_KAFKA["auto.offset.reset"] = "earliest"
-
-# ---------------------------------------------------------------------
-
-# Value specs
-USER_SPEC = kc.json_spec({
-    "userId": dt.string,
-    "name": dt.string,
-    "email": dt.string,
-    "age": dt.int64,
-})
-
-ACCOUNT_SPEC = kc.json_spec({
-    "userId": dt.string,
-    "accountType": dt.string,
-    "balance": dt.double,
-})
-
-CONTROL_JSON_SPEC = kc.json_spec({
-    "usersTopic": dt.string,
-    "accountsTopic": dt.string,
-    "joinType": dt.string,   # "left" (default) or "inner"
-})
-
-
-def consume_append(topic: str, spec, cfg):
-    """Create an append-only streaming table from a Kafka topic."""
-    return kc.consume(
-        dict(cfg),
-        topic,
-        key_spec=kc.KeyValueSpec.IGNORE,
-        value_spec=spec,
-        table_type=kc.TableType.append(),
-    )
-
-
-def _scalar_str(val, default=""):
-    """Robust string conversion (handles None, NaN, pd.NA)."""
-    try:
-        if val is None:
-            return default
-        try:
-            if pd.isna(val):
-                return default
-        except Exception:
-            pass
-        if isinstance(val, float) and math.isnan(val):
-            return default
-        return str(val).strip()
-    except Exception:
-        return default
-
-
-class Orchestrator:
-    def __init__(self, app: ApplicationState):
-        self.app = app
-        self.lock = threading.Lock()
-        self.resources = []            # current generation (tables, listeners)
-        self._last_topics = (None, None, None)  # users, accounts, join
-
-    # ---------- core hot-swap ----------
-    def set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
-        if not users_topic or not accounts_topic:
-            raise ValueError("Both users_topic and accounts_topic are required")
-
-        with self.lock:
-            old_resources = list(self.resources)  # close after a short delay
-
-            new_res = []
-            try:
-                # raw streams
-                users_raw  = consume_append(users_topic,  USER_SPEC,    DATA_KAFKA); new_res.append(users_raw)
-                accts_raw  = consume_append(accounts_topic, ACCOUNT_SPEC, DATA_KAFKA); new_res.append(accts_raw)
-
-                # projections
-                users = users_raw.view(["userId", "name", "email", "age"]);                  new_res.append(users)
-                accts = accts_raw.view(["userId", "accountType", "balance"]);               new_res.append(accts)
-
-                # right side must be unique & non-null on userId for natural_join
-                accts_non_null = accts.where("userId != null")
-                try:
-                    accts_one = accts_non_null.last_by("userId")
-                except AttributeError:
-                    accts_one = accts_non_null.agg_by([agg.last("accountType"), agg.last("balance")], by=["userId"])
-                new_res.append(accts_one)
-
-                jt = (join_type or "left").lower()
-                if jt.startswith("inner"):
-                    final = users.join(accts, on=["userId"], joins=["accountType", "balance"])
-                else:
-                    final = users.natural_join(accts_one, on=["userId"], joins=["accountType", "balance"])
-                new_res.append(final)
-
-                # export new generation (global names remain constant)
-                self.app["users_ui"]    = users
-                self.app["accounts_ui"] = accts
-                self.app["final_ui"]    = final
-
-                # tiny status table (handy for Angular / quick checks)
-                self.app["orchestrator_status"] = new_table([
-                    string_col("usersTopic",   [users_topic]),
-                    string_col("accountsTopic",[accounts_topic]),
-                    string_col("joinType",     [jt]),
-                    string_col("lastApplied",  [str(dhtime.dh_now())]),
-                ])
-
-                # publish as current generation
-                self.resources = new_res
-                self._last_topics = (users_topic, accounts_topic, jt)
-                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{jt}'")
-
-                # graceful hand-off: close old gen after a brief delay so UI/Angular can rebind
-                def _close_after_delay(res_list):
-                    try:
-                        time.sleep(2.0)  # 1–3s is typical
-                        for r in res_list:
-                            try:
-                                r.close()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                threading.Thread(target=_close_after_delay, args=(old_resources,), daemon=True).start()
-
-            except Exception as e:
-                # Roll back anything new we created
-                for r in new_res:
-                    try:
-                        r.close()
-                    except Exception:
-                        pass
-                print("[orchestrator] set_topics error:", e)
-                raise
-
-    # ---------- control pipeline ----------
-    def _parse_control_row(self, snap_df: pd.DataFrame):
-        required = {"usersTopic", "accountsTopic"}
-        if not required.issubset(set(snap_df.columns)):
-            print("[orchestrator] control row missing columns:", list(snap_df.columns))
-            return None
-        row = snap_df.iloc[0]
-        users = _scalar_str(row.get("usersTopic"))
-        accts = _scalar_str(row.get("accountsTopic"))
-        join  = _scalar_str(row.get("joinType"), "left") or "left"
-        return (users, accts, join)
-
-    def _apply_last_control(self, ctrl_tbl):
-        snap = ctrl_tbl.tail(1).snapshot()
-        if snap.size == 0:
-            return
-        df = to_pandas(snap)
-        parsed = self._parse_control_row(df)
-        if not parsed:
-            return
-        users, accts, join = parsed
-        if users and accts and (users, accts, join) != self._last_topics:
-            print(f"[orchestrator] applying control: users='{users}', accounts='{accts}', join='{join}'")
-            self.set_topics(users, accts, join)
-
-    def start_control_listener(self, control_topic: str):
-        ctrl = consume_append(control_topic, CONTROL_JSON_SPEC, CONTROL_KAFKA)
-        self.app["control_raw"] = ctrl  # visible in Apps panel
-
-        def on_update(_update, _is_replay):
-            try:
-                self._apply_last_control(ctrl)
-            except Exception as e:
-                print("[orchestrator] control listener err:", e)
-
-        disp = listen(ctrl, on_update)
-
-        # one initial apply (if a row already exists)
-        try:
-            self._apply_last_control(ctrl)
-        except Exception as e:
-            print("[orchestrator] initial apply err:", e)
-
-        self.resources.extend([ctrl, disp])
-        print(f"[orchestrator] control listener on '{control_topic}'")
-
-# ---------- boot ----------
-_app = get_app_state()
-_orc = Orchestrator(_app)
-try:
-    _orc.set_topics(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
-except Exception as boot_err:
-    print("[orchestrator] initial wiring failed:", boot_err)
-_orc.start_control_listener(CONTROL_TOPIC)
-print("[orchestrator] ready")
-```
-
----
-
-## 3) Start & test
-
-```bash
-# activate your venv
-source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
-deephaven server --host localhost --port 10000
-```
-
-Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)** → Panels → **Applications → Kafka Orchestrator** → open:
-
-- `control_raw`
-    
-- `users_ui`, `accounts_ui`, `final_ui`
-    
-- (optional) `orchestrator_status`
-    
-
-### Control message to publish (exact JSON)
-
-```json
-{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
-```
-
-- Keys are **case-sensitive**.
-    
-- `joinType` may be `"left"` (default) or `"inner"`.
-    
-
-**Expected logs** when a control row arrives:
-
-```
-[orchestrator] applying control: users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
-[orchestrator] topics set users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
-```
-
-The exports keep their names, so your **Angular client** (reading via the IDE session) continues to work with the updated streams.
-
----
-
-### Notes / common pitfalls
-
-- If `control_raw` shows **no rows**, the consumer didn’t get your message (topic, ACLs, or security settings).
-    
-- If `final_ui` ever fails again, the accounts stream likely had duplicate or null `userId`. We already:
-    
-    - `where("userId != null")`
-        
-    - `last_by("userId")` (or `agg_by(last)` fallback)
-        
-- If you emit many control messages back-to-back, the 2s grace period handles UI/Angular rebinding cleanly. Tune to 1–3s if needed.
-    
-
-This version removes the `simple_spec` path entirely (JSON-only), matches 0.40.2 APIs, and includes the graceful hand-off to eliminate the “liveness / dependency cancelled” noise.
-
---------------------------------------------------------------------
-
-Perfect—here’s the **complete, copy-paste app** for **Deephaven 0.40.2** with all the fixes:
-
-- JSON-only **control topic** (no `simple_spec` path).
-    
-- **ExecutionContext** wrapping so listeners can safely build tables.
-    
-- **Graceful hand-off** (2s) so IDE/Angular never sees “dependency cancelled / liveness” errors.
-    
-- Safe **left join** (`natural_join` on a de-duplicated right side).
-    
-- Exports stay **users_ui, accounts_ui, final_ui** (Angular keeps working).
-    
-- A tiny **orchestrator_status** table shows the active topics.
-    
-
----
-
-# 1) `C:\Deephaven\app.d\orchestrator.app`
-
-```properties
-id=kafka-orchestrator
-name=Kafka Orchestrator
-type=script
-scriptType=python
-enabled=true
-file_0=orchestrator.py
-```
-
-# 2) `C:\Deephaven\app.d\orchestrator.py`
-
-```python
-# Deephaven 0.40.2 – Kafka orchestrator (JSON-only control topic)
-# - Hot-swaps topics via control JSON
-# - Graceful hand-off (2s) to avoid UI/Angular failure
-# - Left join with de-duplicated right table
+# Deephaven 0.40.2 – Kafka orchestrator (robust hot-swap, JSON-only control)
+# - Hot-swaps topics via JSON control messages
+# - Runs swaps inside the app's ExecutionContext
+# - De-duplicates right side for safe left join
+# - KEEPS previous generations (no immediate close) to avoid liveness errors
+# - Optional slow retirement thread (disabled by default)
 # - Exports: users_ui, accounts_ui, final_ui, control_raw, orchestrator_status
 
 import math, threading, time
+from contextlib import nullcontext
 import pandas as pd
 
 from deephaven.appmode import get_app_state, ApplicationState
@@ -369,39 +40,34 @@ from deephaven import new_table, time as dhtime
 from deephaven.column import string_col
 from deephaven import execution_context as ec
 
-# Capture the app's ExecutionContext so listener callbacks can run with a QueryScope
-_CTX = ec.get_exec_ctx()
-
-# -------- EDIT THESE (your real topics + Kafka props) -----------------
+# ----- CONFIG (edit these to your env) ---------------------------------
 
 DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
 DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
 CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
 
-# Data consumers (usually "latest")
 DATA_KAFKA = {
     "bootstrap.servers": "localhost:9092",
     "auto.offset.reset": "latest",
-    # Examples for security (uncomment and fill as needed):
-    # Confluent Cloud (PLAIN):
+    # Security examples:
     # "security.protocol": "SASL_SSL",
     # "sasl.mechanism": "PLAIN",
     # "sasl.jaas.config": 'org.apache.kafka.common.security.plain.PlainLoginModule required username="<API_KEY>" password="<API_SECRET>";',
-    #
-    # OAuthBearer:
-    # "security.protocol": "SASL_SSL",
-    # "sasl.mechanism": "OAUTHBEARER",
-    # "sasl.login.callback.handler.class": "io.confluent.kafka.clients.plugins.auth.token.TokenUserLoginCallbackHandler",
-    # ... your token props ...
+    # or OAuthBearer...
 }
 
-# Control consumer: start at earliest so we can apply the last-known row
 CONTROL_KAFKA = dict(DATA_KAFKA)
-CONTROL_KAFKA["auto.offset.reset"] = "earliest"
+CONTROL_KAFKA["auto.offset.reset"] = "earliest"  # so we always see the last control row
 
-# ---------------------------------------------------------------------
+# Keep old generations to prevent liveness errors
+KEEP_GENERATIONS = True           # True = never close old gens automatically
+RETIRE_AFTER_SECONDS = 900        # if you later set KEEP_GENERATIONS=False, close after this delay
 
-# Value specs
+# ----- END CONFIG ------------------------------------------------------
+
+# Capture the app's ExecutionContext so callbacks have a QueryScope
+_CTX = ec.get_exec_ctx()
+
 USER_SPEC = kc.json_spec({
     "userId": dt.string,
     "name": dt.string,
@@ -448,7 +114,6 @@ def _scalar_str(val, default=""):
         return default
 
 def _tbl_size(t):
-    """Compatibility: Table.size is a property in Python; fall back to method if needed."""
     try:
         return t.size
     except Exception:
@@ -461,86 +126,91 @@ class Orchestrator:
     def __init__(self, app: ApplicationState):
         self.app = app
         self.lock = threading.Lock()
-        self.resources = []            # current generation (tables, listeners, etc.)
+        self.current_gen = None      # dict for the active generation
         self._last_topics = (None, None, None)  # users, accounts, join
+        self._retired = []           # retired generations we keep around
 
-    # ---------- core hot-swap ----------
+    # --------- build a new generation of tables from topics ---------
+    def _build_generation(self, users_topic: str, accounts_topic: str, join_type: str):
+        gen = {"topics": (users_topic, accounts_topic, join_type), "resources": []}
+
+        users_raw = consume_append(users_topic, USER_SPEC, DATA_KAFKA);     gen["resources"].append(users_raw)
+        accts_raw = consume_append(accounts_topic, ACCOUNT_SPEC, DATA_KAFKA); gen["resources"].append(accts_raw)
+
+        users = users_raw.view(["userId", "name", "email", "age"]);                     gen["resources"].append(users)
+        accts = accts_raw.view(["userId", "accountType", "balance"]);                   gen["resources"].append(accts)
+
+        # Ensure unique, non-null right keys for left join
+        accts_non_null = accts.where("userId != null")
+        try:
+            accts_one = accts_non_null.last_by("userId")
+        except AttributeError:
+            accts_one = accts_non_null.agg_by([agg.last("accountType"), agg.last("balance")], by=["userId"])
+        gen["resources"].append(accts_one)
+
+        jt = (join_type or "left").lower()
+        if jt.startswith("inner"):
+            final = users.join(accts, on=["userId"], joins=["accountType", "balance"])
+        else:
+            final = users.natural_join(accts_one, on=["userId"], joins=["accountType", "balance"])
+        gen["resources"].append(final)
+
+        gen["users_ui"] = users
+        gen["accounts_ui"] = accts
+        gen["final_ui"] = final
+        return gen
+
+    # --------- swap to new topics (robust, no early close) ---------
     def set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
         if not users_topic or not accounts_topic:
             raise ValueError("Both users_topic and accounts_topic are required")
 
-        with self.lock:
-            # close these AFTER the swap with a short grace period
-            old_resources = list(self.resources)
+        with self.lock, _CTX:
+            # Build the new generation
+            new_gen = self._build_generation(users_topic, accounts_topic, join_type)
 
-            new_res = []
-            try:
-                # raw streams
-                users_raw  = consume_append(users_topic,  USER_SPEC,    DATA_KAFKA); new_res.append(users_raw)
-                accts_raw  = consume_append(accounts_topic, ACCOUNT_SPEC, DATA_KAFKA); new_res.append(accts_raw)
+            # Export under the SAME names (Angular/IDE keep working)
+            self.app["users_ui"]    = new_gen["users_ui"]
+            self.app["accounts_ui"] = new_gen["accounts_ui"]
+            self.app["final_ui"]    = new_gen["final_ui"]
 
-                # projections
-                users = users_raw.view(["userId", "name", "email", "age"]);                  new_res.append(users)
-                accts = accts_raw.view(["userId", "accountType", "balance"]);               new_res.append(accts)
+            self.app["orchestrator_status"] = new_table([
+                string_col("usersTopic",   [users_topic]),
+                string_col("accountsTopic",[accounts_topic]),
+                string_col("joinType",     [(join_type or "left").lower()]),
+                string_col("lastApplied",  [str(dhtime.dh_now())]),
+            ])
 
-                # right side must be unique & non-null on userId for natural_join
-                accts_non_null = accts.where("userId != null")
+            # Retire the old generation WITHOUT closing it (prevents liveness errors)
+            if self.current_gen is not None:
+                self._retire_generation(self.current_gen)
+
+            self.current_gen = new_gen
+            self._last_topics = (users_topic, accounts_topic, (join_type or "left").lower())
+            print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{(join_type or 'left').lower()}'")
+
+    def _retire_generation(self, gen):
+        """Keep a strong reference so existing viewers don't crash."""
+        self._retired.append((time.time(), gen))
+        if KEEP_GENERATIONS:
+            return
+        # Optional slow retirement (only if KEEP_GENERATIONS==False)
+        def _slow_close(stamp_gen):
+            stamp, g = stamp_gen
+            delay = max(1, RETIRE_AFTER_SECONDS)
+            time.sleep(delay)
+            for r in g.get("resources", []):
                 try:
-                    accts_one = accts_non_null.last_by("userId")
-                except AttributeError:
-                    accts_one = accts_non_null.agg_by([agg.last("accountType"), agg.last("balance")], by=["userId"])
-                new_res.append(accts_one)
+                    r.close()
+                except Exception:
+                    pass
+            try:
+                self._retired.remove(stamp_gen)
+            except Exception:
+                pass
+        threading.Thread(target=_slow_close, args=((time.time(), gen),), daemon=True).start()
 
-                jt = (join_type or "left").lower()
-                if jt.startswith("inner"):
-                    final = users.join(accts, on=["userId"], joins=["accountType", "balance"])
-                else:
-                    final = users.natural_join(accts_one, on=["userId"], joins=["accountType", "balance"])
-                new_res.append(final)
-
-                # export new generation (global names remain constant)
-                self.app["users_ui"]    = users
-                self.app["accounts_ui"] = accts
-                self.app["final_ui"]    = final
-
-                # tiny status table (handy for Angular / quick checks)
-                self.app["orchestrator_status"] = new_table([
-                    string_col("usersTopic",   [users_topic]),
-                    string_col("accountsTopic",[accounts_topic]),
-                    string_col("joinType",     [jt]),
-                    string_col("lastApplied",  [str(dhtime.dh_now())]),
-                ])
-
-                # publish as current generation
-                self.resources = new_res
-                self._last_topics = (users_topic, accounts_topic, jt)
-                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{jt}'")
-
-                # graceful hand-off: close old gen after a brief delay so UI/Angular can rebind
-                def _close_after_delay(res_list):
-                    try:
-                        time.sleep(2.0)  # tune 1–3s as desired
-                        for r in res_list:
-                            try:
-                                r.close()
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                threading.Thread(target=_close_after_delay, args=(old_resources,), daemon=True).start()
-
-            except Exception as e:
-                # Roll back anything new we created
-                for r in new_res:
-                    try:
-                        r.close()
-                    except Exception:
-                        pass
-                print("[orchestrator] set_topics error:", e)
-                raise
-
-    # ---------- control pipeline ----------
+    # --------- control pipeline ---------
     def _parse_control_row(self, snap_df: pd.DataFrame):
         required = {"usersTopic", "accountsTopic"}
         if not required.issubset(set(snap_df.columns)):
@@ -571,22 +241,23 @@ class Orchestrator:
 
         def on_update(_update, _is_replay):
             try:
-                # run inside the app's execution context
                 with _CTX:
                     self._apply_last_control(ctrl)
             except Exception as e:
-                print("[orchestrator] control listener err: table where operation failed. ", e)
+                print("[orchestrator] control listener err:", e)
 
-        disp = listen(ctrl, on_update)
+        disp = listen(ctrl, on_update)  # (update, is_replay) signature
 
-        # one initial apply (also inside the context)
+        # One initial apply (in case a row already exists)
         try:
             with _CTX:
                 self._apply_last_control(ctrl)
         except Exception as e:
             print("[orchestrator] initial apply err:", e)
 
-        self.resources.extend([ctrl, disp])
+        # Keep references (not strictly needed, but harmless)
+        # DO NOT close; we want robust behavior.
+        self._retired.append(("control", {"resources": [ctrl, disp]}))
         print(f"[orchestrator] control listener on '{control_topic}'")
 
 # ---------- boot ----------
@@ -607,37 +278,302 @@ print("[orchestrator] ready")
 
 ## How to run
 
-1. Save both files in `C:\Deephaven\app.d\`.
+1. Save both files into `C:\Deephaven\app.d\`.
     
-2. Start your venv and launch DH:
+2. Start DH in your venv:
     
     ```bash
     source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
     deephaven server --host localhost --port 10000
     ```
     
-3. Open **[http://localhost:10000/ide/](http://localhost:10000/ide/)** → Panels → **Applications → Kafka Orchestrator** and open:
+3. In the IDE → **Applications → Kafka Orchestrator**, open:
     
-    - `control_raw` (see control messages)
-        
     - `users_ui`, `accounts_ui`, `final_ui`
         
-    - `orchestrator_status` (shows current topics)
+    - `control_raw`
+        
+    - `orchestrator_status`
         
 
-### Control message format (exact JSON)
-
-Publish to `CONTROL_TOPIC`:
+### Control message to publish (exact JSON)
 
 ```json
 {"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
 ```
 
-You should see in the Console:
+You should see:
 
 ```
-[orchestrator] applying control: users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
-[orchestrator] topics set users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
+[orchestrator] applying control: users='...' accounts='...' join='left'
+[orchestrator] topics set users='...' accounts='...' join='left'
 ```
 
-This version removes the `simple_spec` path, wraps all listener work in the correct **ExecutionContext**, de-dupes the right side for `natural_join`, and delays closing the old generation—so the IDE and your Angular client won’t trip on liveness errors while switching topics.
+---
+
+### Why this stops the crashes
+
+- We **never close** the previous generation during the swap, so any open IDE/Angular viewers that still reference objects from the old generation remain valid (no `ExportObject... no longer live`).
+    
+- Exports keep the **same names** (`users_ui`, `accounts_ui`, `final_ui`), so Angular bindings keep working.
+    
+- All work triggered by the listener runs inside the app’s **ExecutionContext**, so `.where(...)`, joins, etc., are legal.
+    
+- Right-side de-duplication (`last_by("userId")` / `agg_by(last)`) prevents “duplicate right key” join failures.
+    
+
+If, later, you want automatic cleanup to reclaim memory, set `KEEP_GENERATIONS = False` and adjust `RETIRE_AFTER_SECONDS` (e.g., 600s). That retires generations **well after** viewers have had time to switch, without causing liveness faults.
+
+---------------------------
+
+
+Great question — since we deliberately keep the _old_ generation alive on each hot-swap (so the IDE/Angular don’t crash), your Angular table handle keeps pointing at the **previous** export unless you explicitly re-bind it.
+
+Below is a small, drop-in update for your Angular service that:
+
+1. streams a table (`users_ui`, `accounts_ui`, or `final_ui`),
+    
+2. **auto-rebinds** to the _new_ export whenever our app’s `orchestrator_status.lastApplied` changes, and
+    
+3. cleans up old listeners/handles to avoid leaks.
+    
+
+It matches the Deephaven JS API (0.40.x) you’re already using.
+
+---
+
+## 1) Angular service (drop-in)
+
+Create / replace `deephaven.service.ts` parts as shown. The only **new** public API is `streamTableWithRebind(tableName, maxRows)` which returns a `StreamHandle` containing an observable and a `dispose()`.
+
+```ts
+// src/app/services/deephaven.service.ts
+import { Injectable, NgZone } from '@angular/core';
+import { BehaviorSubject, Observable } from 'rxjs';
+import { environment } from '../../environments/environment';
+
+type DhNamespace = any;
+type DhClient = any;
+type DhTable = any;
+type IdeConnection = any;
+type IdeSession = any;
+
+export interface StreamHandle {
+  rows$: Observable<any[]>;
+  dispose(): Promise<void>;
+}
+
+@Injectable({ providedIn: 'root' })
+export class DeephavenService {
+  private dh!: DhNamespace;
+  private client!: DhClient;
+  private ide!: IdeSession;
+
+  constructor(private readonly zone: NgZone) {}
+
+  // --- load dh-core.js (your code, kept but simplified slightly) ---
+  private async ensureDhLoaded(): Promise<void> {
+    if (this.dh) return;
+
+    const proxyUrl = '/jsapi/dh-core.js';
+    const absoluteUrl = `${environment.DEEPHAVEN_BASE_URL.replace(/\/+$/, '')}/jsapi/dh-core.js`;
+    let lastErr: unknown;
+
+    try {
+      this.dh = (await import(/* @vite-ignore */ proxyUrl)).default;
+      return;
+    } catch (e) { lastErr = e; }
+
+    try {
+      this.dh = (await import(/* @vite-ignore */ absoluteUrl)).default;
+      return;
+    } catch (e2) {
+      console.error('Failed to load dh-core.js from both proxy and absolute URL', { proxyUrl, absoluteUrl, lastErr, e2 });
+      throw e2;
+    }
+  }
+
+  // --- connect + optional PSK login ---
+  private async getClient(): Promise<DhClient> {
+    await this.ensureDhLoaded();
+    if (this.client) return this.client;
+
+    this.client = new this.dh.CoreClient(environment.DEEPHAVEN_BASE_URL);
+
+    if (environment.DEEPHAVEN_PSK) {
+      await this.client.login({
+        type: 'io.deephaven.authentication.psk.PskAuthenticationHandler',
+        token: environment.DEEPHAVEN_PSK,
+      });
+    }
+    return this.client;
+  }
+
+  private async getIde(): Promise<IdeSession> {
+    if (this.ide) return this.ide;
+    const client = await this.getClient();
+    const ideConn: IdeConnection = await client.getAsIdeConnection();
+    this.ide = await ideConn.startSession('python'); // default app session
+    return this.ide;
+  }
+
+  // --- helper: create viewport + event listener, pushing rows into subject ---
+  private async bindViewport(table: DhTable, maxRows: number, rows$: BehaviorSubject<any[]>) {
+    const updateHandler = async () => {
+      try {
+        const viewPort = await table.getViewportData();
+        const cols = table.columns;
+        const out: any[] = [];
+        for (let i = 0; i < viewPort.rows.length; i++) {
+          const row = viewPort.rows[i];
+          const obj: Record<string, unknown> = {};
+          for (const c of cols) obj[c.name] = row.get(c);
+          out.push(obj);
+        }
+        this.zone.run(() => rows$.next(out));
+      } catch (e) {
+        console.error('Viewport update error', e);
+      }
+    };
+
+    await table.setViewport(0, Math.max(0, maxRows - 1));
+    table.addEventListener('updated', updateHandler);
+    await updateHandler();
+
+    return () => {
+      try { table.removeEventListener('updated', updateHandler); } catch {}
+    };
+  }
+
+  /**
+   * Stream a DH table by variable name (e.g., 'users_ui'), and
+   * **auto-rebind** whenever orchestrator_status.lastApplied changes.
+   */
+  async streamTableWithRebind(tableName: string, maxRows = 1000): Promise<StreamHandle> {
+    const rows$ = new BehaviorSubject<any[]>([]);
+    const ide = await this.getIde();
+
+    let table: DhTable | null = null;
+    let unlistenTable: (() => void) | null = null;
+
+    // --- function to rebind to the (possibly new) export with same name ---
+    const rebind = async () => {
+      // cleanup old
+      if (unlistenTable) { try { unlistenTable(); } catch {} unlistenTable = null; }
+      if (table) { try { table.close(); } catch {} table = null; }
+
+      // new handle for the SAME export name
+      table = await ide.getTable(tableName);
+      unlistenTable = await this.bindViewport(table, maxRows, rows$);
+    };
+
+    // initial bind
+    await rebind();
+
+    // --- watch orchestrator_status for generation changes ---
+    // We use the 'lastApplied' column to detect swaps in Deephaven.
+    const status: DhTable = await ide.getTable('orchestrator_status');
+    await status.setViewport(0, 0);
+
+    let lastAppliedSeen: string | undefined;
+
+    const statusHandler = async () => {
+      try {
+        const vp = await status.getViewportData();
+        if (vp.rows.length === 0) return;
+
+        const col = status.columns.find((c: any) => c.name === 'lastApplied');
+        const next = vp.rows[0].get(col);
+        if (next !== lastAppliedSeen) {
+          lastAppliedSeen = next;
+          await rebind(); // <- grab the new export behind the same name
+        }
+      } catch (e) {
+        console.error('orchestrator_status watch error', e);
+      }
+    };
+
+    status.addEventListener('updated', statusHandler);
+    await statusHandler();
+
+    // return observable + cleanup
+    return {
+      rows$: rows$.asObservable(),
+      dispose: async () => {
+        try { status.removeEventListener('updated', statusHandler); } catch {}
+        try { status.close(); } catch {}
+        if (unlistenTable) { try { unlistenTable(); } catch {} }
+        if (table) { try { table.close(); } catch {} }
+        rows$.complete();
+      },
+    };
+  }
+}
+```
+
+---
+
+## 2) Component usage
+
+Replace your current `streamTable(...)` usage with the rebind-capable handle. Clean it up in `ngOnDestroy()`.
+
+```ts
+// src/app/components/entity-table.ts (snippet)
+import { StreamHandle, DeephavenService } from '../services/deephaven.service';
+
+export class EntityTable implements OnInit, OnDestroy {
+  private handle?: StreamHandle;
+  private sub?: any;
+
+  constructor(private readonly dhService: DeephavenService) {}
+
+  async ngOnInit() {
+    const source =
+      this.tableNames.length === 1 && this.tableNames[0] === 'user'    ? 'users_ui' :
+      this.tableNames.length === 1 && this.tableNames[0] === 'account' ? 'accounts_ui' :
+      'final_ui';
+
+    this.handle = await this.dhService.streamTableWithRebind(source, 1000);
+
+    this.sub = this.handle.rows$.subscribe(rows => {
+      this.isLoading$.next(false);
+      this.tableDataSource.data = rows;
+      // ... paginator / sorting as you already do
+    });
+  }
+
+  ngOnDestroy(): void {
+    if (this.sub) { try { this.sub.unsubscribe(); } catch {} }
+    if (this.handle) { this.handle.dispose(); }
+  }
+}
+```
+
+---
+
+## 3) Why this works
+
+- The orchestrator keeps old generations alive to avoid IDE/Angular crashes. That means an existing JS `Table` handle keeps streaming the _old_ generation.
+    
+- The service now **listens to** `orchestrator_status.lastApplied`. Every time the back end applies a new control message, that value changes.
+    
+- On change, we **re-bind**: call `ide.getTable(tableName)` again, which returns a handle to the _new_ export behind the same name. We dispose the old listener and close the old table handle to avoid leaks.
+    
+- Your Angular UI stays bound to the same `rows$` observable; underneath, we swap to the new export seamlessly.
+    
+
+---
+
+## 4) Control message format (unchanged)
+
+Keep publishing to the control topic exactly like:
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+You can verify the swap by watching the `orchestrator_status` table in the IDE — `lastApplied` will bump, and your UI will automatically rebind within ~1 update cycle.
+
+---
+
+If you want, I can tailor this to RxJS operators (e.g., exposing a `watchTable(name)` that merges generation and table updates into a single observable), but the handle pattern above is the safest and easiest to debug.
