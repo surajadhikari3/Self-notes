@@ -607,3 +607,331 @@ You can tune:
 - switch to an object shape `{id, ts, payload}` later for perfect dedupe via `id`,
     
 - scope the service as a true singleton (providedIn root) so the SSE stream is shared across pages in the same SPA session.
+----------------------------
+
+
+You got it. Here’s a **drop-in, 0.40.2-safe app** with all fixes baked in:
+
+- Control topic supports **JSON object** _or_ **single JSON string** payload.
+    
+- Correct listener signature `(update, is_replay)`.
+    
+- Right-side dedupe (`last_by("userId")`) + drop null keys to prevent join failure.
+    
+- **Graceful hot-swap** (keeps the previous generation alive ~2s so the IDE/Angular don’t see “dependency cancelled by user”).
+    
+- Exposes `control_raw`, `users_ui`, `accounts_ui`, `final_ui`, and `orchestrator_status`.
+    
+
+---
+
+## 1) Descriptor — `C:\Deephaven\app.d\orchestrator.app`
+
+```properties
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+file_0=orchestrator.py
+```
+
+## 2) App — `C:\Deephaven\app.d\orchestrator.py`
+
+```python
+# Deephaven 0.40.2 — Kafka orchestrator with graceful hot-swap
+
+from threading import Lock, Thread
+import time, json, math
+import pandas as pd
+
+import deephaven.dtypes as dt
+from deephaven.appmode import get_app_state, ApplicationState
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+from deephaven.pandas import to_pandas
+from deephaven import agg as agg
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven import time as dhtime
+
+# --------------------------- CONFIG ---------------------------
+# Initial topics (can be changed at runtime via control topic)
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Kafka client props (edit to match your cluster)
+DATA_KAFKA = {
+    "bootstrap.servers": "localhost:9092",
+    "auto.offset.reset": "latest",
+    # Example for Confluent Cloud:
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "PLAIN",
+    # "sasl.jaas.config": "org.apache.kafka.common.security.plain.PlainLoginModule required "
+    #                     'username="<API_KEY>" password="<API_SECRET>";'
+}
+# Control consumer uses earliest so we always have a last row
+CONTROL_KAFKA = dict(DATA_KAFKA)
+CONTROL_KAFKA["auto.offset.reset"] = "earliest"
+
+# Value specs
+USER_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCOUNT_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+CONTROL_JSON_SPEC   = kc.json_spec({"usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string})
+CONTROL_SIMPLE_SPEC = kc.simple_spec(dt.string)  # value is a JSON string
+# --------------------------------------------------------------
+
+def consume_append(topic: str, spec, cfg):
+    return kc.consume(
+        dict(cfg),
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=spec,
+        table_type=kc.TableType.append(),
+    )
+
+# ---- helpers (module-level; do NOT put inside the class) ----
+def _scalar_str(val, default=""):
+    """Return a clean string for scalar-like values; handle NaN / pd.NA."""
+    try:
+        if val is None:
+            return default
+        try:
+            if pd.isna(val):
+                return default
+        except Exception:
+            pass
+        if isinstance(val, float) and math.isnan(val):
+            return default
+        return str(val).strip()
+    except Exception:
+        return default
+# -------------------------------------------------------------
+
+class Orchestrator:
+    def __init__(self, app: ApplicationState):
+        self.app = app
+        self.lock = Lock()
+        self.resources = []                 # current generation
+        self._last_topics = (None, None, None)
+
+    def _close_list(self, xs):
+        for x in xs or []:
+            try:
+                x.close()
+            except Exception:
+                pass
+
+    # ----------------- hot-swap with grace period -----------------
+    def set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        if not users_topic or not accounts_topic:
+            raise ValueError("Both users_topic and accounts_topic are required")
+
+        with self.lock:
+            old_resources = list(self.resources)  # close after swap
+
+            new_res = []
+            try:
+                # sources
+                users_raw = consume_append(users_topic, USER_SPEC, DATA_KAFKA);         new_res.append(users_raw)
+                accts_raw = consume_append(accounts_topic, ACCOUNT_SPEC, DATA_KAFKA);   new_res.append(accts_raw)
+
+                # projections
+                users = users_raw.view(["userId","name","email","age"]);                new_res.append(users)
+                accts = accts_raw.view(["userId","accountType","balance"]);             new_res.append(accts)
+
+                # ensure unique right side & drop null keys for natural_join
+                accts_non_null = accts.where("userId != null")
+                try:
+                    accts_one = accts_non_null.last_by("userId")
+                except AttributeError:
+                    accts_one = accts_non_null.agg_by(
+                        [agg.last("accountType"), agg.last("balance")], by=["userId"]
+                    )
+                new_res.append(accts_one)
+
+                jt = (join_type or "left").lower()
+                if jt.startswith("inner"):
+                    final = users.join(accts, on=["userId"], joins=["accountType","balance"])
+                else:
+                    final = users.natural_join(accts_one, on=["userId"], joins=["accountType","balance"])
+                new_res.append(final)
+
+                # export (same keys; Angular/IDE keep reading them)
+                self.app["users_ui"]    = users
+                self.app["accounts_ui"] = accts
+                self.app["final_ui"]    = final
+
+                # status row (handy in the Apps panel)
+                self.app["orchestrator_status"] = new_table([
+                    string_col("usersTopic",   [users_topic]),
+                    string_col("accountsTopic",[accounts_topic]),
+                    string_col("joinType",     [jt]),
+                    string_col("lastApplied",  [str(dhtime.dh_now())]),
+                ])
+
+                # publish new generation; remember topics
+                self.resources = new_res
+                self._last_topics = (users_topic, accounts_topic, jt)
+                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{jt}'")
+
+                # delayed close of previous generation (prevents UI “dependency cancelled”)
+                def _close_after_delay(res_list):
+                    try:
+                        time.sleep(2.0)  # tune between 1–3s if needed
+                        self._close_list(res_list)
+                    except Exception:
+                        pass
+                Thread(target=_close_after_delay, args=(old_resources,), daemon=True).start()
+
+            except Exception as e:
+                # if building the new generation failed, close it and keep old live
+                self._close_list(new_res)
+                print("[orchestrator] set_topics error:", e)
+                raise
+    # --------------------------------------------------------------
+
+    # -------- control handling --------
+    def _parse_control_df(self, df: pd.DataFrame):
+        cols = set(df.columns)
+        if {"usersTopic","accountsTopic","joinType"}.issubset(cols):
+            row = df.iloc[0]
+            return (
+                _scalar_str(row.get("usersTopic")),
+                _scalar_str(row.get("accountsTopic")),
+                _scalar_str(row.get("joinType"), "left") or "left",
+            )
+        if "Value" in cols:  # single string payload
+            try:
+                payload = json.loads(_scalar_str(df["Value"].iloc[0]))
+                return (
+                    _scalar_str(payload.get("usersTopic")),
+                    _scalar_str(payload.get("accountsTopic")),
+                    _scalar_str(payload.get("joinType"), "left") or "left",
+                )
+            except Exception as e:
+                print("[orchestrator] control parse error:", e)
+                return None
+        print("[orchestrator] control row had unexpected columns:", list(cols))
+        return None
+
+    def _apply_last_control(self, ctrl_tbl):
+        snap = ctrl_tbl.tail(1).snapshot()
+        if snap.size == 0:
+            return
+        parsed = self._parse_control_df(to_pandas(snap))
+        if not parsed:
+            return
+        users, accts, join = parsed
+        if users and accts and (users, accts, join) != self._last_topics:
+            print(f"[orchestrator] applying control: users='{users}', accounts='{accts}', join='{join}'")
+            self.set_topics(users, accts, join)
+
+    def start_control_listener(self, control_topic: str):
+        # start with JSON spec; if it looks wrong, rebuild with simple
+        ctrl = consume_append(control_topic, CONTROL_JSON_SPEC, CONTROL_KAFKA)
+
+        def rebuild_simple():
+            try: ctrl.close()
+            except Exception: pass
+            return consume_append(control_topic, CONTROL_SIMPLE_SPEC, CONTROL_KAFKA)
+
+        def on_update(_update, _is_replay):
+            try:
+                self._apply_last_control(self.app["control_raw"])
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        self.app["control_raw"] = ctrl
+        disp = listen(ctrl, on_update)
+
+        # initial apply & shape check
+        try:
+            snap = ctrl.tail(1).snapshot()
+            df = to_pandas(snap) if snap.size > 0 else pd.DataFrame()
+            if snap.size > 0 and not ({"usersTopic","accountsTopic"} & set(df.columns)):
+                ctrl2 = rebuild_simple()
+                self.app["control_raw"] = ctrl2
+                try: disp.close()
+                except Exception: pass
+                disp2 = listen(ctrl2, on_update)
+                self.resources.extend([ctrl2, disp2])
+                self._apply_last_control(ctrl2)
+            else:
+                self._apply_last_control(ctrl)
+                self.resources.extend([ctrl, disp])
+        except Exception as e:
+            print("[orchestrator] initial apply err:", e)
+            self.resources.extend([ctrl, disp])
+
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+# --------------------------- BOOT ---------------------------
+_app = get_app_state()
+_orc = Orchestrator(_app)
+try:
+    _orc.set_topics(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+except Exception as boot_err:
+    print("[orchestrator] initial wiring failed:", boot_err)
+_orc.start_control_listener(CONTROL_TOPIC)
+print("[orchestrator] ready")
+```
+
+---
+
+## Run & verify
+
+1. Start Deephaven:
+    
+
+```bash
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+deephaven server --host localhost --port 10000
+```
+
+2. In the IDE → **Applications → Kafka Orchestrator**. Open:
+    
+    - `orchestrator_status` (shows current topics & last applied time)
+        
+    - `control_raw` (you’ll see control messages arrive)
+        
+    - `users_ui`, `accounts_ui`, `final_ui`
+        
+3. Produce a control message (either format works):
+    
+
+**Object form (preferred):**
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+**Single-string form (value is JSON text):**
+
+```
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+You should see in the console:
+
+```
+[orchestrator] applying control: users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
+[orchestrator] topics set users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'
+```
+
+Panels shouldn’t fail; Angular (reading the same exports via the IDE session) keeps working without any session churn.
+
+---
+
+### If anything still acts up
+
+- “Exported table already failed” on `final_ui` → schema/key mismatch on the right side; we already de-dup & remove null `userId`. Confirm both topics have a `userId` string field.
+    
+- No rows in `control_raw` → control consumer not receiving (bootstrap/security/ACL/topic name).
+    
+- Share the first 10 lines of any new stack trace and I’ll pinpoint the exact fix.
