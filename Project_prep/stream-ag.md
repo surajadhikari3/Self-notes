@@ -860,3 +860,320 @@ ORC = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
     
 
 Everything else stays the same (including the proven `listen()` callback shape and the hot-swap logic).
+
+
+
+
+
+
+
+
+
+
+
+----------------
+
+
+Here’s a **copy-paste** orchestration app that works with **Deephaven 0.40.2** and hot-swaps topics when you write a new JSON row to the **control topic**.  
+It exports the **same tickets** (`users_ui`, `accounts_ui`, `final_ui`, `orchestrator_status`, `control_raw`) via **ApplicationState**, so the IDE panels and your Angular client update in place.
+
+> ✅ No deprecated APIs, no extra listener args, no formula functions that don’t exist in 0.40.  
+> ✅ Uses `kc.consume(..., table_type=TableType.append())`, `table_listener.listen(table, callback)` (two parameters), and `app.set(...)`.
+
+---
+
+### File: `app.d/orchestrator.app`
+
+```ini
+id = kafka-orchestrator
+name = Kafka Orchestrator
+type = script
+scriptType = python
+enabled = true
+```
+
+---
+
+### File: `app.d/orchestrator.py`
+
+```python
+# Deephaven 0.40.2 – hot-swappable Kafka → tables, with stable exports
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, List
+from datetime import datetime, timezone
+
+from deephaven.appmode import get_app, ApplicationState
+from deephaven import dtypes as dt, new_table
+from deephaven.table import Table
+from deephaven.table_listener import listen
+from deephaven.pandas import to_pandas
+from deephaven.stream.kafka.consumer import consume as kc_consume, TableType
+from deephaven.stream.kafka import consumer as kc
+from deephaven import DynamicTableWriter
+
+# ---------- CONFIG YOU EDIT ----------
+# Default topics used on startup (will be replaced by control topic updates)
+DEFAULT_USERS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Kafka client properties (fill in your values)
+KAFKA_CONFIG = {
+    "bootstrap.servers": "<host:port>",
+
+    # SASL OAUTHBEARER (example) – tweak / replace for your cluster
+    "security.protocol": "SASL_SSL",
+    "sasl.mechanism": "OAUTHBEARER",
+    "sasl.login.callback.handler.class": "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler",
+    # If you use the OAuth token refresher, leave the rest to your JVM env / JAAS.
+    # For Confluent Cloud or SSL/SCRAM, replace with the appropriate props.
+}
+
+# ---------- JSON SPECS ----------
+# Users stream schema (value only; no Kafka key fields used here)
+USER_SPEC = kc.json_spec([
+    ("userId", dt.string),
+    ("name", dt.string),
+    ("email", dt.string),
+    ("age", dt.int_32),  # use int_32/int_64 that exist in 0.40.x
+])
+
+# Accounts stream schema
+ACCOUNT_SPEC = kc.json_spec([
+    ("userId", dt.string),
+    ("accountType", dt.string),
+    ("balance", dt.double),   # 0.40.x uses dt.double
+])
+
+# Control stream schema – the “switch topics” instructions
+CONTROL_SPEC = kc.json_spec([
+    ("usersTopic", dt.string),
+    ("accountsTopic", dt.string),
+    ("joinType", dt.string),  # "left" or "inner"
+])
+
+# ---------- HELPERS ----------
+def _iso_now() -> str:
+    # Keep status as plain string to avoid Instant dtype pitfalls in 0.40.x
+    return datetime.now(timezone.utc).isoformat()
+
+def _consume(topic: str, value_spec, group_id: Optional[str] = None) -> Table:
+    """Create an append-only Kafka table for topic."""
+    cfg = dict(KAFKA_CONFIG)
+    if group_id:
+        cfg["group.id"] = group_id
+    # NOTE: 0.40.x signature: consume(config, topic, key_spec=None, value_spec=..., table_type=...)
+    return kc_consume(
+        cfg,
+        topic,
+        None,
+        value_spec,
+        table_type=TableType.append()
+    )
+
+def _users_view(users_tbl: Table) -> Table:
+    # Simple UI view – all fields exist with JSON spec types
+    return users_tbl.view(["userId", "name", "email", "age"])
+
+def _accounts_view(accts_tbl: Table) -> Table:
+    return accts_tbl.view(["userId", "accountType", "balance"])
+
+def _join(users_tbl: Table, accts_tbl: Table, join_type: str) -> Table:
+    join_type = (join_type or "left").strip().lower()
+    if join_type == "inner":
+        # Exact-key inner join
+        return users_tbl.join(accts_tbl, on=["userId"])
+    # default: left join (dimension-style)
+    return users_tbl.left_join(accts_tbl, on=["userId"])
+
+# ---------- ORCHESTRATOR ----------
+@dataclass
+class _State:
+    users_topic: str
+    accounts_topic: str
+    join_type: str = "left"
+
+    # currently live tables
+    users_raw: Optional[Table] = None
+    accounts_raw: Optional[Table] = None
+    users_ui: Optional[Table] = None
+    accounts_ui: Optional[Table] = None
+    final_ui: Optional[Table] = None
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.app: ApplicationState = get_app()
+        self.state = _State(users_topic, accounts_topic, (join_type or "left").lower())
+
+        # status writer: one row per applied control (string timestamps = simple & safe)
+        self._status_writer = DynamicTableWriter(
+            ["usersTopic", "accountsTopic", "joinType", "lastApplied"],
+            [dt.string, dt.string, dt.string, dt.string],
+        )
+        self._status = self._status_writer.table
+        self.app.set("orchestrator_status", self._status)
+
+        # build initial
+        print(f"[orchestrator] building for users='{users_topic}', accounts='{accounts_topic}', join='{self.state.join_type}'")
+        self._build(users_topic, accounts_topic, self.state.join_type)
+        print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{self.state.join_type}'")
+
+        # control listener (export the raw control stream as well)
+        ctrl = _consume(CONTROL_TOPIC, CONTROL_SPEC, group_id="orchestrator-control")
+        self.app.set("control_raw", ctrl)
+        self._start_control_listener(ctrl)
+
+    # ---- export & apply ----
+    def _publish(self):
+        # Use ApplicationState.set so viewers keep the same ticket
+        self.app.set("users_ui", self.state.users_ui)
+        self.app.set("accounts_ui", self.state.accounts_ui)
+        self.app.set("final_ui", self.state.final_ui)
+
+    def _apply_status(self):
+        self._status_writer.write_row(
+            self.state.users_topic,
+            self.state.accounts_topic,
+            self.state.join_type,
+            _iso_now()
+        )
+
+    def _build(self, users_topic: str, accounts_topic: str, join_type: str):
+        # Recreate consumers and derived views
+        users_raw = _consume(users_topic, USER_SPEC, group_id="orchestrator-users")
+        accounts_raw = _consume(accounts_topic, ACCOUNT_SPEC, group_id="orchestrator-accounts")
+
+        users_ui = _users_view(users_raw)
+        accounts_ui = _accounts_view(accounts_raw)
+        final_ui = _join(users_ui, accounts_ui, join_type)
+
+        # Swap into state
+        self.state.users_topic = users_topic
+        self.state.accounts_topic = accounts_topic
+        self.state.join_type = join_type
+        self.state.users_raw = users_raw
+        self.state.accounts_raw = accounts_raw
+        self.state.users_ui = users_ui
+        self.state.accounts_ui = accounts_ui
+        self.state.final_ui = final_ui
+
+        # Export with stable names and write status row
+        self._publish()
+        self._apply_status()
+
+    # ---- control listener ----
+    def _start_control_listener(self, control_tbl: Table):
+        def _on_update(update, is_replay):
+            try:
+                added = update.added()
+                if added is None or added.size == 0:
+                    return
+                # Take last added row
+                pdf = to_pandas(added.tail(1))
+                raw_u = str(pdf["usersTopic"].iloc[0]) if "usersTopic" in pdf else None
+                raw_a = str(pdf["accountsTopic"].iloc[0]) if "accountsTopic" in pdf else None
+                raw_j = str(pdf["joinType"].iloc[0]) if "joinType" in pdf else None
+
+                users = (raw_u or "").strip() or self.state.users_topic
+                accts = (raw_a or "").strip() or self.state.accounts_topic
+                join = (raw_j or "").strip().lower() or self.state.join_type
+
+                changed = (users != self.state.users_topic) or (accts != self.state.accounts_topic) or (join != self.state.join_type)
+                print(f"[orchestrator] control row users='{raw_u}' accts='{raw_a}' join='{raw_j}' -> resolved users='{users}', accts='{accts}', join='{join}', changed={changed}")
+
+                if not changed:
+                    # still write a heartbeat row so you can see the listener is alive
+                    self._apply_status()
+                    return
+
+                print(f"[orchestrator] applying control: users='{users}' accounts='{accts}' join='{join}'")
+                self._build(users, accts, join)
+                print(f"[orchestrator] topics set users='{users}' accounts='{accts}' join='{join}'")
+            except Exception as e:
+                # Never let the listener die silently
+                print(f"[orchestrator] control listener err: {e}")
+
+        # 0.40.x signature expects exactly (update, is_replay)
+        listen(control_tbl, _on_update)
+        print(f"[orchestrator] control listener on '{CONTROL_TOPIC}'")
+        print("[orchestrator] ready")
+
+# ---------- Build once on import ----------
+_orc = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+
+# Exported names for IDE / Angular (stable tickets)
+# (The actual Table objects are assigned by app.set(...) in the orchestrator)
+app = get_app()
+app.set("users_ui", _orc.state.users_ui)
+app.set("accounts_ui", _orc.state.accounts_ui)
+app.set("final_ui", _orc.state.final_ui)
+# "orchestrator_status" and "control_raw" are also set above
+```
+
+---
+
+## How to use
+
+1. Put both files under `app.d/` and start Deephaven:
+    
+    ```
+    deephaven server --port 10000
+    ```
+    
+2. Open the IDE. You’ll see exported tables:
+    
+    - `users_ui`
+        
+    - `accounts_ui`
+        
+    - `final_ui`
+        
+    - `orchestrator_status` (shows `usersTopic`, `accountsTopic`, `joinType`, `lastApplied`)
+        
+    - `control_raw` (append-only Kafka control messages you produce)
+        
+3. Produce a control message (JSON) to the **control topic**:
+    
+    ```json
+    {"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+    ```
+    
+    Valid `joinType` values: `"left"` (default) or `"inner"`.
+    
+4. Watch the server console:
+    
+    - You should see:
+        
+        - `control listener on '..._metadata'`
+            
+        - `control row ... changed=True`
+            
+        - `applying control: ...`
+            
+        - `topics set users='...' accounts='...' join='...'`
+            
+    - `orchestrator_status` will tick a new `lastApplied` and show the new topics.
+        
+    - Your **existing** viewers / Angular subscriptions **update in place** because `app.set(...)` keeps the same tickets.
+        
+
+---
+
+## Notes / pitfalls this avoids
+
+- **No `replay_initial`** argument (not in 0.40.x).
+    
+- **No `coalesce`, `iif`, custom datetime casts** that break in 0.40.x.
+    
+- **No `ApplicationState` impostors** – we always export via the real `get_app()` so hot-swaps are visible to the UI.
+    
+- **`DynamicTableWriter`** signature is `(names, dtypes)` only (we use it correctly).
+    
+- **Status `lastApplied` as string** sidesteps Instant dtype conversion errors noted in 0.40.x.
+    
+- **Two-arg listener** (`update, is_replay`) matches 0.40.x.
+    
+
+If your cluster uses a different auth (SCRAM, basic, etc.), just update `KAFKA_CONFIG` accordingly — the rest of the code doesn’t change.
