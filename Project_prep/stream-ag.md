@@ -613,3 +613,250 @@ If you still don’t see switching:
     
 
 This version keeps panels live, prints every step, and swaps topics robustly without the earlier “referent not live” or “no logs” traps.
+
+----------------------------------
+
+Good catch — that stack trace is coming from the **constructor signature change** for `DynamicTableWriter` in 0.40.x. In your build it expects a **single mapping** of column name → dtype, not two separate lists. That’s why you see:
+
+```
+DynamicTableWriter.__init__() takes 2 positional arguments but 3 were given
+```
+
+I’ve patched the status writer and cleaned the imports. Copy–paste this whole file over your current `app.d/orchestrator.py` and restart; nothing else changes.
+
+---
+
+### `app.d/orchestrator.py` (0.40.2)
+
+```python
+# Deephaven 0.40.2 – Kafka Orchestrator (hot-swap topics via control topic)
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List
+import threading
+from datetime import datetime, timezone
+
+import deephaven.dtypes as dt
+from deephaven import DynamicTableWriter
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ------------ Edit these defaults ------------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    # your working Kafka properties here
+}
+# ---------------------------------------------
+
+LINGER_SECONDS = 8
+MAX_LINGER_GENERATIONS = 2
+
+USER_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64,
+})
+ACCT_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double,  # 0.40.x
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string,
+})
+
+# optional left outer join helper (present in many 0.40.x builds)
+try:
+    from deephaven.experimental.outer_joins import left_outer_join as _loj
+except Exception:
+    _loj = None
+
+# exports (stable names the IDE/Angular will read)
+app: dict[str, object] = {}
+users_ui = None
+accounts_ui = None
+final_ui = None
+orchestrator_status = None
+control_raw = None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _consume(topic: str, value_spec):
+    return kc.consume(
+        dict(KAFKA_CONFIG),
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+@dataclass
+class _Gen:
+    users_raw: object
+    accounts_raw: object
+    users_view: object
+    accounts_view: object
+    final_view: object
+
+
+class _StatusBus:
+    """Stable 1-row table that always shows the last applied control."""
+    def __init__(self):
+        # ✅ 0.40.x: pass a single mapping {name: dtype}
+        self._w = DynamicTableWriter({
+            "usersTopic":   dt.string,
+            "accountsTopic":dt.string,
+            "joinType":     dt.string,
+            "lastApplied":  dt.string,
+        })
+        # keep a single row table that updates in-place
+        self.table = self._w.table.last_by()
+
+    def update(self, u: str, a: str, j: str):
+        self._w.write_row(u or "", a or "", (j or "").lower(), _now_iso())
+
+
+def _publish(u_view, a_view, fin_tbl, status_tbl):
+    global users_ui, accounts_ui, final_ui, orchestrator_status
+    users_ui = u_view
+    accounts_ui = a_view
+    final_ui = fin_tbl
+    orchestrator_status = status_tbl
+
+    app["users_ui"] = users_ui
+    app["accounts_ui"] = accounts_ui
+    app["final_ui"] = final_ui
+    app["orchestrator_status"] = orchestrator_status
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self._lock = threading.RLock()
+        self._linger: List[List[object]] = []
+        self._status = _StatusBus()
+
+        self.users_topic = (users_topic or "").strip()
+        self.accounts_topic = (accounts_topic or "").strip()
+        self.join_type = (join_type or "left").lower().strip()
+
+        self._set_topics(self.users_topic, self.accounts_topic, self.join_type)
+        self._start_control_listener(CONTROL_TOPIC)
+        print("[orchestrator] ready")
+
+    def _build_join(self, u_view, a_view, join_type: str):
+        jt = (join_type or "left").lower()
+        if jt.startswith("left"):
+            if _loj is not None:
+                return _loj(u_view, a_view, on="userId", joins=["accountType", "balance"])
+            return u_view.join(a_view, on=["userId"], joins=["accountType", "balance"])
+        if jt in ("inner", "join"):
+            return u_view.join(a_view, on=["userId"], joins=["accountType", "balance"])
+        return u_view.join(a_view, on=["userId"], joins=["accountType", "balance"])
+
+    def _linger_close(self, resources: List[object]):
+        def _close():
+            for r in resources:
+                try: r.close()
+                except Exception: pass
+        t = threading.Timer(LINGER_SECONDS, _close)
+        t.daemon = True
+        t.start()
+        self._linger.append(resources)
+        while len(self._linger) > MAX_LINGER_GENERATIONS:
+            olds = self._linger.pop(0)
+            for r in olds:
+                try: r.close()
+                except Exception: pass
+
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        with self._lock:
+            new_objs: List[object] = []
+            try:
+                print(f"[orchestrator] building for users='{users_topic}', accounts='{accounts_topic}', join='{join_type}'")
+                u_raw = _consume(users_topic, USER_SPEC);    new_objs.append(u_raw)
+                a_raw = _consume(accounts_topic, ACCT_SPEC); new_objs.append(a_raw)
+
+                u_view = u_raw.view(["userId", "name", "email", "age"]);            new_objs.append(u_view)
+                a_view = a_raw.view(["userId", "accountType", "balance"]).where("userId != null"); new_objs.append(a_view)
+
+                fin = self._build_join(u_view, a_view, join_type);                   new_objs.append(fin)
+
+                _publish(u_view, a_view, fin, self._status.table)
+                self._status.update(users_topic, accounts_topic, join_type)
+
+                try:
+                    prev = getattr(self, "gen", None)
+                    if prev is not None:
+                        self._linger_close([prev.users_raw, prev.accounts_raw, prev.users_view, prev.accounts_view, prev.final_view])
+                except Exception:
+                    pass
+
+                self.gen = _Gen(u_raw, a_raw, u_view, a_view, fin)
+                self.users_topic, self.accounts_topic, self.join_type = users_topic, accounts_topic, join_type
+
+                print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+            except Exception as e:
+                for o in new_objs:
+                    try: o.close()
+                    except Exception: pass
+                print("[orchestrator] ERROR set_topics:", e)
+                raise
+
+    def _start_control_listener(self, control_topic: str):
+        global control_raw
+        ctrl = _consume(control_topic, CONTROL_SPEC)
+        control_raw = ctrl
+        app["control_raw"] = control_raw
+
+        def _on_update(update, is_replay):
+            try:
+                rs = update.added()
+                if rs is None or rs.size() == 0:
+                    return
+                rk = rs.lastRowKey()
+
+                def get(col: str) -> str:
+                    try:
+                        cs = ctrl.getColumnSource(col)
+                        v = cs.get(rk) if cs is not None else None
+                        return "" if v is None else str(v).strip()
+                    except Exception:
+                        return ""
+
+                raw_u = get("usersTopic")
+                raw_a = get("accountsTopic")
+                raw_j = get("joinType")
+
+                users = raw_u or self.users_topic
+                accts = raw_a or self.accounts_topic
+                join  = (raw_j or self.join_type or "left").lower()
+
+                changed = (users != self.users_topic) or (accts != self.accounts_topic) or (join != self.join_type)
+                print(f"[orchestrator] control row users='{raw_u}' accts='{raw_a}' join='{raw_j}' "
+                      f"-> resolved '{users}','{accts}','{join}' changed={changed}")
+
+                if changed:
+                    self._set_topics(users, accts, join)
+                else:
+                    self._status.update(users, accts, join)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        listen(ctrl, _on_update)  # 0.40.2: on_update(update, is_replay)
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+
+# build once at import – exported names remain constant
+ORC = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+**Why this fixes your error**
+
+- Your 0.40.2 build expects `DynamicTableWriter(<mapping>)`. Passing two lists made it think you supplied three positional args (including `self`). The mapping form is compatible with 0.40.2 and avoids the constructor mismatch you just hit.
+    
+
+Everything else stays the same (including the proven `listen()` callback shape and the hot-swap logic).
