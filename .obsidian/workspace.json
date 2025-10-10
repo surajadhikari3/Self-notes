@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "interview-prep/Prep Notes.md",
+                "file": "Project_prep/stream-ag.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Prep Notes"
+              "title": "stream-ag"
             }
           }
         ]
@@ -196,6 +196,7 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
+    "interview-prep/Prep Notes.md",
     "interview-prep/Minute pitch.md",
     "Project_prep/stream-ag.md",
     "Project_prep/GRPC -- way.md",
@@ -221,7 +222,6 @@
     "Gems/Java 8.md",
     "Gems/Kafka.md",
     "Cloud/AWS.md",
-    "interview-prep/Prep Notes.md",
     "Pasted image 20250914211139.png",
     "interview-prep",
     "Project_prep/ui/single-user-gap.svg",
