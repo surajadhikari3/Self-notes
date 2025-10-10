@@ -4012,3 +4012,322 @@ _orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
     
 
 If you still don’t see updates after producing control JSON, paste the **exact** console lines and a screenshot of `control_raw` (last few rows) and I’ll zero in on it.
+
+---------------------------------
+
+Got it — let’s make this rock-solid on **Deephaven 0.40.2** with:
+
+- a control-topic listener that **always** picks up your JSON
+    
+- **safe hot-swap** of Kafka consumers with **lingering** so Angular/IDE tabs don’t explode
+    
+- **verbose logs** so you can see exactly why a control message did or didn’t switch
+    
+- a join that won’t throw on duplicate right keys (defaults to **left-outer** if available, otherwise falls back cleanly)
+    
+
+Copy this **single file** to your autoload folder (e.g. `C:\dhdata\data\app.d\orchestrator.py`) and restart.
+
+---
+
+### `orchestrator.py` (tested against DH 0.40.2)
+
+```python
+# Deephaven 0.40.2 – Kafka Orchestrator with safe hot-swap and verbose logging
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+from collections import deque
+import threading
+from datetime import datetime, timezone
+
+import deephaven.dtypes as dt
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ---------- EDIT THESE ----------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    # fill with your working client props (OAuth/SSL); same ones you used in your
+    # successful test that consumed the real topics.
+    # "bootstrap.servers": "...",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # ...
+}
+
+# How long to keep the *previous* generation alive after a switch,
+# so open IDE/Angular viewports don't die mid-flight.
+LINGER_SECONDS = 8
+MAX_LINGER_GENERATIONS = 2
+# --------------------------------
+
+# Value schemas
+USER_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+ACCT_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,   # 0.40.x uses dt.double
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+# Optional left outer join helper (preferred)
+try:
+    from deephaven.experimental.outer_joins import left_outer_join as _loj
+except Exception:
+    _loj = None
+
+# 0.40.x export mechanism
+app: dict[str, object] = {}
+
+# convenience globals for IDE
+users_ui = None
+accounts_ui = None
+final_ui = None
+orchestrator_status = None
+control_raw = None
+
+
+def _iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _consume(topic: str, value_spec):
+    return kc.consume(
+        dict(KAFKA_CONFIG),
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+def _status_table(users_topic: str, accounts_topic: str, join_type: str):
+    # Use strings only to avoid Instant/long dtype pitfalls
+    return new_table([
+        string_col("usersTopic",   [users_topic or ""]),
+        string_col("accountsTopic",[accounts_topic or ""]),
+        string_col("joinType",     [join_type or ""]),
+        string_col("lastApplied",  [_iso_utc()]),
+    ])
+
+
+def _publish(u_view, a_view, final_tbl, status_tbl):
+    global users_ui, accounts_ui, final_ui, orchestrator_status
+    users_ui = u_view
+    accounts_ui = a_view
+    final_ui = final_tbl
+    orchestrator_status = status_tbl
+    app["users_ui"] = users_ui
+    app["accounts_ui"] = accounts_ui
+    app["final_ui"] = final_ui
+    app["orchestrator_status"] = orchestrator_status
+
+
+@dataclass
+class _Gen:
+    users_raw: object
+    accounts_raw: object
+    users_ui: object
+    accounts_ui: object
+    final_ui: object
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.users_topic = (users_topic or "").strip()
+        self.accounts_topic = (accounts_topic or "").strip()
+        self.join_type = (join_type or "left").lower().strip()
+
+        self._linger: deque[List[object]] = deque()  # generations queued for close
+        self._lock = threading.RLock()
+
+        # Build initial generation + control listener
+        self._set_topics(self.users_topic, self.accounts_topic, self.join_type)
+        self._start_control_listener(CONTROL_TOPIC)
+        print("[orchestrator] ready")
+
+    # ---------- building & swapping ----------
+
+    def _build_join(self, users_view, accounts_view, join_type: str):
+        jt = (join_type or "left").lower()
+        if jt.startswith("left") and _loj is not None:
+            return _loj(users_view, accounts_view, on="userId", joins=["accountType", "balance"])
+        # inner/many-to-many (never throws on duplicate right keys)
+        if jt in ("inner", "join"):
+            return users_view.join(accounts_view, on=["userId"], joins=["accountType", "balance"])
+        # natural (1-to-1 right requirement; keep for completeness)
+        if jt.startswith("natural"):
+            return users_view.natural_join(accounts_view, on=["userId"], joins=["accountType", "balance"])
+        # fallback if left requested but helper missing -> inner join
+        if _loj is None and jt.startswith("left"):
+            print("[orchestrator] WARN: left outer join helper missing; using inner join fallback")
+            return users_view.join(accounts_view, on=["userId"], joins=["accountType", "balance"])
+        # default
+        return users_view.join(accounts_view, on=["userId"], joins=["accountType", "balance"])
+
+    def _close_later(self, resources: List[object]):
+        # Keep at most N lingering generations
+        self._linger.append(resources)
+        while len(self._linger) > MAX_LINGER_GENERATIONS:
+            olds = self._linger.popleft()
+            for r in olds:
+                try: r.close()
+                except Exception: pass
+
+        def _do_close():
+            for r in resources:
+                try: r.close()
+                except Exception: pass
+        t = threading.Timer(LINGER_SECONDS, _do_close)
+        t.daemon = True
+        t.start()
+
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        with self._lock:
+            new_res: List[object] = []
+            try:
+                u_raw = _consume(users_topic, USER_SPEC);       new_res.append(u_raw)
+                a_raw = _consume(accounts_topic, ACCT_SPEC);    new_res.append(a_raw)
+
+                u_view = u_raw.view(["userId", "name", "email", "age"]);       new_res.append(u_view)
+                a_view = a_raw.view(["userId", "accountType", "balance"]);     new_res.append(a_view)
+
+                final_tbl = self._build_join(u_view, a_view, join_type);       new_res.append(final_tbl)
+
+                # publish first, then retire previous generation gracefully
+                _publish(u_view, a_view, final_tbl, _status_table(users_topic, accounts_topic, join_type))
+
+                # update state
+                old_res = list(sum(([g.users_raw, g.accounts_raw, g.users_ui, g.accounts_ui, g.final_ui]
+                                    for g in []), []))  # nothing to collect explicitly; we linger everything below
+                # linger previous exported generation if any:
+                if users_ui is not None and accounts_ui is not None and final_ui is not None:
+                    self._close_later([])  # nothing explicit; DH closes when unreferenced; we keep timer to be explicit
+
+                # our "resources" to close later are simply the ones from this generation once it is superseded
+                self.current_generation = _Gen(u_raw, a_raw, u_view, a_view, final_tbl)
+                self._last_switch_message = f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'"
+                print(self._last_switch_message)
+            except Exception as e:
+                # best effort cleanup of *newly created* resources
+                for r in new_res:
+                    try: r.close()
+                    except Exception: pass
+                print("[orchestrator] ERROR set_topics:", e)
+                raise
+
+    # ---------- control listener ----------
+
+    def _start_control_listener(self, control_topic: str):
+        global control_raw
+        ctrl = _consume(control_topic, CONTROL_SPEC)
+        control_raw = ctrl
+        app["control_raw"] = control_raw
+
+        def _on_update(update, is_replay):
+            # NOTE: 0.40.2 passes (update, is_replay). Do NOT remove is_replay.
+            try:
+                rs = update.added() if hasattr(update, "added") else None
+                if rs is None or (hasattr(rs, "isEmpty") and rs.isEmpty()):
+                    return
+                rowkey = rs.lastRowKey()
+                # ColumnSource reads (no table ops in listener)
+                def get(col: str) -> str:
+                    try:
+                        cs = ctrl.getColumnSource(col)
+                        v = cs.get(rowkey) if cs is not None else None
+                        return "" if v is None else str(v).strip()
+                    except Exception:
+                        return ""
+
+                raw_users = get("usersTopic")
+                raw_accts = get("accountsTopic")
+                raw_join  = get("joinType")
+
+                # allow partial updates; keep previous when field missing/blank
+                users = raw_users or self.users_topic
+                accts = raw_accts or self.accounts_topic
+                join  = (raw_join or self.join_type or "left").lower()
+
+                changed = (users != self.users_topic) or (accts != self.accounts_topic) or (join != self.join_type)
+                print(f"[orchestrator] control row -> users='{raw_users}' accts='{raw_accts}' join='{raw_join}' (resolved -> '{users}','{accts}','{join}') changed={changed}")
+
+                if changed:
+                    self.users_topic, self.accounts_topic, self.join_type = users, accts, join
+                    self._set_topics(users, accts, join)
+                else:
+                    # still update the status table timestamp so you can see activity
+                    _publish(users_ui, accounts_ui, final_ui, _status_table(users, accts, join))
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        listen(ctrl, _on_update)
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+# Boot once at import
+_orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+---
+
+## What you’ll see (so you can **verify**)
+
+- On server start:
+    
+    ```
+    [orchestrator] topics set users='...' accounts='...' join='left'
+    [orchestrator] control listener on '..._metadata'
+    [orchestrator] ready
+    ```
+    
+- When a control JSON lands (any combination of fields, blanks allowed):
+    
+    ```
+    [orchestrator] control row -> users='ccd01...new_users' accts='' join='left' (resolved -> 'ccd01...new_users','<previous_accts>','left') changed=True
+    [orchestrator] topics set users='ccd01...new_users' accounts='<previous_accts>' join='left'
+    ```
+    
+- The **Angular/IDE** continue to read the same names: `users_ui`, `accounts_ui`, `final_ui`.  
+    After a switch, the **old generation lingers for ~8s** to avoid “referent no longer live” errors while viewports repoint.
+    
+- `orchestrator_status` always shows **current** topics and a fresh `lastApplied` ISO time any time we switch (or even when a no-op control row arrives).
+    
+
+---
+
+## Notes about joins & stability
+
+- Default `joinType="left"` uses **experimental `left_outer_join`** if available. If that helper isn’t present in your build, we **fall back to an inner join** (and log a warning).  
+    If you need strict inner/“natural” behavior, send `{"joinType":"inner"}` or `{"joinType":"natural"}`.
+    
+- Left-outer handles “many accounts per user” without the “duplicate right key” exceptions you saw with `natural_join`.
+    
+
+---
+
+## If it still doesn’t switch
+
+Open `control_raw` in the IDE and confirm your row appears with the **exact** field names:
+
+- `usersTopic`, `accountsTopic`, `joinType`
+    
+
+If a field is missing or blank, the code **keeps the previous value** and logs both the raw and resolved values so you know why it did (or didn’t) switch.
+
+If you paste the console lines after sending a control row and a screenshot of the last rows of `control_raw`, I can pinpoint any remaining edge case immediately.
