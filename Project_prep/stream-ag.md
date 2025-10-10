@@ -1069,3 +1069,121 @@ If you still don’t see “control received …” in `orchestrator_logs` when 
 - You’re producing to the **same control topic** (value JSON, not stringified inside another field).
     
 - Kafka auth works (since `control_raw` is populating, this part is fine).
+--------------------------------
+
+
+Great—your log screenshot shows:
+
+> `control listener err: 'dict' object has no attribute 'siz…'`
+
+That happens because, in Deephaven **0.40.2**, the `listen()` callback sometimes delivers the update as a **dict-like** wrapper (with keys `added`, `removed`, …), not the object that has `.added()` / `.size()` methods. So our handler tried to call `.size()` on a dict.
+
+Here’s a drop-in fix that’s compatible with 0.40.2. **Replace your `_start_control_listener` method with this version** (it handles both dict and object shapes, keeps a strong reference so it doesn’t get GC’d, and logs clearly when a change is applied/ignored):
+
+```python
+def _start_control_listener(self, control_topic: str):
+    global control_raw
+    ctrl = _consume(control_topic, CONTROL_SPEC)
+    control_raw = ctrl
+    app["control_raw"] = control_raw
+
+    def _get_added_row_key(upd):
+        """Return the last added row key for 0.40.2 in a shape-agnostic way."""
+        try:
+            # update may be a dict or an object; 'added' may be a field or a method
+            added = upd.get("added") if isinstance(upd, dict) else getattr(upd, "added", None)
+            if callable(added):
+                added = added()  # old-style API
+        except Exception:
+            added = None
+        if added is None:
+            return None
+
+        # last row key method names vary
+        for name in ("lastRowKey", "last_row_key"):
+            f = getattr(added, name, None)
+            if callable(f):
+                try:
+                    return f()
+                except Exception:
+                    pass
+
+        # fallback: iterate the RowSet
+        try:
+            it = added.iterator()
+            last = None
+            while it.hasNext():
+                last = it.nextLong()
+            return last
+        except Exception:
+            return None
+
+    def _on_update(upd, is_replay):
+        try:
+            rk = _get_added_row_key(upd)
+            if rk is None:
+                return
+
+            def get_val(col: str) -> str:
+                try:
+                    cs = ctrl.getColumnSource(col)
+                    v = cs.get(rk)
+                    return "" if v is None else str(v).strip()
+                except Exception:
+                    return ""
+
+            raw_u = get_val("usersTopic")
+            raw_a = get_val("accountsTopic")
+            raw_j = get_val("joinType")
+
+            users = raw_u or self.users_topic
+            accts = raw_a or self.accounts_topic
+            join  = (raw_j or self.join_type or "left").lower()
+
+            changed = (users != self.users_topic) or (accts != self.accounts_topic) or (join != self.join_type)
+            self._log.info(
+                f"control received: users='{raw_u}' accounts='{raw_a}' join='{raw_j}' -> "
+                f"resolved users='{users}', accounts='{accts}', join='{join}', changed={changed}"
+            )
+
+            if changed:
+                self._set_topics(users, accts, join)
+            else:
+                # still bump lastApplied so you can verify the event landed
+                self._status.update(users, accts, join)
+
+        except Exception as e:
+            self._log.error(f"control listener err: {e}")
+
+    # keep a strong reference so the listener doesn’t get GC’d
+    self._control_disp = listen(ctrl, _on_update)
+    app["control_listener_handle"] = self._control_disp
+    self._log.info(f"control listener on '{control_topic}'")
+```
+
+### How to verify it’s working
+
+1. Produce to your control topic exactly like:
+    
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+2. In Deephaven, open **`orchestrator_logs`**:
+    
+    - You should see:  
+        `control received: ... resolved users='<NEW_USERS>', accounts='<NEW_ACCTS>', ... changed=true`
+        
+    - Followed by:  
+        `building: users='<NEW_USERS>', accounts='<NEW_ACCTS>', ...`  
+        `topics set: users='<NEW_USERS>' accounts='<NEW_ACCTS>' join='left'`
+        
+3. Open **`orchestrator_status`**:
+    
+    - `usersTopic` / `accountsTopic` should show the new values, and `lastApplied` should update.
+        
+4. Open **`users_ui`**, **`accounts_ui`**, **`final_ui`** to confirm the streams are from the new topics.
+    
+
+This fixes the “dict has no size” error and makes the switch visible in logs and status. If anything else pops up, paste the latest line from `orchestrator_logs`—that table now gives us precise breadcrumbs to diagnose quickly.
