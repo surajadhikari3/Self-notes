@@ -742,3 +742,330 @@ control_raw = control_raw if "control_raw" in globals() else None
 4. You should immediately see rows in:
     
     - **
+- --------------------
+
+You’re seeing no reaction because the control table listener is getting GC’d, so your callback never fires. Also, you don’t have table-level logging you can watch for “applied” events.
+
+Below is a **drop-in orchestrator for Deephaven 0.40.2** that fixes both:
+
+- Keeps a **strong reference** to the control listener (`self._control_disp`) so it doesn’t get collected.
+    
+- Adds an **in-process log table** (`orchestrator_logs`) so you can _see_ when a control message is received, resolved, and applied (or ignored).
+    
+- Uses only 0.40.2-safe APIs (no `from __future__`, no Instant types, `DynamicTableWriter({...})`, `dt.double`, `dt.int64`, etc.).
+    
+- Defensive join (filters null `userId` on right, supports left/inner).
+    
+- Status table updates a string ISO timestamp.
+    
+
+### What to do
+
+1. Replace your `app.d/orchestrator.py` with this file.
+    
+2. Restart DH server.
+    
+3. Produce to the control topic:
+    
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+4. Watch the **`orchestrator_logs`** and **`orchestrator_status`** tables. You should see “control received …” then “topics set …”.
+    
+
+---
+
+```python
+# Deephaven 0.40.2 – Kafka Orchestrator with reliable control listener + log table
+
+from dataclasses import dataclass
+from typing import List
+import threading
+from datetime import datetime, timezone
+
+import deephaven.dtypes as dt
+from deephaven import DynamicTableWriter
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ──────────────────────────────────────────────────────────────────────────────
+# EDIT THESE DEFAULTS
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    # put your working Kafka client properties here
+    # "bootstrap.servers": "...",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.token.endpoint.url": "...",
+    # "sasl.oauthbearer.sub.claim.name": "client_id",
+    # "sasl.oauthbearer.client.id": "...",
+    # "sasl.oauthbearer.client.secret": "...",
+    # "sasl.oauthbearer.extensions.logicalCluster": "...",
+    # "sasl.oauthbearer.extensions.identityPoolId": "...",
+    # "ssl.endpoint.identification.algorithm": "HTTPS",
+}
+# ──────────────────────────────────────────────────────────────────────────────
+
+LINGER_SECONDS = 8
+MAX_LINGER_GENERATIONS = 2
+
+# JSON value specs (0.40.x mapping form)
+USER_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+ACCT_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,  # 0.40.x dtype
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+# Optional left outer join (if ext is present)
+try:
+    from deephaven.experimental.outer_joins import left_outer_join as _loj
+except Exception:
+    _loj = None
+
+# Exports that Angular / IDE will read
+app: dict[str, object] = {}
+users_ui = None
+accounts_ui = None
+final_ui = None
+orchestrator_status = None
+orchestrator_logs = None
+control_raw = None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _consume(topic: str, value_spec):
+    # Use append table type; ignore keys
+    return kc.consume(
+        dict(KAFKA_CONFIG),
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+class _LogBus:
+    def __init__(self):
+        self._w = DynamicTableWriter({
+            "ts": dt.string,   # ISO time
+            "level": dt.string,
+            "msg": dt.string,
+        })
+        self.table = self._w.table
+
+    def info(self, msg: str):  self._w.write_row(_now_iso(), "INFO",  msg)
+    def warn(self, msg: str):  self._w.write_row(_now_iso(), "WARN",  msg)
+    def error(self, msg: str): self._w.write_row(_now_iso(), "ERROR", msg)
+
+
+class _StatusBus:
+    """A 1-row table with last applied topics & join."""
+    def __init__(self):
+        self._w = DynamicTableWriter({
+            "usersTopic": dt.string,
+            "accountsTopic": dt.string,
+            "joinType": dt.string,
+            "lastApplied": dt.string,  # ISO string
+        })
+        # last_by() across all rows: keep latest single row
+        self.table = self._w.table.last_by()
+
+    def update(self, users: str, accts: str, join_type: str):
+        self._w.write_row(users or "", accts or "", (join_type or "").lower(), _now_iso())
+
+
+def _publish(u_view, a_view, fin_tbl, status_tbl, log_tbl):
+    global users_ui, accounts_ui, final_ui, orchestrator_status, orchestrator_logs
+    users_ui = u_view
+    accounts_ui = a_view
+    final_ui = fin_tbl
+    orchestrator_status = status_tbl
+    orchestrator_logs = log_tbl
+
+    app["users_ui"] = users_ui
+    app["accounts_ui"] = accounts_ui
+    app["final_ui"] = final_ui
+    app["orchestrator_status"] = orchestrator_status
+    app["orchestrator_logs"] = orchestrator_logs
+
+
+@dataclass
+class _Gen:
+    users_raw: object
+    accounts_raw: object
+    users_view: object
+    accounts_view: object
+    final_view: object
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self._lock = threading.RLock()
+        self._linger: List[List[object]] = []
+        self._status = _StatusBus()
+        self._log = _LogBus()
+        self._control_disp = None  # strong ref to listener
+
+        self.users_topic = (users_topic or "").strip()
+        self.accounts_topic = (accounts_topic or "").strip()
+        self.join_type = (join_type or "left").lower().strip()
+
+        _publish(None, None, None, self._status.table, self._log.table)
+
+        self._set_topics(self.users_topic, self.accounts_topic, self.join_type)
+        self._start_control_listener(CONTROL_TOPIC)
+        self._log.info("ready")
+
+    # Build the join with guard rails
+    def _build_join(self, u_view, a_view, join_type: str):
+        jt = (join_type or "left").lower()
+        # Clean right side to avoid “duplicate right key for null”
+        a_clean = a_view.where("userId != null")
+        if jt.startswith("left"):
+            if _loj is not None:
+                return _loj(u_view, a_clean, on="userId", joins=["accountType", "balance"])
+            return u_view.join(a_clean, on=["userId"], joins=["accountType", "balance"])
+        # inner
+        return u_view.join(a_clean, on=["userId"], joins=["accountType", "balance"])
+
+    def _linger_close(self, resources: List[object]):
+        def _close():
+            for r in resources:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+        t = threading.Timer(LINGER_SECONDS, _close)
+        t.daemon = True
+        t.start()
+        self._linger.append(resources)
+        while len(self._linger) > MAX_LINGER_GENERATIONS:
+            olds = self._linger.pop(0)
+            for r in olds:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        with self._lock:
+            new_objs: List[object] = []
+            try:
+                self._log.info(f"building: users='{users_topic}', accounts='{accounts_topic}', join='{join_type}'")
+                u_raw = _consume(users_topic, USER_SPEC);    new_objs.append(u_raw)
+                a_raw = _consume(accounts_topic, ACCT_SPEC); new_objs.append(a_raw)
+
+                u_view = u_raw.view(["userId", "name", "email", "age"]); new_objs.append(u_view)
+                a_view = a_raw.view(["userId", "accountType", "balance"]); new_objs.append(a_view)
+
+                fin = self._build_join(u_view, a_view, join_type); new_objs.append(fin)
+
+                # Publish for Angular/IDE and update status
+                _publish(u_view, a_view, fin, self._status.table, self._log.table)
+                self._status.update(users_topic, accounts_topic, join_type)
+
+                # Linger/close the previous generation
+                try:
+                    prev = getattr(self, "gen", None)
+                    if prev is not None:
+                        self._linger_close([prev.users_raw, prev.accounts_raw, prev.users_view, prev.accounts_view, prev.final_view])
+                except Exception:
+                    pass
+
+                self.gen = _Gen(u_raw, a_raw, u_view, a_view, fin)
+                self.users_topic, self.accounts_topic, self.join_type = users_topic, accounts_topic, join_type
+
+                self._log.info(f"topics set: users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+            except Exception as e:
+                for o in new_objs:
+                    try:
+                        o.close()
+                    except Exception:
+                        pass
+                self._log.error(f"set_topics error: {e}")
+                raise
+
+    def _start_control_listener(self, control_topic: str):
+        global control_raw
+        ctrl = _consume(control_topic, CONTROL_SPEC)
+        control_raw = ctrl
+        app["control_raw"] = control_raw
+
+        def _on_update(update, is_replay):
+            try:
+                rs = update.added()
+                if rs is None or rs.size() == 0:
+                    return
+                rk = rs.lastRowKey()
+
+                def get(col: str) -> str:
+                    try:
+                        cs = ctrl.getColumnSource(col)
+                        v = cs.get(rk) if cs is not None else None
+                        return "" if v is None else str(v).strip()
+                    except Exception:
+                        return ""
+
+                raw_u = get("usersTopic")
+                raw_a = get("accountsTopic")
+                raw_j = get("joinType")
+
+                users = raw_u or self.users_topic
+                accts = raw_a or self.accounts_topic
+                join  = (raw_j or self.join_type or "left").lower()
+
+                changed = (users != self.users_topic) or (accts != self.accounts_topic) or (join != self.join_type)
+                self._log.info(f"control received: users='{raw_u}' accounts='{raw_a}' join='{raw_j}' "
+                               f"-> resolved '{users}','{accts}','{join}' changed={changed}")
+
+                if changed:
+                    self._set_topics(users, accts, join)
+                else:
+                    # Even if unchanged, update 'lastApplied' so you can see the event landed
+                    self._status.update(users, accts, join)
+            except Exception as e:
+                self._log.error(f"control listener err: {e}")
+
+        # ✅ Keep a strong reference so it NEVER gets GC’d
+        self._control_disp = listen(ctrl, _on_update)
+        app["control_listener_handle"] = self._control_disp
+        self._log.info(f"control listener on '{control_topic}'")
+
+
+# Build once on import and export stable names
+ORC = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+### Why it wasn’t switching
+
+- In 0.40.2, if you don’t keep a reference to the listener handle, it can be garbage-collected and your `_on_update` will stop firing. The code above keeps `self._control_disp` (and also exposes it via `app`) so the listener stays alive.
+    
+- The log table (`orchestrator_logs`) shows **exactly** when a control record is consumed and whether a rebuild was performed (`changed=true`) or ignored (`changed=false`).
+    
+
+If you still don’t see “control received …” in `orchestrator_logs` when you produce to the control topic, double-check:
+
+- The message fields are spelled **exactly**: `usersTopic`, `accountsTopic`, `joinType`.
+    
+- You’re producing to the **same control topic** (value JSON, not stringified inside another field).
+    
+- Kafka auth works (since `control_raw` is populating, this part is fine).
