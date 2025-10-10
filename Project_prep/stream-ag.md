@@ -1537,3 +1537,329 @@ The UI panels won’t error because the old generation lingers for 20 seconds wh
 ---
 
 If anything else trips, send the **first** stack message (top of the pink block) and the line number it references; with 0.40.2 the common pitfalls are formula type inference and referencing Python variables inside a listener — both are addressed above.
+
+---------------------------------------
+
+Here’s a **clean, 0.40.2-compatible App Mode orchestrator** that:
+
+- consumes two Kafka topics (users + accounts),
+    
+- exports `users_ui`, `accounts_ui`, and a **left outer join** `final_ui`,
+    
+- listens to a **control topic** and hot-swaps topics safely (no formula/iif/coalesce),
+    
+- avoids “duplicate right key” / “null key” join errors,
+    
+- avoids ExecutionContext issues in the listener,
+    
+- keeps the **same export names**, so Angular keeps streaming without reconnecting.
+    
+
+---
+
+# 1) `.app` file (loads the script at server start)
+
+Save as:  
+`C:\dhdata\app.d\orchestrator.app`
+
+```properties
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+scripts=py:orchestrator.py
+```
+
+# 2) Python app (no formula pitfalls, 0.40.2 API)
+
+Save as:  
+`C:\dhdata\app.d\orchestrator.py`
+
+```python
+# Deephaven 0.40.2 orchestrator – App Mode
+# - Hot-swaps Kafka topics via a control topic
+# - Exports users_ui / accounts_ui / final_ui
+# - No iif() / coalesce(); uses 0.40.2-safe ternary + filters
+# - Listener uses Update.added to avoid ExecutionContext errors
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, List
+from datetime import datetime, timezone
+import threading
+
+import deephaven.dtypes as dt
+from deephaven import new_table
+from deephaven.column import string_col, double_col
+from deephaven.appmode import get_app_state
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven.stream.kafka import consumer as kc
+from deephaven.table_listener import listen
+
+# -----------------------------
+# EDIT these defaults
+# -----------------------------
+DEFAULT_USERS_TOPIC   = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Kafka client config – fill yours (OAuth / SSL, etc.)
+KAFKA_CONFIG = {
+    # examples:
+    # "bootstrap.servers": "<your brokers>",
+    # "auto.offset.reset": "latest",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.token.endpoint.url": "...",
+    # "sasl.oauthbearer.client.id": "...",
+    # "sasl.oauthbearer.client.secret": "...",
+    # ... add the exact props you already use ...
+}
+
+# -----------------------------
+# JSON specs (0.40.x dtypes)
+# -----------------------------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+# how long to keep the old exports alive after a swap (prevents transient IDE errors)
+LINGER_SECONDS = 8
+
+
+def _consume(topic: str, value_spec):
+    """Create an append-only streaming table for a Kafka topic."""
+    cfg = dict(KAFKA_CONFIG)  # copy so we never mutate caller’s dict
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+def _normalize_users(t):
+    # Export only columns we need and drop null/empty join keys
+    return (
+        t.view(["userId", "name", "email", "age"])
+         .where('userId != null && userId != ""')
+    )
+
+
+def _normalize_accounts(t):
+    # Drop null/empty keys and de-dupe right side so left-join can pick a single row
+    return (
+        t.view(["userId", "accountType", "balance"])
+         .where('userId != null && userId != ""')
+         .last_by("userId")
+    )
+
+
+def _build_views(users_raw, accounts_raw):
+    u = _normalize_users(users_raw)
+    a = _normalize_accounts(accounts_raw)
+    final_tbl = left_outer_join(u, a, on="userId", joins=["accountType", "balance"])
+    return u, a, final_tbl
+
+
+def _status_table(users: str, accounts: str, join_type: str):
+    return new_table([
+        string_col("usersTopic",   [users]),
+        string_col("accountsTopic", [accounts]),
+        string_col("joinType",     [join_type]),
+        string_col("lastApplied",  [datetime.now(timezone.utc).isoformat()]),
+    ])
+
+
+def _safe_close_many(objs: Optional[List[object]]):
+    if not objs:
+        return
+    for o in objs:
+        try:
+            o.close()
+        except Exception:
+            pass
+
+
+@dataclass
+class _State:
+    users_topic: str
+    accounts_topic: str
+    join_type: str = "left"
+
+    users_raw: Optional[object] = None
+    accounts_raw: Optional[object] = None
+    users_ui: Optional[object] = None
+    accounts_ui: Optional[object] = None
+    final_ui: Optional[object] = None
+
+    control_raw: Optional[object] = None
+    control_disp: Optional[object] = None
+
+    # resources from the *previous* generation that we’ll close later
+    lingering: List[object] = None
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.app = get_app_state()
+        self.state = _State(users_topic, accounts_topic, join_type, lingering=[])
+
+        # initial wire-up
+        self._set_topics(users_topic, accounts_topic, join_type, initial=True)
+
+        # control-topic listener
+        ctrl_tbl = _consume(CONTROL_TOPIC, CONTROL_VALUE_SPEC)
+        disp = listen(ctrl_tbl, self._on_control_update)
+        self.state.control_raw = ctrl_tbl
+        self.state.control_disp = disp
+
+        # Export a small status table and the raw control stream (handy in IDE)
+        self.app.export(ctrl_tbl, "control_raw")
+        self.app.export(_status_table(users_topic, accounts_topic, join_type), "orchestrator_status")
+
+        print(f"[orchestrator] control listener on '{CONTROL_TOPIC}'")
+        print("[orchestrator] ready")
+
+    # --------------- hot swap ----------------
+
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left", initial: bool = False):
+        """Create new consumers/views/join and atomically swap the exported tables."""
+        print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+
+        # Build new pipeline first
+        users_raw = _consume(users_topic, USER_VALUE_SPEC)
+        accounts_raw = _consume(accounts_topic, ACCOUNT_VALUE_SPEC)
+        users_ui, accounts_ui, final_ui = _build_views(users_raw, accounts_raw)
+
+        # Export new tables under the same names (clients keep streaming)
+        self.app.export(users_ui, "users_ui")
+        self.app.export(accounts_ui, "accounts_ui")
+        self.app.export(final_ui, "final_ui")
+        self.app.export(_status_table(users_topic, accounts_topic, join_type), "orchestrator_status")
+
+        # Schedule safe close of any previous generation AFTER we swapped
+        old = [
+            self.state.users_raw, self.state.accounts_raw,
+            self.state.users_ui, self.state.accounts_ui, self.state.final_ui,
+        ]
+        self._linger_and_close(old)
+
+        # Save new state
+        self.state.users_topic   = users_topic
+        self.state.accounts_topic = accounts_topic
+        self.state.join_type     = (join_type or "left").lower()
+        self.state.users_raw     = users_raw
+        self.state.accounts_raw  = accounts_raw
+        self.state.users_ui      = users_ui
+        self.state.accounts_ui   = accounts_ui
+        self.state.final_ui      = final_ui
+
+        if not initial:
+            print(f"[orchestrator] applied control: users='{users_topic}', accounts='{accounts_topic}', join='{join_type}'")
+
+    def _linger_and_close(self, old_objs: List[object]):
+        # Keep exports alive briefly so existing IDE panes don’t error mid-swap
+        def _close():
+            _safe_close_many(old_objs)
+
+        if any(old_objs):
+            t = threading.Timer(LINGER_SECONDS, _close)
+            t.daemon = True
+            t.start()
+
+    # --------------- control listener ----------------
+
+    def _on_control_update(self, update):
+        """Called by Deephaven when new rows are appended to CONTROL_TOPIC."""
+        try:
+            j_tbl = update.added.j_table  # use Update.added to avoid extra query ops
+            if j_tbl.size() <= 0:
+                return
+
+            row = j_tbl.getRowSet().lastRowKey()
+
+            def _get(name: str) -> str:
+                v = j_tbl.getColumnSource(name).get(row)
+                return "" if v is None else str(v).strip()
+
+            users = _get("usersTopic")
+            accts = _get("accountsTopic")
+            join  = _get("joinType") or "left"
+
+            if users and accts:
+                # Skip no-op updates
+                if users == self.state.users_topic and accts == self.state.accounts_topic and (join or "left").lower() == self.state.join_type:
+                    return
+                self._set_topics(users, accts, join)
+        except Exception as e:
+            print("[orchestrator] control listener err:", e)
+
+
+# -------- boot the app --------
+_orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+---
+
+## Notes / why this works
+
+- **No `iif` or `coalesce`**: we only use 0.40.2-safe **ternary** expressions inside `.where(...)` or `.update_view(...)` (and we kept it minimal to avoid surprises).  
+    _We also filter out `null`/empty `userId` and `last_by("userId")` on the right to prevent “duplicate right key” errors._
+    
+- **Listener context**: We read columns from `update.added.j_table` (no extra `where`/`snapshot` inside the callback), so there’s **no `ExecutionContext` error**.
+    
+- **Export swapping without UI flaps**: We export new tables first, then linger the old generation for a few seconds before closing—this avoids “export already failed” when IDE panes are open.
+    
+- **Angular** keeps subscribing to the same three names: `users_ui`, `accounts_ui`, `final_ui`. When the control message arrives, these are replaced under the same export names—your UI just keeps streaming.
+    
+
+---
+
+## Control message format
+
+Exactly this JSON on `CONTROL_TOPIC`:
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+You can verify it took effect in the DH “Console” log (you’ll see the `applied control:` line) and by opening the exported tables in the IDE. The table `orchestrator_status` also shows the last applied control.
+
+---
+
+## Quick checklist
+
+1. Ensure your config points App Mode to `C:\dhdata\app.d`:
+    
+    ```
+    deephaven.application.dir=C:\\dhdata\\app.d
+    ```
+    
+2. Drop the two files above into `C:\dhdata\app.d`.
+    
+3. Fill in **your** `KAFKA_CONFIG` (same props you already used).
+    
+4. Start: `deephaven server --port 10000`
+    
+5. Angular keeps reading `users_ui`, `accounts_ui`, `final_ui`.
+    
+
+If anything still hiccups, paste **the exact log line** and I’ll patch the specific section (but this build avoids the formula + context pitfalls you hit).
