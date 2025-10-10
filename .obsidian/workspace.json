@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/stream-ag.md",
+                "file": "Project_prep/working panel-switch iss.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "stream-ag"
+              "title": "working panel-switch iss"
             }
           }
         ]
@@ -196,8 +196,9 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
-    "Project_prep/GRPC -- way.md",
     "Project_prep/stream-ag.md",
+    "Project_prep/working panel-switch iss.md",
+    "Project_prep/GRPC -- way.md",
     "Project_prep/orch...md",
     "Project_prep/test1.md",
     "Project_prep/test........md",
@@ -221,7 +222,6 @@
     "Gems/Kafka.md",
     "Cloud/AWS.md",
     "interview-prep/Prep Notes.md",
-    "Cloud/Open-shift.md",
     "Pasted image 20250914211139.png",
     "interview-prep",
     "Project_prep/ui/single-user-gap.svg",
