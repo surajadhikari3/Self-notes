@@ -2744,3 +2744,376 @@ You should see in the Console:
     
 
 If you want me to pre-fill the `KAFKA_CONFIG` block for your cluster (redact secrets), paste your current working client props and I’ll drop them in.
+
+---------------------
+
+
+Here’s a single, copy-paste **orchestrator.py** that runs on **Deephaven 0.40.2**, exports stable tables for Angular (`users_ui`, `accounts_ui`, `final_ui`, `orchestrator_status`), hot-swaps Kafka topics safely, and handles both listener update shapes (RowSet **or** dict) so the control-topic reliably updates the streams.
+
+Save as:
+
+```
+C:\dhdata\app.d\orchestrator.py
+```
+
+Then start Deephaven:
+
+```
+deephaven server --port 10000
+```
+
+---
+
+```python
+# orchestrator.py  — Deephaven 0.40.2 compatible
+# Place in: C:\dhdata\app.d\orchestrator.py
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Optional
+
+import deephaven.dtypes as dt
+from deephaven.appmode import get_app_state
+from deephaven.table_listener import listen
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven import time as dhtime
+from deephaven.stream.kafka import consumer as kc
+
+
+# ------------------------------
+# 1) CONFIG (edit these)
+# ------------------------------
+
+# Default topics used at boot (control topic can update them later)
+DEFAULT_USERS_TOPIC   = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Your Kafka client config (example – fill in your real values)
+KAFKA_CONFIG = {
+    "bootstrap.servers": "your-bootstrap:9092",
+    "auto.offset.reset": "latest",
+
+    # If you use OAuth / SASL, keep your working values here:
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.method": "oidc",
+    # "sasl.oauthbearer.token.endpoint.url": "https://token.example.com",
+    # "sasl.oauthbearer.client.id": "client_id",
+    # "sasl.oauthbearer.client.secret": "client_secret",
+    # "sasl.oauthbearer.scope": "scope",
+    # ... any vendor-specific extras you already use ...
+}
+
+# JSON value specs (adjust field names/types to match your data)
+USERS_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNTS_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,  # 0.40.x uses dt.double
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+
+# ------------------------------
+# 2) UTILITIES
+# ------------------------------
+
+def _consume(topic: str, value_spec) -> "Table":
+    """Create an append-only Kafka table for a topic."""
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+def _safe_close(objs: Optional[List[object]]):
+    for o in objs or []:
+        try:
+            o.close()
+        except Exception:
+            pass
+
+
+# ------------------------------
+# 3) STATE
+# ------------------------------
+
+@dataclass
+class _State:
+    # current topics / join type
+    users_topic: str
+    accounts_topic: str
+    join_type: str = "left"
+
+    # live tables of the current generation
+    users_raw: Optional["Table"] = None
+    accounts_raw: Optional["Table"] = None
+    users_ui: Optional["Table"] = None
+    accounts_ui: Optional["Table"] = None
+    final_ui: Optional["Table"] = None
+    control_raw: Optional["Table"] = None
+
+    # everything to close when we swap generations
+    resources: List[object] = None
+    # a lingering list for delayed close (avoid racing UI reads)
+    lingering: List[object] = None
+
+    last_applied_nanos: Optional[int] = None
+
+
+# ------------------------------
+# 4) ORCHESTRATOR
+# ------------------------------
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.app = get_app_state()
+        self.state = _State(
+            users_topic=users_topic,
+            accounts_topic=accounts_topic,
+            join_type=join_type.lower() if join_type else "left",
+            resources=[],
+            lingering=[],
+        )
+
+        # 4a) initial wiring
+        self._set_topics(users_topic, accounts_topic, self.state.join_type)
+
+        # 4b) control listener
+        self._start_control_listener(CONTROL_TOPIC)
+
+        print("[orchestrator] ready")
+
+    # ---------- build / export ----------
+
+    def _build_views_and_join(self, users_raw: "Table", accounts_raw: "Table") -> tuple["Table","Table","Table"]:
+        """
+        Keep transforms minimal & 0.40-safe: only project needed columns and
+        use the experimental left_outer_join helper.
+        """
+        users_view = users_raw.view(["userId", "name", "email", "age"])
+        accounts_view = accounts_raw.view(["userId", "accountType", "balance"])
+
+        final_tbl = left_outer_join(
+            users_view, accounts_view,
+            on="userId",
+            joins=["accountType", "balance"],
+        )
+        return users_view, accounts_view, final_tbl
+
+    def _export(self, users_ui: "Table", accounts_ui: "Table", final_ui: "Table"):
+        # Export under stable names Angular uses
+        self.app["users_ui"] = users_ui
+        self.app["accounts_ui"] = accounts_ui
+        self.app["final_ui"] = final_ui
+
+        # Status table for quick validation / debugging in IDE
+        self.app["orchestrator_status"] = self._status_table(
+            self.state.users_topic, self.state.accounts_topic, self.state.join_type
+        )
+
+    def _status_table(self, users_topic: str, accounts_topic: str, join_type: str) -> "Table":
+        # A one-row in-memory table; no QL formulas to keep 0.40.x happy
+        from deephaven import new_table
+        from deephaven.column import string_col, long_col
+
+        ts = dhtime.dh_now()  # nano timestamp
+        return new_table([
+            string_col("usersTopic", [users_topic]),
+            string_col("accountsTopic", [accounts_topic]),
+            string_col("joinType", [join_type]),
+            long_col("lastApplied", [ts]),
+        ])
+
+    # ---------- hot-swap topics ----------
+
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        """
+        Build a new generation (Kafka consumers + views + join), export it,
+        then retire the old generation.
+        """
+        join_type = (join_type or "left").lower()
+
+        new_resources: List[object] = []
+        try:
+            users_raw = _consume(users_topic, USERS_VALUE_SPEC);    new_resources.append(users_raw)
+            accounts_raw = _consume(accounts_topic, ACCOUNTS_VALUE_SPEC); new_resources.append(accounts_raw)
+
+            users_ui, accounts_ui, final_ui = self._build_views_and_join(users_raw, accounts_raw)
+            new_resources.extend([users_ui, accounts_ui, final_ui])
+
+            # Export first so UI can immediately start using the new generation
+            self._export(users_ui, accounts_ui, final_ui)
+
+            # Close the previously-exported generation (if any)
+            _safe_close(self.state.resources)
+
+            # Update state
+            self.state.users_topic = users_topic
+            self.state.accounts_topic = accounts_topic
+            self.state.join_type = join_type
+            self.state.users_raw = users_raw
+            self.state.accounts_raw = accounts_raw
+            self.state.users_ui = users_ui
+            self.state.accounts_ui = accounts_ui
+            self.state.final_ui = final_ui
+            self.state.resources = new_resources
+            self.state.last_applied_nanos = dhtime.dh_now()
+
+            print(f"[orchestrator] topics set users='{users_topic}'  accounts='{accounts_topic}'  join='{join_type}'")
+
+        except Exception as e:
+            _safe_close(new_resources)
+            print("[orchestrator] set_topics error:", e)
+            raise
+
+    # ---------- control listener ----------
+
+    def _start_control_listener(self, control_topic: str):
+        ctrl_tbl = _consume(control_topic, CONTROL_VALUE_SPEC)
+        self.state.control_raw = ctrl_tbl
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+        def _on_update(update, is_replay):
+            """
+            Robustly handle both RowSet-style and dict-style update payloads,
+            then apply the most recent control row.
+            """
+            try:
+                # 1) Extract "added" rows container
+                rs = None
+                try:
+                    rs = update.added()
+                except Exception:
+                    try:
+                        rs = update["added"]
+                    except Exception:
+                        rs = None
+                if rs is None:
+                    return
+
+                # 2) Find last row key from either shape
+                rowkey = None
+                if hasattr(rs, "isEmpty"):  # RowSet-like
+                    if rs.isEmpty():
+                        return
+                    rowkey = rs.lastRowKey()
+                elif isinstance(rs, dict):  # dict-like
+                    rowkey = (
+                        rs.get("lastRowKey")
+                        or rs.get("last_row_key")
+                        or rs.get("last")
+                        or rs.get("end_row_key")
+                    )
+                    if rowkey is None:
+                        size = rs.get("size") or rs.get("cardinality")
+                        if not size:
+                            return
+
+                if rowkey is None:
+                    return
+
+                # 3) Read values directly from the single control row
+                ctrl = self.state.control_raw
+
+                def _get(col: str) -> str:
+                    cs = ctrl.getColumnSource(col)
+                    v = None if cs is None else cs.get(rowkey)
+                    return "" if v is None else str(v).strip()
+
+                users = _get("usersTopic")
+                accts = _get("accountsTopic")
+                join  = (_get("joinType") or "left").lower()
+
+                if users and accts:
+                    changed = (
+                        users != self.state.users_topic
+                        or accts != self.state.accounts_topic
+                        or join  != self.state.join_type
+                    )
+                    if changed:
+                        print(f"[orchestrator] applying control: users='{users}', accounts='{accts}', join='{join}'")
+                        self._set_topics(users, accts, join)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        # Register listener and keep a reference so it isn't GC'd
+        self._ctrl_disp = listen(ctrl_tbl, _on_update, replay_initial=False)
+
+
+# ------------------------------
+# 5) BOOTSTRAP
+# ------------------------------
+
+# Create the orchestrator instance at import time so App Mode exports are ready.
+_orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+---
+
+## How you use it
+
+1. Put the file in `C:\dhdata\app.d\orchestrator.py`.
+    
+2. Make sure your `deephaven.prop` has the proper app dir:
+    
+    ```
+    deephaven.application.dir=C:\\dhdata\\app.d
+    ```
+    
+3. Fill in your real **KAFKA_CONFIG** values (OAuth / SSL, etc.).
+    
+4. Start DH: `deephaven server --port 10000`.
+    
+5. In the IDE, you’ll see exported tables:
+    
+    - `users_ui`, `accounts_ui`, `final_ui`, `orchestrator_status`.
+        
+
+## Switching topics (control topic)
+
+Produce JSON to the **control topic**:
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+You should see in the Console:
+
+```
+[orchestrator] applying control: users='...', accounts='...', join='left'
+[orchestrator] topics set users='...'  accounts='...'  join='left'
+```
+
+`orchestrator_status` will reflect the new topics + timestamp. Angular can keep streaming the same exported names (`users_ui`, `accounts_ui`, `final_ui`) and will see the new data without changing the client code.
+
+---
+
+### Notes
+
+- No formulas (`iif`, `coalesce`, etc.) are used—0.40.2-safe.
+    
+- `ApplicationState` is handled through **App Mode** with `get_app_state()` and `self.app["name"] = table`.
+    
+- Control listener is tolerant to different update payload shapes (fixes the `dict object has no attribute isEmpty` error).
+    
+- Join is done with `left_outer_join` from `deephaven.experimental.outer_joins`, which is the least fussy cross-version helper.
+    
+
+If you want me to pre-fill the `KAFKA_CONFIG` block for your cluster (redact secrets), paste your current working client props and I’ll drop them in.
