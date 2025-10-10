@@ -1863,3 +1863,256 @@ You can verify it took effect in the DH “Console” log (you’ll see the `app
     
 
 If anything still hiccups, paste **the exact log line** and I’ll patch the specific section (but this build avoids the formula + context pitfalls you hit).
+
+---------------------------
+
+You’re hitting this because **0.40.x removed `ApplicationState.export(...)`**.  
+In 0.40.2 you must export app outputs with **dict-style assignment**:
+
+```py
+app = get_app_state()
+app["users_ui"] = users_view
+```
+
+Below is a **drop-in 0.40.2 version** of the orchestrator that only uses dict-style exports and keeps everything else the same (safe hot-swap, listener, no formula pitfalls).
+
+---
+
+## `C:\dhdata\app.d\orchestrator.app`
+
+```properties
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+scripts=py:orchestrator.py
+```
+
+## `C:\dhdata\app.d\orchestrator.py`
+
+```python
+# Deephaven 0.40.2 orchestrator – App Mode
+# - Uses dict-style exports (no ApplicationState.export)
+# - Hot-swaps Kafka topics via a control topic
+# - Exports users_ui / accounts_ui / final_ui
+# - Listener reads Update.added to avoid ExecutionContext issues
+# - No iif / coalesce formulas
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, List
+from datetime import datetime, timezone
+import threading
+
+import deephaven.dtypes as dt
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.appmode import get_app_state
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven.stream.kafka import consumer as kc
+from deephaven.table_listener import listen
+
+# ---------- DEFAULTS (edit to your topics) ----------
+DEFAULT_USERS_TOPIC     = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC  = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC           = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Fill in your real Kafka client config (same one you use today)
+KAFKA_CONFIG = {
+    # "bootstrap.servers": "...",
+    # "auto.offset.reset": "latest",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.token.endpoint.url": "...",
+    # ...
+}
+
+# ---------- JSON specs (0.40.x dtypes) ----------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+# Keep old exports around briefly during swaps to avoid IDE pane errors
+LINGER_SECONDS = 8
+
+
+def _consume(topic: str, value_spec):
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+def _normalize_users(t):
+    # Keep only needed columns and valid join keys
+    return (
+        t.view(["userId", "name", "email", "age"])
+         .where('userId != null && userId != ""')
+    )
+
+
+def _normalize_accounts(t):
+    # De-dup right side by key so left join has a single match
+    return (
+        t.view(["userId", "accountType", "balance"])
+         .where('userId != null && userId != ""')
+         .last_by("userId")
+    )
+
+
+def _build_views(users_raw, accounts_raw):
+    u = _normalize_users(users_raw)
+    a = _normalize_accounts(accounts_raw)
+    final_tbl = left_outer_join(u, a, on="userId", joins=["accountType", "balance"])
+    return u, a, final_tbl
+
+
+def _status_table(users: str, accounts: str, join_type: str):
+    return new_table([
+        string_col("usersTopic",   [users]),
+        string_col("accountsTopic", [accounts]),
+        string_col("joinType",     [join_type]),
+        string_col("lastApplied",  [datetime.now(timezone.utc).isoformat()]),
+    ])
+
+
+def _safe_close_many(objs: Optional[List[object]]):
+    if not objs:
+        return
+    for o in objs:
+        try:
+            o.close()
+        except Exception:
+            pass
+
+
+@dataclass
+class _State:
+    users_topic: str
+    accounts_topic: str
+    join_type: str = "left"
+    users_raw: Optional[object] = None
+    accounts_raw: Optional[object] = None
+    users_ui: Optional[object] = None
+    accounts_ui: Optional[object] = None
+    final_ui: Optional[object] = None
+    control_raw: Optional[object] = None
+    control_disp: Optional[object] = None
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.app = get_app_state()
+        self.state = _State(users_topic, accounts_topic, (join_type or "left").lower())
+
+        # initial setup
+        self._set_topics(users_topic, accounts_topic, self.state.join_type, initial=True)
+
+        # control listener
+        ctrl_tbl = _consume(CONTROL_TOPIC, CONTROL_VALUE_SPEC)
+        disp = listen(ctrl_tbl, self._on_control_update)   # keep reference so it isn’t GC’d
+        self.state.control_raw, self.state.control_disp = ctrl_tbl, disp
+
+        # export helper tables
+        self.app["control_raw"] = ctrl_tbl
+        self.app["orchestrator_status"] = _status_table(users_topic, accounts_topic, self.state.join_type)
+
+        print(f"[orchestrator] control listener on '{CONTROL_TOPIC}'")
+        print("[orchestrator] ready")
+
+    # --------- hot-swap ----------
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left", initial: bool = False):
+        print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+
+        # build new pipeline first
+        users_raw = _consume(users_topic, USER_VALUE_SPEC)
+        accounts_raw = _consume(accounts_topic, ACCOUNT_VALUE_SPEC)
+        users_ui, accounts_ui, final_ui = _build_views(users_raw, accounts_raw)
+
+        # export with dict-style (0.40.x)
+        self.app["users_ui"] = users_ui
+        self.app["accounts_ui"] = accounts_ui
+        self.app["final_ui"] = final_ui
+        self.app["orchestrator_status"] = _status_table(users_topic, accounts_topic, join_type)
+
+        # close previous generation after a short delay
+        old = [self.state.users_raw, self.state.accounts_raw, self.state.users_ui, self.state.accounts_ui, self.state.final_ui]
+        if any(old):
+            def _close_old():
+                _safe_close_many(old)
+            t = threading.Timer(LINGER_SECONDS, _close_old)
+            t.daemon = True
+            t.start()
+
+        # update state
+        self.state.users_topic = users_topic
+        self.state.accounts_topic = accounts_topic
+        self.state.join_type = (join_type or "left").lower()
+        self.state.users_raw = users_raw
+        self.state.accounts_raw = accounts_raw
+        self.state.users_ui = users_ui
+        self.state.accounts_ui = accounts_ui
+        self.state.final_ui = final_ui
+
+        if not initial:
+            print(f"[orchestrator] applied control: users='{users_topic}', accounts='{accounts_topic}', join='{join_type}'")
+
+    # --------- control listener callback ----------
+    def _on_control_update(self, update):
+        try:
+            j_tbl = update.added.j_table
+            if j_tbl.size() <= 0:
+                return
+
+            row = j_tbl.getRowSet().lastRowKey()
+
+            def _get(col: str) -> str:
+                v = j_tbl.getColumnSource(col).get(row)
+                return "" if v is None else str(v).strip()
+
+            users = _get("usersTopic")
+            accts = _get("accountsTopic")
+            join  = _get("joinType") or "left"
+
+            if users and accts:
+                if users == self.state.users_topic and accts == self.state.accounts_topic and (join or "left").lower() == self.state.join_type:
+                    return  # no-op
+                self._set_topics(users, accts, join)
+        except Exception as e:
+            print("[orchestrator] control listener err:", e)
+
+
+# boot
+_orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+---
+
+### What changed vs the previous version
+
+- Replaced every `self.app.export(x, "name")` with **`self.app["name"] = x`** — this is the correct export API in 0.40.2.
+    
+- Nothing else about the hot-swap, listener, join, or Kafka consumption changed.
+    
+
+Restart Deephaven and you should see the three exports (`users_ui`, `accounts_ui`, `final_ui`) immediately, with topic swaps handled by sending the JSON control message.
