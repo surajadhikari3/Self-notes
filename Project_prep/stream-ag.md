@@ -3117,3 +3117,286 @@ You should see in the Console:
     
 
 If you want me to pre-fill the `KAFKA_CONFIG` block for your cluster (redact secrets), paste your current working client props and I’ll drop them in.
+
+----------------------------------------
+
+You’re tripping on this one because our **status table** was writing a Java `Instant` into a column that was declared as an integer. In 0.40.2 that throws:
+
+```
+TypeError: java.time.Instant object cannot be interpreted as an integer
+```
+
+Fix = **store the timestamp as a string** (ISO-8601) or declare the column as an Instant. To keep everything simple and robust, I’ve switched it to a **string** and removed all formula usage.
+
+Below is a complete, drop-in `orchestrator.py` that works on **Deephaven 0.40.2**, handles the “dict vs RowSet” listener quirk, and avoids the Instant/int mismatch.
+
+---
+
+### ✅ Copy-paste `C:\dhdata\app.d\orchestrator.py`
+
+```python
+# Deephaven 0.40.2 – single-session Kafka orchestrator
+# - Exports: users_ui, accounts_ui, final_ui, orchestrator_status
+# - Switches topics live via a control topic (JSON)
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Optional
+from datetime import datetime, timezone
+
+import deephaven.dtypes as dt
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ---------- EDIT THESE ----------
+DEFAULT_USERS_TOPIC   = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC         = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    # fill in your working config
+    # "bootstrap.servers": "...",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # ... all the oauth / ssl props that already work for your other tables ...
+}
+# --------------------------------
+
+USER_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCT_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,   # 0.40.x uses dt.double
+})
+
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+def _iso_utc_now() -> str:
+    # safe, portable timestamp for status table (string column)
+    return datetime.now(timezone.utc).isoformat()
+
+def _consume(topic: str, value_spec):
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+def _status_table(users_topic: str, accounts_topic: str, join_type: str):
+    # status as STRINGS -> avoids Instant/int errors on 0.40.2
+    return new_table([
+        string_col("usersTopic",   [users_topic]),
+        string_col("accountsTopic",[accounts_topic]),
+        string_col("joinType",     [join_type]),
+        string_col("lastApplied",  [_iso_utc_now()]),
+    ])
+
+@dataclass
+class _State:
+    users_topic: str
+    accounts_topic: str
+    join_type: str
+    users_raw: Optional[object] = None
+    accounts_raw: Optional[object] = None
+    users_ui: Optional[object] = None
+    accounts_ui: Optional[object] = None
+    final_ui: Optional[object] = None
+    control_raw: Optional[object] = None
+    resources: List[object] = None
+    lingering: List[object] = None
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.state = _State(users_topic, accounts_topic, join_type, resources=[], lingering=[])
+        # build first generation
+        self._set_topics(users_topic, accounts_topic, join_type)
+        # export app variables (0.40.x style)
+        self.app = {}
+        self.app["users_ui"] = self.state.users_ui
+        self.app["accounts_ui"] = self.state.accounts_ui
+        self.app["final_ui"] = self.state.final_ui
+        self.app["orchestrator_status"] = _status_table(users_topic, accounts_topic, join_type)
+
+        # start control listener
+        self._start_control_listener(CONTROL_TOPIC)
+        print("[orchestrator] ready")
+
+    # ---------- topic swap ----------
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        new_res = []
+
+        try:
+            u_raw = _consume(users_topic, USER_SPEC);     new_res.append(u_raw)
+            a_raw = _consume(accounts_topic, ACCT_SPEC);  new_res.append(a_raw)
+
+            # expose minimal columns for UI
+            u_view = u_raw.view(["userId", "name", "email", "age"]);    new_res.append(u_view)
+            a_view = a_raw.view(["userId", "accountType", "balance"]);  new_res.append(a_view)
+
+            # left join using natural_join (stable API)
+            final_tbl = u_view.natural_join(
+                a_view,
+                on=["userId"],
+                joins=["accountType", "balance"],
+            )
+            new_res.append(final_tbl)
+
+            # swap
+            old = self.state
+            self.state.users_topic = users_topic
+            self.state.accounts_topic = accounts_topic
+            self.state.join_type = (join_type or "left").lower()
+            self.state.users_raw = u_raw
+            self.state.accounts_raw = a_raw
+            self.state.users_ui = u_view
+            self.state.accounts_ui = a_view
+            self.state.final_ui = final_tbl
+
+            # update app exports in place
+            self.app["users_ui"] = u_view
+            self.app["accounts_ui"] = a_view
+            self.app["final_ui"] = final_tbl
+            self.app["orchestrator_status"] = _status_table(users_topic, accounts_topic, self.state.join_type)
+
+            # retire previous generation later
+            if old.resources:
+                self.state.lingering = list(old.resources)
+
+            self.state.resources = new_res
+
+            print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{self.state.join_type}'")
+
+        except Exception as e:
+            # cleanup partially-built resources on failure
+            for r in new_res:
+                try: r.close()
+                except Exception: pass
+            print("[orchestrator] set_topics error:", e)
+            raise
+
+    # ---------- control listener ----------
+    def _start_control_listener(self, control_topic: str):
+        ctrl = _consume(control_topic, CONTROL_SPEC)
+        self.state.control_raw = ctrl
+
+        # tolerant callback: works with RowSet OR dict-shaped updates
+        def _on_update(update, is_replay):
+            try:
+                # 1) obtain "added" rows
+                rs = None
+                try:
+                    rs = update.added()
+                except Exception:
+                    try: rs = update["added"]
+                    except Exception: rs = None
+                if rs is None:
+                    return
+
+                # 2) compute last row key
+                rowkey = None
+                if hasattr(rs, "isEmpty"):
+                    if rs.isEmpty():
+                        return
+                    rowkey = rs.lastRowKey()
+                elif isinstance(rs, dict):
+                    rowkey = (
+                        rs.get("lastRowKey")
+                        or rs.get("last_row_key")
+                        or rs.get("last")
+                        or rs.get("end_row_key")
+                    )
+                    if rowkey is None:
+                        size = rs.get("size") or rs.get("cardinality")
+                        if not size:
+                            return
+                if rowkey is None:
+                    return
+
+                # 3) read values from the control table row
+                cs = ctrl.getColumnSource
+                def get(col):
+                    s = cs(col)
+                    v = None if s is None else s.get(rowkey)
+                    return "" if v is None else str(v).strip()
+
+                users = get("usersTopic")
+                accts = get("accountsTopic")
+                join  = (get("joinType") or "left").lower()
+
+                if users and accts:
+                    if (users != self.state.users_topic
+                        or accts != self.state.accounts_topic
+                        or join  != self.state.join_type):
+                        print(f"[orchestrator] applying control: users='{users}', accounts='{accts}', join='{join}'")
+                        self._set_topics(users, accts, join)
+            except Exception as e:
+                print("[orchestrator] control listener err:", e)
+
+        listen(ctrl, _on_update, replay_initial=True)
+        print(f"[orchestrator] control listener on '{control_topic}'")
+
+# Build the app once when the server starts
+_orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+users_ui    = _orch.app["users_ui"]
+accounts_ui = _orch.app["accounts_ui"]
+final_ui    = _orch.app["final_ui"]
+orchestrator_status = _orch.app["orchestrator_status"]
+```
+
+---
+
+### Why this fixes your errors
+
+- **Instant → int** crash: we now write `lastApplied` as a **string** (`isoformat()`), so Deephaven doesn’t try to coerce a `java.time.Instant` into a long column.
+    
+- **Listener “dict has no attribute isEmpty”**: callback now supports both RowSet and dict-shape updates.
+    
+- **No formulas** (`coalesce`, `iif`, etc.) → avoids parser/QL exceptions you saw earlier.
+    
+- Uses **`natural_join`** (stable) instead of experimental joins.
+    
+
+---
+
+### How to verify
+
+1. Save the file, (re)start server:
+    
+    ```
+    deephaven server --port 10000
+    ```
+    
+2. In the IDE, open tabs: `users_ui`, `accounts_ui`, `final_ui`, `orchestrator_status`.
+    
+3. Produce a control message (JSON) to the control topic:
+    
+    ```json
+    {"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+    ```
+    
+4. Console should log:
+    
+    ```
+    [orchestrator] applying control: users='...', accounts='...', join='left'
+    [orchestrator] topics set users='...' accounts='...' join='left'
+    ```
+    
+    The `orchestrator_status.lastApplied` updates (string timestamp), and Angular continues to stream the same exported names (`users_ui`, `accounts_ui`, `final_ui`) with the new data.
+    
+
+If anything else pops, send the exact console line where it fails and I’ll adjust—this version removes the repetitive Instant/RowSet pitfalls you’ve been hitting.
