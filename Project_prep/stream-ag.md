@@ -353,3 +353,392 @@ ORC = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
     
 
 If anything still logs an error, paste the exact console lines and I’ll adapt the listener again—but with this version you won’t get the “dict has no attribute size” problem, and you’ll have clear logs showing every step of a topic switch.
+
+---------------
+
+Got it — let’s stop relying on `print()` and build this as a **Deephaven App Mode** script that:
+
+1. runs in **0.40.2**
+    
+2. uses **DynamicTableWriter**-backed tables for logging and status (so you can _see_ what happened even if console prints don’t show), and
+    
+3. **hot-swaps** Kafka topics reliably, closing the old generation after a short linger.
+    
+
+Below are just two files to copy into `app.d/`:
+
+- `orchestrator.app` – the app manifest
+    
+- `orchestrator.py` – the app itself (only standard 0.40.2 APIs; no `from __future__`)
+    
+
+---
+
+### 1) `app.d/orchestrator.app`
+
+```ini
+id = kafka-orchestrator
+name = Kafka Orchestrator
+type = script
+scriptType = python
+enabled = true
+script = orchestrator.py
+```
+
+---
+
+### 2) `app.d/orchestrator.py`
+
+```python
+# Deephaven 0.40.2 – App Mode orchestrator that hot-swaps Kafka topics
+# - No from __future__ imports (keeps 0.40.2 happy)
+# - All “logs” go into a table (orchestrator_logs) via DTW so you can watch them live
+# - Control topic updates are applied atomically; old generation is closed after LINGER_SECONDS
+# - Callback is robust to TableUpdate vs dict-style update payloads
+#
+# Exposed tables in the IDE / JS API:
+#   control_raw            – control messages (append)
+#   orchestrator_status    – 1-row current usersTopic/accountsTopic/joinType/lastApplied
+#   orchestrator_logs      – append log table
+#   users_ui, accounts_ui, final_ui – current live views
+
+from typing import List, Optional
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import threading
+
+import deephaven.dtypes as dt
+from deephaven import DynamicTableWriter
+from deephaven.table_listener import listen
+from deephaven.stream.kafka import consumer as kc
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                       EDIT THESE 3 DEFAULT TOPICS
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+# Fill in your WORKING Kafka config (these are placeholders)
+KAFKA_CONFIG = {
+    # "bootstrap.servers": "...",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.token.endpoint.url": "...",
+    # "sasl.oauthbearer.sub.claim.name": "client_id",
+    # "sasl.oauthbearer.client.id": "...",
+    # "sasl.oauthbearer.client.secret": "...",
+    # "sasl.oauthbearer.extensions.logicalCluster": "...",
+    # "sasl.oauthbearer.extensions.identityPoolId": "...",
+    # "ssl.endpoint.identification.algorithm": "HTTPS",
+}
+# ─────────────────────────────────────────────────────────────────────────────
+
+LINGER_SECONDS = 8
+MAX_LINGER_GENERATIONS = 2
+
+# JSON specs (0.40.x)
+USER_SPEC = kc.json_spec({
+    "userId": dt.string, "name": dt.string, "email": dt.string, "age": dt.int64
+})
+ACCT_SPEC = kc.json_spec({
+    "userId": dt.string, "accountType": dt.string, "balance": dt.double
+})
+CONTROL_SPEC = kc.json_spec({
+    "usersTopic": dt.string, "accountsTopic": dt.string, "joinType": dt.string
+})
+
+# Optional better left outer join if present
+try:
+    from deephaven.experimental.outer_joins import left_outer_join as _loj
+except Exception:
+    _loj = None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+#============================= LOG BUS ========================================
+
+class _LogBus:
+    """Append-only log table; use this instead of print() so you see logs in App Mode."""
+    def __init__(self):
+        self._w = DynamicTableWriter({
+            "ts": dt.string,
+            "level": dt.string,
+            "msg": dt.string,
+        })
+        self.table = self._w.table
+
+    def _write(self, level: str, msg: str):
+        try:
+            self._w.write_row(_now_iso(), level, msg)
+        except Exception:
+            pass
+
+    def info(self, m: str):  self._write("INFO",  m)
+    def warn(self, m: str):  self._write("WARN",  m)
+    def error(self, m: str): self._write("ERROR", m)
+
+
+log_bus = _LogBus()
+orchestrator_logs = log_bus.table   # exported
+
+#============================= STATUS BUS =====================================
+
+class _StatusBus:
+    """1-row status (last applied control)."""
+    def __init__(self):
+        self._w = DynamicTableWriter({
+            "usersTopic": dt.string,
+            "accountsTopic": dt.string,
+            "joinType": dt.string,
+            "lastApplied": dt.string,   # ISO string for display
+        })
+        self.table = self._w.table.last_by()
+
+    def update(self, users: str, accts: str, join_type: str):
+        self._w.write_row(users or "", accts or "", (join_type or "").lower(), _now_iso())
+
+
+#============================= HELPERS ========================================
+
+def _consume(topic: str, value_spec):
+    return kc.consume(
+        dict(KAFKA_CONFIG),
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+def _rowset_is_empty(rs) -> bool:
+    if rs is None:
+        return True
+    try:
+        if hasattr(rs, "isEmpty") and rs.isEmpty():
+            return True
+        if hasattr(rs, "sizeLong") and rs.sizeLong() == 0:
+            return True
+        if hasattr(rs, "size") and rs.size() == 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _get_last_added_key(update) -> Optional[int]:
+    """Support both TableUpdate and dict callback shapes (0.40.2)."""
+    # TableUpdate style
+    try:
+        rs = update.added()
+        if not _rowset_is_empty(rs):
+            return rs.lastRowKey()
+    except Exception:
+        pass
+    # dict style
+    try:
+        if isinstance(update, dict):
+            rs = update.get("added")
+            if not _rowset_is_empty(rs):
+                return rs.lastRowKey()
+    except Exception:
+        pass
+    return None
+
+
+#============================= ORCHESTRATOR ====================================
+
+@dataclass
+class _Gen:
+    users_raw: object
+    accounts_raw: object
+    users_view: object
+    accounts_view: object
+    final_view: object
+
+
+def _build_join(u_view, a_view, join_type: str):
+    jt = (join_type or "left").lower()
+    if jt.startswith("left"):
+        if _loj is not None:
+            return _loj(u_view, a_view, on="userId", joins=["accountType", "balance"])
+        return u_view.join(a_view, on=["userId"], joins=["accountType", "balance"])
+    if jt in ("inner", "join"):
+        return u_view.join(a_view, on=["userId"], joins=["accountType", "balance"])
+    return u_view.join(a_view, on=["userId"], joins=["accountType", "balance"])
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self._lock = threading.RLock()
+        self._linger: List[List[object]] = []
+        self._status = _StatusBus()
+
+        self.users_topic = (users_topic or "").strip()
+        self.accounts_topic = (accounts_topic or "").strip()
+        self.join_type = (join_type or "left").lower().strip()
+
+        self._set_topics(self.users_topic, self.accounts_topic, self.join_type)
+        self._start_control_listener(CONTROL_TOPIC)
+        log_bus.info("ready")
+
+    def _linger_close(self, resources: List[object]):
+        def _close():
+            for r in resources:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+            log_bus.info("closed previous generation resources")
+        t = threading.Timer(LINGER_SECONDS, _close)
+        t.daemon = True
+        t.start()
+        self._linger.append(resources)
+        while len(self._linger) > MAX_LINGER_GENERATIONS:
+            olds = self._linger.pop(0)
+            for r in olds:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str):
+        with self._lock:
+            new_objs: List[object] = []
+            try:
+                log_bus.info(f"building: users='{users_topic}', accounts='{accounts_topic}', join='{join_type}'")
+
+                u_raw = _consume(users_topic, USER_SPEC);    new_objs.append(u_raw)
+                a_raw = _consume(accounts_topic, ACCT_SPEC); new_objs.append(a_raw)
+
+                u_view = u_raw.view(["userId", "name", "email", "age"]);                  new_objs.append(u_view)
+                a_view = a_raw.view(["userId", "accountType", "balance"]).where("userId != null"); new_objs.append(a_view)
+
+                fin = _build_join(u_view, a_view, join_type);                              new_objs.append(fin)
+
+                # publish exports (App Mode & IDE)
+                self._publish(u_view, a_view, fin, self._status.table)
+
+                # update status row
+                self._status.update(users_topic, accounts_topic, join_type)
+
+                # close previous gen later
+                try:
+                    prev = getattr(self, "gen", None)
+                    if prev is not None:
+                        self._linger_close([prev.users_raw, prev.accounts_raw, prev.users_view, prev.accounts_view, prev.final_view])
+                except Exception:
+                    pass
+
+                self.gen = _Gen(u_raw, a_raw, u_view, a_view, fin)
+                self.users_topic, self.accounts_topic, self.join_type = users_topic, accounts_topic, join_type
+
+                log_bus.info(f"topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+            except Exception as e:
+                for o in new_objs:
+                    try: o.close()
+                    except Exception: pass
+                log_bus.error(f"set_topics ERROR: {e}")
+                raise
+
+    def _publish(self, u_view, a_view, fin_tbl, status_tbl):
+        # export stable names
+        globals()["users_ui"] = u_view
+        globals()["accounts_ui"] = a_view
+        globals()["final_ui"] = fin_tbl
+        globals()["orchestrator_status"] = status_tbl
+
+        # App Mode export dict
+        app["users_ui"] = u_view
+        app["accounts_ui"] = a_view
+        app["final_ui"] = fin_tbl
+        app["orchestrator_status"] = status_tbl
+        app["orchestrator_logs"] = orchestrator_logs
+        app["control_raw"] = globals().get("control_raw")
+
+    def _start_control_listener(self, control_topic: str):
+        global control_raw
+        ctrl = _consume(control_topic, CONTROL_SPEC)
+        control_raw = ctrl
+        app["control_raw"] = control_raw
+
+        def _get(col: str, rk: int) -> str:
+            try:
+                cs = ctrl.getColumnSource(col)
+                v = cs.get(rk) if cs is not None else None
+                return "" if v is None else str(v).strip()
+            except Exception:
+                return ""
+
+        def _on_update(update, is_replay):
+            try:
+                rk = _get_last_added_key(update)
+                if rk is None:
+                    return
+
+                raw_u = _get("usersTopic", rk)
+                raw_a = _get("accountsTopic", rk)
+                raw_j = _get("joinType", rk)
+
+                users = raw_u or self.users_topic
+                accts = raw_a or self.accounts_topic
+                join  = (raw_j or self.join_type or "left").lower()
+
+                changed = (users != self.users_topic) or (accts != self.accounts_topic) or (join != self.join_type)
+
+                log_bus.info(f"control: raw=({raw_u!r},{raw_a!r},{raw_j!r}) "
+                             f"resolved=({users!r},{accts!r},{join!r}) changed={changed}")
+
+                if changed:
+                    old = (self.users_topic, self.accounts_topic, self.join_type)
+                    self._set_topics(users, accts, join)
+                    log_bus.info(f"swapped topics old={old} -> new={(users, accts, join)}")
+                else:
+                    self._status.update(users, accts, join)
+                    log_bus.info("no change; status refreshed")
+            except Exception as e:
+                log_bus.error(f"control listener err: {e}")
+
+        listen(ctrl, _on_update)
+        log_bus.info(f"control listener on '{control_topic}'")
+
+
+# ── App exports
+app: dict = {}  # Deephaven App Mode looks for this
+ORC = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+
+# keep names available in global scope for IDE too
+users_ui = users_ui if "users_ui" in globals() else None
+accounts_ui = accounts_ui if "accounts_ui" in globals() else None
+final_ui = final_ui if "final_ui" in globals() else None
+orchestrator_status = orchestrator_status if "orchestrator_status" in globals() else None
+control_raw = control_raw if "control_raw" in globals() else None
+```
+
+---
+
+## How you verify (no console needed)
+
+1. Start Deephaven with App Mode (e.g., `deephaven server --port 10000`).
+    
+2. In the UI open these 4 tables:
+    
+    - `control_raw` (shows raw messages from your control topic)
+        
+    - `orchestrator_status` (1 row; watch `usersTopic`, `accountsTopic`, `lastApplied`)
+        
+    - `orchestrator_logs` (every action is logged here)
+        
+    - `final_ui` (the joined, live view)
+        
+3. Produce a message to the control topic:
+    
+    ```json
+    {"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+    ```
+    
+4. You should immediately see rows in:
+    
+    - **
