@@ -2116,3 +2116,259 @@ _orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
     
 
 Restart Deephaven and you should see the three exports (`users_ui`, `accounts_ui`, `final_ui`) immediately, with topic swaps handled by sending the JSON control message.
+
+-----------------
+take
+
+You’re on 0.40.2, and `table_listener.listen` now expects a callback with **two args**:  
+`(update, is_replay)`. Your current callback only takes one, so Jetty aborts the app at start.  
+Here’s a fixed, full drop-in that:
+
+- uses **dict-style exports** (no `.export()`)
+    
+- uses a **two-arg** listener `(update, is_replay)`
+    
+- reads the new control row straight from the table via the **row keys** in `update.added()` (no snapshots, no extra threads)
+    
+- keeps the 0.40.x-safe join and Kafka specs
+    
+
+Copy these two files as-is.
+
+---
+
+### `C:\dhdata\app.d\orchestrator.app`
+
+```properties
+id=kafka-orchestrator
+name=Kafka Orchestrator
+type=script
+scriptType=python
+enabled=true
+scripts=py:orchestrator.py
+```
+
+### `C:\dhdata\app.d\orchestrator.py`
+
+```python
+# Orchestrator for Deephaven 0.40.2
+# - dict-style exports: app["name"] = table
+# - listener callback signature: (update, is_replay)
+# - reads control messages using update.added() row keys
+# - safe hot-swap with short linger to avoid IDE tab errors
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, List
+from datetime import datetime, timezone
+import threading
+
+import deephaven.dtypes as dt
+from deephaven import new_table
+from deephaven.column import string_col
+from deephaven.appmode import get_app_state
+from deephaven.experimental.outer_joins import left_outer_join
+from deephaven.stream.kafka import consumer as kc
+from deephaven.table_listener import listen
+
+# --------- EDIT THESE for your environment ----------
+DEFAULT_USERS_TOPIC    = "ccd01_sb_its_esp_tap3507_bishowcaseraw"
+DEFAULT_ACCOUNTS_TOPIC = "ccd01_sb_its_esp_tap3507_bishowcasecurated"
+CONTROL_TOPIC          = "ccd01_sb_its_esp_tap3507_metadata"
+
+KAFKA_CONFIG = {
+    # fill in exactly what you already use (bootstrap, security, oauth, etc.)
+    # "bootstrap.servers": "...",
+    # "security.protocol": "SASL_SSL",
+    # "sasl.mechanism": "OAUTHBEARER",
+    # "sasl.oauthbearer.token.endpoint.url": "...",
+    # ...
+}
+
+# --------- JSON specs (0.40.x dtypes) ----------
+USER_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "name": dt.string,
+    "email": dt.string,
+    "age": dt.int64,
+})
+
+ACCOUNT_VALUE_SPEC = kc.json_spec({
+    "userId": dt.string,
+    "accountType": dt.string,
+    "balance": dt.double,
+})
+
+CONTROL_VALUE_SPEC = kc.json_spec({
+    "usersTopic": dt.string,
+    "accountsTopic": dt.string,
+    "joinType": dt.string,
+})
+
+LINGER_SECONDS = 8  # keep old exports briefly to avoid “table already closed” when panes are open
+
+
+def _consume(topic: str, value_spec):
+    cfg = dict(KAFKA_CONFIG)
+    return kc.consume(
+        cfg,
+        topic,
+        key_spec=kc.KeyValueSpec.IGNORE,
+        value_spec=value_spec,
+        table_type=kc.TableType.append(),
+    )
+
+
+def _normalize_users(t):
+    return (
+        t.view(["userId", "name", "email", "age"])
+         .where('userId != null && userId != ""')
+    )
+
+
+def _normalize_accounts(t):
+    # Make right side one-row-per-key to avoid duplicate-right-key join errors
+    return (
+        t.view(["userId", "accountType", "balance"])
+         .where('userId != null && userId != ""')
+         .last_by("userId")
+    )
+
+
+def _build_views(users_raw, accounts_raw):
+    u = _normalize_users(users_raw)
+    a = _normalize_accounts(accounts_raw)
+    final_tbl = left_outer_join(u, a, on="userId", joins=["accountType", "balance"])
+    return u, a, final_tbl
+
+
+def _status_table(users: str, accounts: str, join_type: str):
+    return new_table([
+        string_col("usersTopic",   [users]),
+        string_col("accountsTopic", [accounts]),
+        string_col("joinType",     [join_type]),
+        string_col("lastApplied",  [datetime.now(timezone.utc).isoformat()]),
+    ])
+
+
+def _safe_close_many(objs: Optional[List[object]]):
+    if not objs:
+        return
+    for o in objs:
+        try:
+            o.close()
+        except Exception:
+            pass
+
+
+@dataclass
+class _State:
+    users_topic: str
+    accounts_topic: str
+    join_type: str = "left"
+    users_raw: Optional[object] = None
+    accounts_raw: Optional[object] = None
+    users_ui: Optional[object] = None
+    accounts_ui: Optional[object] = None
+    final_ui: Optional[object] = None
+    control_raw: Optional[object] = None
+    control_disp: Optional[object] = None
+
+
+class Orchestrator:
+    def __init__(self, users_topic: str, accounts_topic: str, join_type: str = "left"):
+        self.app = get_app_state()
+        self.state = _State(users_topic, accounts_topic, (join_type or "left").lower())
+
+        # initial setup
+        self._set_topics(users_topic, accounts_topic, self.state.join_type, initial=True)
+
+        # control listener
+        ctrl_tbl = _consume(CONTROL_TOPIC, CONTROL_VALUE_SPEC)
+        self.state.control_raw = ctrl_tbl  # ensure available to callback
+        disp = listen(ctrl_tbl, self._on_control_update)  # callback must accept (update, is_replay)
+        self.state.control_disp = disp
+
+        # export helper tables
+        self.app["control_raw"] = ctrl_tbl
+        self.app["orchestrator_status"] = _status_table(users_topic, accounts_topic, self.state.join_type)
+
+        print(f"[orchestrator] control listener on '{CONTROL_TOPIC}'")
+        print("[orchestrator] ready")
+
+    # --------- hot-swap ----------
+    def _set_topics(self, users_topic: str, accounts_topic: str, join_type: str = "left", initial: bool = False):
+        print(f"[orchestrator] topics set users='{users_topic}' accounts='{accounts_topic}' join='{join_type}'")
+
+        # build new pipeline first
+        users_raw    = _consume(users_topic, USER_VALUE_SPEC)
+        accounts_raw = _consume(accounts_topic, ACCOUNT_VALUE_SPEC)
+        users_ui, accounts_ui, final_ui = _build_views(users_raw, accounts_raw)
+
+        # export in 0.40.x style
+        self.app["users_ui"] = users_ui
+        self.app["accounts_ui"] = accounts_ui
+        self.app["final_ui"] = final_ui
+        self.app["orchestrator_status"] = _status_table(users_topic, accounts_topic, join_type)
+
+        # close previous generation after a short linger
+        old = [self.state.users_raw, self.state.accounts_raw, self.state.users_ui, self.state.accounts_ui, self.state.final_ui]
+        if any(old):
+            def _close_old():
+                _safe_close_many(old)
+            t = threading.Timer(LINGER_SECONDS, _close_old)
+            t.daemon = True
+            t.start()
+
+        # update state
+        self.state.users_topic = users_topic
+        self.state.accounts_topic = accounts_topic
+        self.state.join_type = (join_type or "left").lower()
+        self.state.users_raw = users_raw
+        self.state.accounts_raw = accounts_raw
+        self.state.users_ui = users_ui
+        self.state.accounts_ui = accounts_ui
+        self.state.final_ui = final_ui
+
+        if not initial:
+            print(f"[orchestrator] applied control: users='{users_topic}', accounts='{accounts_topic}', join='{join_type}'")
+
+    # --------- control listener callback (MUST be (update, is_replay)) ----------
+    def _on_control_update(self, update, is_replay):
+        try:
+            rs = update.added()  # RowSet of newly added rows
+            if rs.isEmpty():
+                return
+            row = rs.lastRowKey()
+
+            tbl = self.state.control_raw  # current control table
+            def _get(col: str) -> str:
+                v = tbl.getColumnSource(col).get(row)
+                return "" if v is None else str(v).strip()
+
+            users = _get("usersTopic")
+            accts = _get("accountsTopic")
+            join  = _get("joinType") or "left"
+
+            if users and accts:
+                if users == self.state.users_topic and accts == self.state.accounts_topic and (join or "left").lower() == self.state.join_type:
+                    return  # nothing to change
+                self._set_topics(users, accts, join)
+        except Exception as e:
+            print("[orchestrator] control listener err:", e)
+
+
+# boot
+_orch = Orchestrator(DEFAULT_USERS_TOPIC, DEFAULT_ACCOUNTS_TOPIC, "left")
+```
+
+**Run:**  
+`deephaven server --port 10000`
+
+**Control message format (unchanged):**
+
+```json
+{"usersTopic":"<NEW_USERS>", "accountsTopic":"<NEW_ACCTS>", "joinType":"left"}
+```
+
+This fixes the “listener function must have 2 parameters” error and keeps your hot-swap/export logic 0.40.2-compatible.
