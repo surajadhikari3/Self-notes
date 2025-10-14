@@ -1187,3 +1187,445 @@ def _start_control_listener(self, control_topic: str):
     
 
 This fixes the “dict has no size” error and makes the switch visible in logs and status. If anything else pops up, paste the latest line from `orchestrator_logs`—that table now gives us precise breadcrumbs to diagnose quickly.
+
+
+----------------------------
+
+from here............
+
+dh-cmds:
+
+##Latest dh config deephaven.prop file  (with noo auth)
+includefiles=dh-defaults.prop
+web.storage.layout.directory=layouts
+web.storage.notebook.directory=formats/notebooks
+deephaven.server.layout.subdir=layouts
+deephaven.server.notebook.subdir=formats/notebooks
+deephaven.application.dir=C:\\Deephaven\\app.d
+AuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler   ---> Add this to activate no-auth
+
+
+
+--------------------------------------------------------
+start_dh.bat (automation to run the dh with venv if supports replace with the path to dhdata...)
+
+@echo off
+setlocal ENABLEDELAYEDEXPANSION
+
+rem === EDIT THESE IF NEEDED ===
+set "VENV_ACTIVATE=C:\Users\suraj\source\apps-testing\venv\Scripts\activate.bat"
+set "DH_PORT=10000"
+
+rem === Deephaven dirs ===
+set "DEEPHAVEN_CONFIG_DIR=C:\Deephaven\config"
+set "DEEPHAVEN_DATA_DIR=C:\Deephaven\data"
+set "DEEPHAVEN_CACHE_DIR=C:\Deephaven\cache"
+
+rem === Add startup.d to PYTHONPATH so 'import ingestion' works ===
+set "PY_STARTUP=%USERPROFILE%\.deephaven\startup.d"
+if exist "%PY_STARTUP%" (
+  set "PYTHONPATH=%PY_STARTUP%;%PYTHONPATH%"
+)
+
+rem === Force NO AUTH (Anonymous) ===
+rem This line disables PSK and any other auth handler for this process.
+@REM set "JAVA_TOOL_OPTIONS=-DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler"
+
+rem === Sanity checks ===
+if not exist "%VENV_ACTIVATE%" (
+  echo [ERROR] Can't find venv activate at: %VENV_ACTIVATE%
+  pause
+  exit /b 1
+)
+
+if not exist "%DEEPHAVEN_CONFIG_DIR%" mkdir "%DEEPHAVEN_CONFIG_DIR%"
+if not exist "%DEEPHAVEN_DATA_DIR%"   mkdir "%DEEPHAVEN_DATA_DIR%"
+if not exist "%DEEPHAVEN_CACHE_DIR%"  mkdir "%DEEPHAVEN_CACHE_DIR%"
+
+echo.
+echo [INFO] Activating venv...
+call "%VENV_ACTIVATE%"
+if errorlevel 1 (
+  echo [ERROR] venv activation failed.
+  pause
+  exit /b 1
+)
+
+echo [INFO] ENV SUMMARY:
+echo   DEEPHAVEN_CONFIG_DIR=%DEEPHAVEN_CONFIG_DIR%
+echo   DEEPHAVEN_DATA_DIR=%DEEPHAVEN_DATA_DIR%
+echo   DEEPHAVEN_CACHE_DIR=%DEEPHAVEN_CACHE_DIR%
+echo   PYTHONPATH=%PYTHONPATH%
+echo   JAVA_TOOL_OPTIONS=%JAVA_TOOL_OPTIONS%
+echo   DH_PORT=%DH_PORT%
+echo.
+
+echo [INFO] Starting Deephaven on port %DH_PORT% ...
+deephaven server --port %DH_PORT%
+
+endlocal
+---------------------------------------------------------------
+
+or cmd to run with this so that the file startup.d works
+
+Run this code in the terminal 
+
+# 0) Activate the venv that has Deephaven
+source /c/Users/suraj/source/apps-testing/venv/Scripts/activate
+
+# 1) Pick where you want config/data/cache to live (adjust if yours differ)
+export DEEPHAVEN_CONFIG_DIR="/c/Deephaven/config"
+export DEEPHAVEN_DATA_DIR="/c/Deephaven/data"
+export DEEPHAVEN_CACHE_DIR="/c/Deephaven/cache"
+export PYTHONPATH="/c/Users/suraj/.deephaven/startup.d:$PYTHONPATH"
+export JAVA_TOOL_OPTIONS="-DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler"
+deephaven server --port 10000
+
+export PY_STARTUP=/c/Users/suraj/.deephaven/startup.d
+if [ -d "$PY_STARTUP" ]; then
+  export PYTHONPATH="$PY_STARTUP:$PYTHONPATH"
+fi
+
+
+# 2) Make sure expected subfolders exist (layouts is the key one for your error) (for first time creation)
+mkdir -p "$DEEPHAVEN_CONFIG_DIR"
+mkdir -p "$DEEPHAVEN_DATA_DIR"/{layouts,notebooks}
+mkdir -p "$DEEPHAVEN_CACHE_DIR"
+
+# 3) (optional, but nice) ensure a config file exists
+#    This includes dh-defaults and lets you add tweaks later.
+if [ ! -f "$DEEPHAVEN_CONFIG_DIR/deephaven.prop" ]; then
+  printf "includefiles=dh-defaults.prop\n" > "$DEEPHAVEN_CONFIG_DIR/deephaven.prop"
+fi
+
+# 4) Run the server
+
+deephaven server --port 10000 
+
+--------------------------------------------------------
+
+ingestion-files
+
+
+dh-files
+
+-------------------ingestion.py---------------------------
+# C:\Users\robin\.deephaven\startup.d\ingestion.py
+
+from deephaven import dtypes as dht
+from deephaven.stream.kafka import consumer as kc
+import _main_  # <-- publish to console scope via _main_
+
+DEFAULT_BOOTSTRAP = "127.0.0.1:19092"  # or host.docker.internal:19092
+
+def create_live_table(
+    topic: str,
+    *,
+    schema: dict,                 # dict[str, dht.*]
+    alias: str | None = None,
+    bootstrap: str | None = None,
+    table_type: str = "append",
+    ignore_key: bool = True
+) -> str:
+    if not topic:
+        raise ValueError("topic is required")
+
+    name = alias or topic.replace(".", "_")
+    if name in globals():
+        print(f"[DH] Reusing table {name}")
+        # also make sure console sees it
+        setattr(_main_, name, globals()[name])
+        return name
+
+    config = {
+        "bootstrap.servers": bootstrap or DEFAULT_BOOTSTRAP,
+        "auto.offset.reset": "latest",
+    }
+
+    v_spec = kc.json_spec(schema)
+    k_spec = kc.KeyValueSpec.IGNORE if ignore_key else None
+
+    try:
+        ttype = kc.TableType.Append if table_type.lower() == "append" \
+            else kc.TableType.Blink
+    except Exception:
+        ttype = kc.TableType.Append() if table_type.lower() == "append" \
+            else kc.TableType.Blink()
+
+    tbl = kc.consume(
+        config,
+        topic,
+        key_spec=k_spec,
+        value_spec=v_spec,
+        table_type=ttype,
+    )
+
+    # store in module and publish to console (_main_)
+    globals()[name] = tbl
+    setattr(_main_, name, tbl)
+
+    print(f"[DH] Created {name} from topic '{topic}' via {config['bootstrap.servers']}")
+    return name
+
+
+--------------------------------------------------------------------------------
+
+files-caller from the dh console......
+
+import importlib.util, sys
+INGESTION_FILE = r"C:\Users\robin\.deephaven\startup.d\ingestion.py" #change the file path...
+spec = importlib.util.spec_from_file_location("ingestion", INGESTION_FILE)
+ingestion = importlib.util.module_from_spec(spec)
+sys.modules["ingestion"] = ingestion
+spec.loader.exec_module(ingestion)
+
+from deephaven import dtypes as dht
+from ingestion import create_live_table
+
+
+#change schema based on the topic.....................
+
+PRICE_SCHEMA = {
+  "id": dht.int32,
+  "symbol": dht.string,
+  "ts": dht.string,
+  "open": dht.double,
+  "high": dht.double,
+  "low": dht.double,
+  "close": dht.double
+}
+
+create_live_table(
+  "bishowcaseraw-nyse",
+  schema=PRICE_SCHEMA,
+  alias="bishowcaseraw_nyse",
+  ignore_key=True
+)
+
+globals()["bishowcaseraw_nyse"].tail(5)
+
+---------------------------------------------------------
+
+# second caller from the dh console itself...
+
+import importlib.util, sys
+
+from deephaven import dtypes as dht
+from ingestion import create_live_table
+
+CRYPTO_SCHEMA = {
+    "id":     dht.int64,
+    "symbol": dht.string,
+    "ts":     dht.string,
+    "price":  dht.double,
+    "volume": dht.double
+}
+
+create_live_table(
+  "bishowcaseraw-crypto",
+  schema=CRYPTO_SCHEMA,
+  alias="bishowcase_test",
+  ignore_key=True
+)
+
+# quick peek
+bishowcase_test.tail(5)
+
+---------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------------------------------------------------
+
+# main.py
+
+-----------------
+running but stuck need to do the ctrl+c in the console
+
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, constr
+from typing import List, Optional
+from pydeephaven import Session
+import json
+
+# ---------- Models ----------
+class Column(BaseModel):
+    name: constr(strip_whitespace=True, min_length=1)
+    dtype: constr(strip_whitespace=True, min_length=1)  # e.g., "int32", "double", "string"
+
+class OpenTopicReq(BaseModel):
+    topic: constr(strip_whitespace=True, min_length=1)
+    alias: Optional[constr(strip_whitespace=True, min_length=1)] = None
+    columns: List[Column] = Field(..., description="List of columns with Deephaven dtypes")
+    table_type: constr(strip_whitespace=True) = "append"   # "append" | "blink"
+    ignore_key: bool = True
+    bootstrap: Optional[str] = None                        # e.g., "127.0.0.1:19092"
+
+# ---------- App ----------
+app = FastAPI(title="DH FastAPI Bridge")
+
+# Adjust if you changed port/host in your .bat
+DH_HOST = "127.0.0.1"
+DH_PORT = 10000
+
+dh: Session | None = None
+
+# map simple dtype strings to dht names
+_DTYPE_MAP = {
+    "bool": "bool_", "boolean": "bool_",
+    "byte": "byte", "short": "short", "int": "int32", "int32": "int32", "long": "int64", "int64": "int64",
+    "float": "float32", "float32": "float32", "double": "double", "float64": "double",
+    "string": "string", "time": "Datetime", "datetime": "Datetime"
+}
+
+def _schema_code(cols: List[Column]) -> str:
+    """
+    Returns Python code for a dict like: {"id": dht.int32, "ts": dht.string, ...}
+    Ensures it's a dict (not a set) and uses valid dht symbols.
+    """
+    parts = []
+    for c in cols:
+        key = json.dumps(c.name)
+        dtype_key = c.dtype.lower()
+        if dtype_key not in _DTYPE_MAP:
+            raise ValueError(f"Unsupported dtype '{c.dtype}'. Use one of: {sorted(_DTYPE_MAP)}")
+        dht_symbol = _DTYPE_MAP[dtype_key]
+        parts.append(f"  {key}: dht.{dht_symbol}")
+    return "{\n" + ",\n".join(parts) + "\n}"
+
+@app.on_event("startup")
+def startup():
+    global dh
+    dh = Session(host=DH_HOST, port=DH_PORT)  # anonymous mode
+    # pydeephaven 0.40.x – connection happens lazily on first call; no .open() needed
+
+@app.on_event("shutdown")
+def shutdown():
+    global dh
+    try:
+        if dh is not None:
+            dh.close()
+    except Exception:
+        pass
+
+@app.post("/deephaven/open_topic")
+def open_topic(req: OpenTopicReq):
+    global dh
+    if dh is None:
+        raise HTTPException(status_code=500, detail="DH session not initialized")
+
+    # Build Python code to run inside DH
+    try:
+        schema_py = _schema_code(req.columns)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    alias_py = json.dumps(req.alias) if req.alias else "None"
+    bootstrap_py = json.dumps(req.bootstrap) if req.bootstrap else "None"
+    table_type_py = json.dumps(req.table_type)  # string in Python
+    ignore_key_py = repr(req.ignore_key)        # -> True / False (Python)
+
+    script = f"""
+from deephaven import dtypes as dht
+from ingestion import create_live_table
+
+SCHEMA = {schema_py}
+
+_result_name = create_live_table(
+    topic={json.dumps(req.topic)},
+    schema=SCHEMA,
+    alias={alias_py},
+    bootstrap={bootstrap_py},
+    table_type={table_type_py},
+    ignore_key={ignore_key_py},
+)
+print(f"[FASTAPI] created table name = {{_result_name}}")
+"""
+
+    try:
+        dh.run_script(script)      # 0.40.x API – run code in DH
+    except Exception as e:
+        # bubble up the exact DH console error text to help you debug
+        raise HTTPException(status_code=500, detail=f"DH error: {e!s}")
+
+    return {"ok": True, "topic": req.topic, "alias": req.alias or req.topic.replace('.', '_') }
+[10:20 PM, 10/13/2025] Suraj: fast-api-cmds if have to run by any chance:
+
+
+------------------------------------
+
+steps for fast  api installation with venv
+
+1.
+cd /c/Users/suraj/source/pocs/fast-api
+python -m venv fa-venv
+source fa-venv/Scripts/activate
+
+2. create requirements.txt and add these 
+
+fastapi>=0.111
+uvicorn[standard]>=0.30
+pydeephaven==0.40.2
+pydantic>=2.6
+
+3. pip install -r requirements.txt
+
+
+---> note: if the fastapi bat is not responding running properly then run this cmd in powershell
+
+taskkill /F /T /IM uvicorn.exe
+
+How to run (Windows, recommended)
+
+Start Deephaven with your BAT (anonymous/no-auth is fine).
+
+Open PowerShell (not Git Bash) in your FastAPI folder and run:
+
+python -m venv fa-venv
+.\fa-venv\Scripts\Activate.ps1
+pip install fastapi uvicorn pydeephaven==0.40.4 pydantic==2.* 		--> Optional only install for first time
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+
+
+
+
+Running steps in git bash:
+
+1.
+cd ~/source/pocs/fast-api
+source fa-venv/Scripts/activate
+
+
+
+2.
+export DH_HOST=127.0.0.1
+export DH_PORT=10000
+export DH_AUTH=anonymous
+#export DH_PSK=13vtn7oteh4e1   # must match the value DH prints in its URL
+
+# sanity check the var is visible to children:
+python -c "import os; print('PSK=', os.getenv('DH_PSK'))"
+
+3.
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+
