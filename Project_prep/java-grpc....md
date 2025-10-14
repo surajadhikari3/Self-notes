@@ -283,3 +283,100 @@ Content-Type: application/json
     
 
 That’s all you need to accept the endpoint input and create the live table from Java via `ingestion.create_live_table(...)`.
+
+------------------------------
+
+Here’s the **Lombok-based equivalent** for the `record` types we discussed earlier — these are useful if you’re using older Spring versions that don’t support Java 16+ `record` syntax or want more control (e.g. validation, Jackson customization):
+
+---
+
+### ✅ Equivalent Lombok POJOs for `ColumnDto` and `OpenTopicReq`
+
+```java
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import java.util.List;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class ColumnDto {
+    @NotBlank
+    private String name;
+
+    @NotBlank
+    private String dtype;
+}
+```
+
+And:
+
+```java
+import lombok.AllArgsConstructor;
+import lombok.Builder;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
+import java.util.List;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class OpenTopicReq {
+
+    @NotBlank
+    private String topic;
+
+    private String alias;
+
+    @NotEmpty
+    private List<ColumnDto> columns;
+
+    private String bootstrap;   // e.g. "127.0.0.1:19092"
+    private String tableType;   // "append" or "blink"
+    private Boolean ignoreKey;  // defaults true if null
+}
+```
+
+---
+
+### 💡Notes:
+
+- `@Data` → generates getters/setters, equals/hashCode, and toString.
+    
+- `@Builder` → lets you easily construct from your controller or tests.
+    
+- `@NoArgsConstructor` + `@AllArgsConstructor` → required for JSON deserialization by Jackson.
+    
+- `@NotBlank` and `@NotEmpty` keep your validation constraints consistent with the record version.
+    
+
+---
+
+### Example JSON (same as before)
+
+```json
+{
+  "topic": "ccd01_sb_its_esp_tap3507_bishoowcasecurated",
+  "alias": "account_data",
+  "bootstrap": "127.0.0.1:19092",
+  "tableType": "append",
+  "ignoreKey": true,
+  "columns": [
+    { "name": "userId", "dtype": "string" },
+    { "name": "accountType", "dtype": "string" },
+    { "name": "balance", "dtype": "double" }
+  ]
+}
+```
+
+---
+
+Would you like me to show the **`application.yml`** snippet that declares `dh.host`, `dh.port`, and `dh.psk` for this setup (so your `@Value` injections in the service auto-populate)?
