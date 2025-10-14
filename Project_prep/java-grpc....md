@@ -380,3 +380,101 @@ public class OpenTopicReq {
 ---
 
 Would you like me to show the **`application.yml`** snippet that declares `dh.host`, `dh.port`, and `dh.psk` for this setup (so your `@Value` injections in the service auto-populate)?
+
+-------------------------------
+
+Perfect 👍 — here’s the clean, production-ready **`application.yml`** setup for your Spring Boot project so your  
+`DeephavenControlService` can automatically pick up host, port, PSK, and TLS configuration:
+
+---
+
+### 🧩 `src/main/resources/application.yml`
+
+```yaml
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: deephaven-ingestion-api
+
+logging:
+  level:
+    root: INFO
+    com.td.espfc: DEBUG     # <-- your package, optional for local debugging
+    io.deephaven: INFO
+    org.springframework.web: INFO
+
+# ----------------------------------------------------------------------
+# Deephaven connection configuration
+# ----------------------------------------------------------------------
+dh:
+  host: 127.0.0.1         # or "localhost"
+  port: 10000             # matches your Deephaven server port
+  psk: ttg5gyi79tna       # PSK secret printed when DH starts
+  tls: false              # set to true if you enable TLS in Deephaven
+
+# Optional advanced timeout/retry tuning (if you want)
+dh.client:
+  connect-timeout-seconds: 15
+  request-timeout-seconds: 30
+```
+
+---
+
+### ⚙️ How it ties into your service
+
+Your `DeephavenControlService` already includes:
+
+```java
+public DeephavenControlService(
+    @Value("${dh.host:127.0.0.1}") String host,
+    @Value("${dh.port:10000}") int port,
+    @Value("${dh.psk}") String psk,
+    @Value("${dh.tls:false}") boolean useTls) {
+    ...
+}
+```
+
+✅ This automatically resolves values from the YAML above.  
+✅ You can also override them dynamically via environment variables:
+
+```bash
+# Linux / Mac
+export DH_HOST=10.0.0.5
+export DH_PORT=10000
+export DH_PSK=your-secret-here
+export DH_TLS=false
+
+# Windows PowerShell
+$env:DH_HOST="10.0.0.5"
+$env:DH_PORT="10000"
+$env:DH_PSK="your-secret-here"
+$env:DH_TLS="false"
+```
+
+---
+
+### 🧪 Quick sanity check
+
+Run:
+
+```bash
+curl -s -o NUL -w "HTTP %{http_code}\n" -H "Authorization: psk ttg5gyi79tna" -L "http://127.0.0.1:10000/"
+```
+
+→ Should return `HTTP 200`
+
+Then launch your Spring Boot app and POST this:
+
+```bash
+curl -X POST http://localhost:8080/api/dh/topics \
+  -H "Content-Type: application/json" \
+  -d @payload.json
+```
+
+---
+
+Would you like me to include a **`application-dev.yml`** and **`application-prod.yml`** variant too (so you can separate localhost vs deployed Deephaven clusters)?
