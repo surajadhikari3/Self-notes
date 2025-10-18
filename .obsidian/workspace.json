@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Project_prep/java-grpc....md",
+                "file": "vm/windows...md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "java-grpc..."
+              "title": "windows.."
             }
           }
         ]
@@ -196,8 +196,10 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
-    "Project_prep/Stremmm....md",
     "Project_prep/java-grpc....md",
+    "vm/windows...md",
+    "vm",
+    "Project_prep/Stremmm....md",
     "Project_prep/stream-ag.md",
     "interview-prep/Prep Notes.md",
     "interview-prep/Minute pitch.md",
@@ -221,7 +223,6 @@
     "Spring/Spring framework.md",
     "Gems/Microservice Architecture and Concepts.md",
     "Gems/Java basics.md",
-    "Gems/Java 8.md",
     "Pasted image 20250914211139.png",
     "interview-prep",
     "Project_prep/ui/single-user-gap.svg",
@@ -233,7 +234,6 @@
     "debezium-connector-mysql-3.2.0.Final-plugin.tar.gz",
     "mysql-connector-j-8.0.33.jar",
     "debezium-connector-mysql-2.6.1.tar.gz",
-    "debezium-connector-mysql-2.6.1.Final-plugin.tar.gz",
     "Pasted image 20250726182321.png",
     "Pasted image 20250721121945.png",
     "Pasted image 20250710130745.png",
