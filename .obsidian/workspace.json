@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "vm/windows...md",
+                "file": "Celpip/Vocabs and basics.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "windows.."
+              "title": "Vocabs and basics"
             }
           }
         ]
@@ -196,9 +196,10 @@
   },
   "active": "2c21ca8d70617dda",
   "lastOpenFiles": [
+    "vm/windows...md",
+    "Celpip/Vocabs and basics.md",
     "Pasted image 20251018171548.png",
     "Project_prep/java-grpc....md",
-    "vm/windows...md",
     "vm",
     "Project_prep/Stremmm....md",
     "Project_prep/stream-ag.md",
@@ -241,7 +242,6 @@
     "Pasted image 20250710125615.png",
     "Pasted image 20250710125531.png",
     "Pasted image 20250708171734.png",
-    "Pasted image 20250708171659.png",
     "Untitled 2.canvas",
     "Untitled 1.canvas",
     "Untitled.canvas"
