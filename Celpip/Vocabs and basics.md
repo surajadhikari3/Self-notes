@@ -79,6 +79,22 @@ Charlie (No full name in the informal letter.........)
 Formal.....................
 
 
+Dear Mr. Bob,
+
+1. The purpose of my writing today is to inform you about/ lodge a complaint about..
+2. To begin with,  ..........  . On top of that, 
+3. Complex Sentence. Example/Connectors
+4. Overall, Given the aforementioned scenario, 
+5. I am looking forward to seeing how my suggestions translate into  prompt actions  from your side. Your kind cooperation would be most appreciated.
+OR
+Your cooperation in this matter is greatly appreciated.Furthermore, an open line of communication, from your end, in this case would greatly help out.
+
+
+Sincerely,
+Janet Rami
+
+
+
 
 
 
