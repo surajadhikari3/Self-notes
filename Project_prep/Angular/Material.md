@@ -1,6 +1,5 @@
 
 
-You’re very close—the issue is **what you’re styling**.
 
 With Angular Material (MDC, v15+), the snack bar background is controlled on the **container** element  
 `.mat-mdc-snack-bar-container`, not on a free-standing `.success-snackbar` class. Your `panelClass` is added **to the container**, so target it like this (in **`styles.scss`**, not component SCSS):
